@@ -1,0 +1,22 @@
+{
+  "name": "@clawflare/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end tests for Clawflare - deploys worker and tests via TUI",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "test": "node --import=tsx src/index.ts",
+    "deploy": "cd ../harness && npx wrangler deploy",
+    "dev": "cd ../harness && npx wrangler dev",
+    "clean": "rm -f src/index.js tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@clawflare/cli": "workspace:*",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241127.0",
+    "wrangler": "^3.95.0"
+  }
+}

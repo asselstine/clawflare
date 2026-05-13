@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+*.js.map
+
+# Environment variables - NEVER commit these
+.env
+.env.local
+.env.*.local
+.dev.vars
+
+# Wrangler
+.wrangler/
+wrangler.toml
+.dev.vars
+
+# Logs
+*.log
+logs/
+log/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+coverage/
+*.test.ts.snap
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+Thumbs.db
+
+.history

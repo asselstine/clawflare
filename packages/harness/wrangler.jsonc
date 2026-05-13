@@ -1,0 +1,28 @@
+// wrangler.jsonc - Clawflare Harness Configuration
+{
+  "name": "clawflare-harness",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/index.ts",
+
+  // Local dev KV namespaces - these are auto-created in wrangler dev
+  // For production, create real namespaces and update the IDs
+  "kv_namespaces": [
+    {
+      "binding": "SKILLS",
+      "id": "ce0549752cd944bc9a74ec75076fa2f7"
+    },
+    {
+      "binding": "AGENT_STATE",
+      "id": "fd296c5aa01d4d1ba4a5613438466bee"
+    }
+  ],
+
+  // Environment variables (set via wrangler secret put or --var flag)
+  "vars": {
+    "AI_PROVIDER": "amazon-bedrock",
+    "AI_MODEL": "minimax.minimax-m2.5",
+    // Bearer token for Bedrock (set via `wrangler secret put AWS_BEARER_TOKEN_BEDROCK`)
+    // "AWS_BEARER_TOKEN_BEDROCK": ""
+  }
+}
