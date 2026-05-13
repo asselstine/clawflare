@@ -4,10 +4,11 @@
 import { createAgent } from "./agent";
 import { ClawflareDatastore } from "./datastore";
 import { HttpGateway } from "./egress/gateway";
+import { ClawflareAgentWorkflow, getWorkflowStatus } from "./workflow-agent";
 import type { Env, ChatRequest } from "./types";
 
-// Export the Datastore Durable Object class
-export { ClawflareDatastore, HttpGateway };
+// Export the Datastore Durable Object class and Workflow
+export { ClawflareDatastore, HttpGateway, ClawflareAgentWorkflow };
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -93,6 +94,16 @@ export default {
     // Server info endpoint (provides provider/model configuration)
     if (path === "/v1/info" && request.method === "GET") {
       return handleGetInfo(env);
+    }
+
+    // Workflow endpoints for durable agent execution
+    if (path === "/v1/workflow/chat" && request.method === "POST") {
+      return handleWorkflowChat(request, env);
+    }
+
+    if (path.startsWith("/v1/workflow/") && request.method === "GET") {
+      const instanceId = path.replace("/v1/workflow/", "");
+      return handleGetWorkflowStatus(instanceId, env);
     }
 
     return new Response(JSON.stringify({ error: "Not found" }), {
@@ -250,4 +261,64 @@ async function handleWebSocket(ws: WebSocket, env: Env, ctx: ExecutionContext): 
   ws.addEventListener("close", () => {
     // Cleanup if needed
   });
+}
+
+// Handle durable workflow-based chat
+async function handleWorkflowChat(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = (await request.json()) as ChatRequest;
+    
+    // Validate request
+    if (body.type !== "prompt" || !body.content) {
+      return new Response(
+        JSON.stringify({ error: "Invalid request. type='prompt' and content required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Create a context if not provided
+    const contextId = body.contextId || crypto.randomUUID();
+
+    // Trigger workflow instance
+    const instance = await env.AGENT_WORKFLOW.create({
+      params: {
+        contextId,
+        prompt: body.content,
+        maxTurns: 10,
+      },
+    });
+
+    // Return immediately with instance info for polling
+    return new Response(
+      JSON.stringify({
+        type: "workflow_started",
+        instanceId: instance.id,
+        contextId,
+        status: "running",
+        pollUrl: `/v1/workflow/${instance.id}`,
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    );
+  } catch (error) {
+    console.error("[handleWorkflowChat] Error:", error);
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Handle get workflow status
+async function handleGetWorkflowStatus(instanceId: string, env: Env): Promise<Response> {
+  try {
+    const status = await getWorkflowStatus(env, instanceId);
+    return new Response(JSON.stringify(status), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
 }

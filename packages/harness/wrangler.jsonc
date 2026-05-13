@@ -38,6 +38,15 @@
     }
   ],
 
+  // Workflow for durable agent execution
+  "workflows": [
+    {
+      "name": "clawflare-agent-workflow",
+      "binding": "AGENT_WORKFLOW",
+      "class_name": "ClawflareAgentWorkflow"
+    }
+  ],
+
   // Local dev KV namespaces - these are auto-created in wrangler dev
   // For production, create real namespaces and update the IDs
   "kv_namespaces": [

@@ -1,13 +1,13 @@
 // Test-only Worker entrypoint.
 // This file is used by wrangler.test.jsonc and is not imported by the production Worker.
 
-import productionWorker, { ClawflareDatastore, HttpGateway } from "./index";
+import productionWorker, { ClawflareDatastore, HttpGateway, ClawflareAgentWorkflow } from "./index";
 import { getDatastore } from "./datastore";
 import { routeOutboundRequest } from "./egress/gateway";
 import { executeDynamicWorker } from "./runtime/dynamic-worker";
 import type { Env } from "./types";
 
-export { ClawflareDatastore, HttpGateway };
+export { ClawflareDatastore, HttpGateway, ClawflareAgentWorkflow };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {

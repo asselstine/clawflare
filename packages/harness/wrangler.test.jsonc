@@ -34,6 +34,15 @@
     }
   ],
 
+  // Workflow for durable agent execution
+  "workflows": [
+    {
+      "name": "clawflare-agent-workflow-test",
+      "binding": "AGENT_WORKFLOW",
+      "class_name": "ClawflareAgentWorkflow"
+    }
+  ],
+
   "kv_namespaces": [
     {
       "binding": "AGENT_STATE",

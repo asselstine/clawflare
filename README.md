@@ -24,7 +24,7 @@ cp .env.example .env
 
 ### Configuration
 
-The harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as the default AI provider and model. You can customize these via environment variables or wrangler configuration.
+The harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as the default AI provider and model. You can customize these via environment variables or wrangler configuration. `AI_PROVIDER` and `AI_MODEL` are used at runtime to select the actual `pi-ai` provider/model; set the matching provider API key as a Worker secret or local env variable.
 
 #### AI Provider Configuration
 
@@ -35,6 +35,7 @@ The harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as the default AI 
 | `AWS_BEARER_TOKEN_BEDROCK` | - | AWS bearer token for Bedrock authentication |
 | `AWS_REGION` | `us-east-1` | AWS region for Bedrock |
 | `AWS_PROFILE` | - | AWS profile (alternative to bearer token) |
+| Provider API keys | - | For non-Bedrock providers, set the provider's key, e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, etc. |
 
 Setup the AWS bearer token secret:
 
@@ -58,11 +59,14 @@ AI_MODEL=claude-3-5-sonnet-20241022
 
 ### E2E Testing
 
-The project includes comprehensive E2E tests that automatically deploy the harness locally and test all API endpoints:
+The project includes comprehensive E2E tests that deploy a brand-new remote Cloudflare Worker test instance, tag the Worker version as `e2e`, run the API tests against its `workers.dev` URL, then tear down the Worker and temporary KV namespace:
 
 ```bash
-# Run all automated E2E tests (uses mock AI)
+# Run all automated remote E2E tests (uses mock AI)
 pnpm test
+
+# Keep the remote test Worker after tests for debugging
+pnpm test -- --keep-alive
 
 # Expected tests:
 # - Health check (unauthenticated)
@@ -117,16 +121,17 @@ clawflare/
 ├── packages/
 │   ├── cli/          # TUI client for agent communication
 │   ├── harness/      # Cloudflare Worker runtime
-│   └── e2e/          # End-to-end tests
-├── scripts/
-│   └── deploy-test.ts # Deploy and test script
+│   ├── e2e/          # Remote end-to-end tests
+│   ├── egress-core/  # Shared egress handler types/registry
+│   ├── github/       # GitHub egress handler
+│   └── cloudflare/   # Cloudflare API egress handler
 └── package.json
 ```
 
 ### Running Locally
 
 ```bash
-# Development mode (uses mock AI unless CF_API_TOKEN is set)
+# Development mode
 pnpm dev
 
 # Build a specific package

@@ -2,7 +2,7 @@
 // This provides the agent logic that handles prompts, tools, and context
 
 import { Agent, type AgentTool, type AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel, streamSimple, type Model, type BedrockOptions, type Usage } from "@earendil-works/pi-ai";
+import { getModel, getProviders, streamSimple, type Api, type Model, type BedrockOptions, type Usage } from "@earendil-works/pi-ai";
 import type { Env, ChatRequest, ChatResponse, AgentContextData } from "./types";
 import { createTools } from "./tools";
 import { createMockStream, shouldUseMockAI } from "./mock-ai";
@@ -306,29 +306,15 @@ export class ClawflareAgentWrapper {
 export async function createAgent(env: Env, ctx?: ExecutionContext): Promise<ClawflareAgentWrapper> {
   console.log("[createAgent] Starting agent creation...");
   
-  // Get provider and model from environment or use defaults
-  const provider = env.AI_PROVIDER || DEFAULT_PROVIDER;
-  const modelId = env.AI_MODEL || DEFAULT_MODEL_ID;
+  const { provider, modelId, model } = resolveConfiguredModel(env);
   
   console.log(`[AGENT] Using provider: ${provider}, model: ${modelId}`);
   console.log(`[AGENT] MOCK_AI: ${env.MOCK_AI}`);
-  
-  // Tree-shaking: Provider is always "amazon-bedrock" via define substitution
-  // This allows esbuild to eliminate unreachable code branches for other providers
-  const PROVIDER: "amazon-bedrock" = "amazon-bedrock";
-  const MODEL_ID: "minimax.minimax-m2.5" = "minimax.minimax-m2.5";
-  
-  console.log("[createAgent] Getting model...");
-  const model = getModel(PROVIDER, MODEL_ID);
-  if (!model) {
-    throw new Error(`Model not found: ${provider}/${modelId}`);
-  }
-  console.log("[createAgent] Model retrieved successfully");
 
-  // Get API key/bearer token for the provider. Do not fall back to the
-  // Cloudflare API token; Bedrock requires its own credential.
-  const getApiKey = (): Promise<string | undefined> => {
-    return Promise.resolve(normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK));
+  // Get API key/bearer token for the selected provider from Worker env bindings.
+  // pi-ai's process.env helper is not reliable inside Cloudflare Workers.
+  const getApiKey = (requestedProvider?: string): Promise<string | undefined> => {
+    return Promise.resolve(getApiKeyForProvider(env, requestedProvider || provider));
   };
 
   // Create tools
@@ -340,13 +326,16 @@ export async function createAgent(env: Env, ctx?: ExecutionContext): Promise<Cla
   const useMock = shouldUseMockAI(env);
   console.log(`[AGENT] Using mock AI: ${useMock}`);
 
-  // Tree-shaking: Static provider path eliminates dead code for other providers
-  const streamFn = useMock ? createMockStream() : await createBedrockStreaming(env);
+  const streamFn = useMock
+    ? createMockStream()
+    : provider === "amazon-bedrock"
+      ? await createBedrockStreaming(env)
+      : streamSimple;
 
   if (useMock) {
     console.log("[AGENT] Using mock AI mode");
   } else {
-    console.log("[AGENT] Using Amazon Bedrock streaming");
+    console.log(`[AGENT] Using ${provider} streaming`);
   }
 
   // Create the pi-agent-core Agent
@@ -365,8 +354,85 @@ export async function createAgent(env: Env, ctx?: ExecutionContext): Promise<Cla
   return new ClawflareAgentWrapper(agent, env, tools);
 }
 
-// Create Bedrock streaming function - static path for tree-shaking
-// This eliminates code paths for other providers that are never used
+function resolveConfiguredModel(env: Env): { provider: string; modelId: string; model: Model<Api> } {
+  const provider = env.AI_PROVIDER || DEFAULT_PROVIDER;
+  const modelId = env.AI_MODEL || DEFAULT_MODEL_ID;
+
+  if (!getProviders().includes(provider as never)) {
+    throw new Error(`Unknown AI_PROVIDER: ${provider}`);
+  }
+
+  const model = getModel(provider as never, modelId as never) as Model<Api> | undefined;
+  if (!model) {
+    throw new Error(`Model not found: ${provider}/${modelId}`);
+  }
+
+  return { provider, modelId, model };
+}
+
+function getApiKeyForProvider(env: Env, provider: string): string | undefined {
+  switch (provider) {
+    case "amazon-bedrock":
+      return normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK);
+    case "anthropic":
+      return env.ANTHROPIC_OAUTH_TOKEN || env.ANTHROPIC_API_KEY;
+    case "openai":
+      return env.OPENAI_API_KEY;
+    case "azure-openai-responses":
+      return env.AZURE_OPENAI_API_KEY;
+    case "deepseek":
+      return env.DEEPSEEK_API_KEY;
+    case "google":
+      return env.GEMINI_API_KEY;
+    case "google-vertex":
+      return env.GOOGLE_CLOUD_API_KEY;
+    case "groq":
+      return env.GROQ_API_KEY;
+    case "cerebras":
+      return env.CEREBRAS_API_KEY;
+    case "xai":
+      return env.XAI_API_KEY;
+    case "openrouter":
+      return env.OPENROUTER_API_KEY;
+    case "vercel-ai-gateway":
+      return env.AI_GATEWAY_API_KEY;
+    case "zai":
+      return env.ZAI_API_KEY;
+    case "mistral":
+      return env.MISTRAL_API_KEY;
+    case "minimax":
+      return env.MINIMAX_API_KEY;
+    case "minimax-cn":
+      return env.MINIMAX_CN_API_KEY;
+    case "moonshotai":
+    case "moonshotai-cn":
+      return env.MOONSHOT_API_KEY;
+    case "huggingface":
+      return env.HF_TOKEN;
+    case "fireworks":
+      return env.FIREWORKS_API_KEY;
+    case "opencode":
+    case "opencode-go":
+      return env.OPENCODE_API_KEY;
+    case "kimi-coding":
+      return env.KIMI_API_KEY;
+    case "cloudflare-workers-ai":
+    case "cloudflare-ai-gateway":
+      return env.CLOUDFLARE_API_KEY || env.CLOUDFLARE_API_TOKEN;
+    case "xiaomi":
+      return env.XIAOMI_API_KEY;
+    case "xiaomi-token-plan-cn":
+      return env.XIAOMI_TOKEN_PLAN_CN_API_KEY;
+    case "xiaomi-token-plan-ams":
+      return env.XIAOMI_TOKEN_PLAN_AMS_API_KEY;
+    case "xiaomi-token-plan-sgp":
+      return env.XIAOMI_TOKEN_PLAN_SGP_API_KEY;
+    default:
+      return undefined;
+  }
+}
+
+// Create Bedrock streaming function.
 async function createBedrockStreaming(
   env: Env,
 ): Promise<typeof streamSimple> {
