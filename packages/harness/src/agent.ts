@@ -8,8 +8,9 @@ import { createTools, setCloudflareToken, setCloudflareAccountId } from "./tools
 import { createMockStream, shouldUseMockAI } from "./mock-ai";
 
 // Default provider and model configuration
-const DEFAULT_PROVIDER = "amazon-bedrock";
-const DEFAULT_MODEL_ID = "minimax.minimax-m2.5";
+// Tree-shaking: These are inlined for esbuild define substitution
+const DEFAULT_PROVIDER: "amazon-bedrock" = "amazon-bedrock";
+const DEFAULT_MODEL_ID: "minimax.minimax-m2.5" = "minimax.minimax-m2.5";
 
 // Lazy-load Bedrock-specific imports for bearer token auth
 let bedrockModuleImport: typeof import("@earendil-works/pi-ai/bedrock-provider") | undefined;
@@ -228,22 +229,22 @@ export async function createAgent(env: Env): Promise<ClawflareAgentWrapper> {
   console.log(`[AGENT] Using provider: ${provider}, model: ${modelId}`);
   console.log(`[AGENT] MOCK_AI: ${env.MOCK_AI}`);
   
-  // Cast to the specific model ID type for getModel
+  // Tree-shaking: Provider is always "amazon-bedrock" via define substitution
+  // This allows esbuild to eliminate unreachable code branches for other providers
+  const PROVIDER: "amazon-bedrock" = "amazon-bedrock";
+  const MODEL_ID: "minimax.minimax-m2.5" = "minimax.minimax-m2.5";
+  
   console.log("[createAgent] Getting model...");
-  const model = getModel(provider as "amazon-bedrock", modelId as "minimax.minimax-m2.5");
+  const model = getModel(PROVIDER, MODEL_ID);
   if (!model) {
     throw new Error(`Model not found: ${provider}/${modelId}`);
   }
   console.log("[createAgent] Model retrieved successfully");
 
   // Get API key/bearer token for the provider
-  const getApiKey = () => {
-    // For Bedrock, the bearer token is passed via options in streamFn
-    // For other providers, use the appropriate env var
-    if (provider === "amazon-bedrock") {
-      return Promise.resolve(env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN);
-    }
-    return Promise.resolve(env.CLOUDFLARE_API_TOKEN);
+  const getApiKey = (): Promise<string> => {
+    // Always Bedrock bearer token - provider is statically known
+    return Promise.resolve(env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN || "");
   };
 
   // Create tools
@@ -251,19 +252,17 @@ export async function createAgent(env: Env): Promise<ClawflareAgentWrapper> {
   const tools = createTools();
   console.log(`[createAgent] Created ${tools.length} tools`);
 
-  // Choose stream function: mock or real
-  console.log("[createAgent] Checking mock AI mode...");
+  // Check mock mode
   const useMock = shouldUseMockAI(env);
-  console.log(`[createAgent] shouldUseMockAI returned: ${useMock}`);
-  
-  // Create stream function that handles Bedrock-specific options
-  console.log("[createAgent] Creating streaming function...");
-  const streamFn = useMock ? createMockStream() : await createStreamingFunction(env, provider);
+  console.log(`[AGENT] Using mock AI: ${useMock}`);
+
+  // Tree-shaking: Static provider path eliminates dead code for other providers
+  const streamFn = useMock ? createMockStream() : await createBedrockStreaming(env);
 
   if (useMock) {
     console.log("[AGENT] Using mock AI mode");
   } else {
-    console.log("[AGENT] Using real AI mode");
+    console.log("[AGENT] Using Amazon Bedrock streaming");
   }
 
   // Create the pi-agent-core Agent
@@ -282,42 +281,35 @@ export async function createAgent(env: Env): Promise<ClawflareAgentWrapper> {
   return new ClawflareAgentWrapper(agent, env, tools);
 }
 
-// Create a streaming function that handles provider-specific options
-async function createStreamingFunction(
+// Create Bedrock streaming function - static path for tree-shaking
+// This eliminates code paths for other providers that are never used
+async function createBedrockStreaming(
   env: Env,
-  provider: string,
 ): Promise<typeof streamSimple> {
-  console.log(`[createStreamingFunction] Creating stream for provider: ${provider}`);
-  
-  // For Amazon Bedrock, we need to inject the bearer token from env
-  if (provider === "amazon-bedrock") {
-    console.log("[createStreamingFunction] Loading Bedrock module...");
-    const bedrockModule = await getBedrockModule();
-    if (!bedrockModule) {
-      throw new Error("Failed to load Bedrock module");
-    }
-    const { bedrockProviderModule } = bedrockModule;
-    const { streamBedrock } = bedrockProviderModule;
-    console.log("[createStreamingFunction] Bedrock module loaded successfully");
-    
-    return ((m: Model<"bedrock-converse-stream">, ctx: Parameters<typeof streamSimple>[1], opts?: BedrockOptions) => {
-      const bearerToken = env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN;
-      console.log(`[createStreamingFunction] Calling streamBedrock with token length: ${bearerToken?.length || 0}`);
-      const bedrockOptions: BedrockOptions = {
-        ...opts,
-        bearerToken,
-        apiKey: bearerToken,
-        region: env.AWS_REGION || "us-east-1",
-        profile: env.AWS_PROFILE,
-      };
-      return streamBedrock(m, ctx, bedrockOptions);
-    }) as typeof streamSimple;
+  console.log("[createBedrockStreaming] Loading Bedrock module...");
+  const bedrockModule = await getBedrockModule();
+  if (!bedrockModule) {
+    throw new Error("Failed to load Bedrock module");
   }
-  
-  console.log("[createStreamingFunction] Using standard streamSimple");
-  // For other providers, use standard streamSimple
-  return streamSimple;
+  const { bedrockProviderModule } = bedrockModule;
+  const { streamBedrock } = bedrockProviderModule;
+  console.log("[createBedrockStreaming] Bedrock module loaded successfully");
+
+  return ((m: Model<"bedrock-converse-stream">, ctx: Parameters<typeof streamSimple>[1], opts?: BedrockOptions) => {
+    const bearerToken = env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN || "";
+    console.log(`[createBedrockStreaming] Calling streamBedrock with token configured: ${bearerToken.length > 0}`);
+    const bedrockOptions: BedrockOptions = {
+      ...opts,
+      bearerToken,
+      apiKey: bearerToken,
+      region: env.AWS_REGION || "us-east-1",
+      profile: env.AWS_PROFILE,
+    };
+    return streamBedrock(m, ctx, bedrockOptions);
+  }) as typeof streamSimple;
 }
+
+// DEPRECATED: Generic createStreamingFunction removed
 
 function getSystemPrompt(): string {
   return `You are Clawflare, an AI agent that runs on Cloudflare's platform.
