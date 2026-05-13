@@ -70,7 +70,8 @@ pnpm test
 # - Context management (get/create/fork)
 # - Chat/prompt functionality
 # - Tool listing
-# - Skills listing
+# - Stored code and Dynamic Worker execution
+# - Controlled egress
 # - 404 handling
 ```
 
@@ -132,9 +133,18 @@ pnpm dev
 pnpm --filter @clawflare/harness build
 ```
 
-### Adding Tools
+### Tools, Dynamic Code, Egress, and Skills
 
-Tools are defined in `packages/tools/`. Each tool is a function that executes a Cloudflare API call and returns results.
+Clawflare exposes exactly four built-in model-visible tools:
+
+- `execute_code` - run JavaScript in an isolated Dynamic Worker
+- `store_code` - save reusable JavaScript by name
+- `execute_stored_code` - run previously stored JavaScript by name
+- `search` - query stored code and egress handler metadata
+
+Reusable behavior should be saved with `store_code` instead of adding more model-visible tools. Network access from dynamic code is blocked unless an egress handler supports the target domain. GitHub and Cloudflare egress support is provided by `@clawflare/github` and `@clawflare/cloudflare`.
+
+Skills are loaded by the CLI from generic Agent Skills locations (`~/.agents/skills/` and project `.agents/skills/`) and sent to the harness as prompt context.
 
 ### Deploying
 

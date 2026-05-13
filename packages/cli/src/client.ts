@@ -25,7 +25,6 @@ export interface ContextInfo {
   id: string;
   parentId?: string;
   messages: AgentMessage[];
-  skills: string[];
   createdAt: number;
 }
 
@@ -33,12 +32,6 @@ export interface AgentMessage {
   role: "user" | "assistant" | "tool";
   content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
   timestamp: number;
-}
-
-export interface Skill {
-  id: string;
-  name: string;
-  content: string;
 }
 
 export interface ToolInfo {
@@ -72,72 +65,46 @@ export class AgentClient {
     };
   }
 
-  // Helper to add timeout to fetch
+  // Helper to add timeout to fetch - DEPRECATED: Use direct fetch instead
   private async fetchWithTimeout(
     input: string | URL,
     init?: RequestInit,
-    timeoutMs = this.defaultTimeout
+    _timeoutMs?: number
   ): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    
-    try {
-      const response = await fetch(input, {
-        ...init,
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      return response;
-    } catch (error) {
-      clearTimeout(timeoutId);
-      throw error;
-    }
+    return fetch(input, init);
   }
 
   // HTTP methods
-  async chat(request: ChatRequest, timeoutMs?: number, signal?: AbortSignal): Promise<ChatResponse> {
-    const controller = new AbortController();
-    const timeoutId = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
-    
-    // Link external signal if provided
-    if (signal) {
-      signal.addEventListener("abort", () => controller.abort());
+  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+    const response = await fetch(
+      `${this.url}/v1/chat`,
+      {
+        method: "POST",
+        headers: this.getHeaders(),
+        body: JSON.stringify(request),
+        signal: signal,
+      }
+    );
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Chat failed: ${response.status} - ${error}`);
     }
 
-    try {
-      const response = await fetch(
-        `${this.url}/v1/chat`,
-        {
-          method: "POST",
-          headers: this.getHeaders(),
-          body: JSON.stringify(request),
-          signal: controller.signal,
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Chat failed: ${response.status} - ${error}`);
-      }
-
-      const data = await response.json() as ChatResponse;
-      if (data.contextId) {
-        this.currentContextId = data.contextId;
-      }
-      return data;
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
+    const data = await response.json() as ChatResponse;
+    if (data.contextId) {
+      this.currentContextId = data.contextId;
     }
+    return data;
   }
 
-  async getContext(timeoutMs?: number): Promise<ContextInfo> {
-    const response = await this.fetchWithTimeout(
+  async getContext(): Promise<ContextInfo> {
+    const response = await fetch(
       `${this.url}/v1/context`,
       {
         method: "GET",
         headers: this.getHeaders(),
-      },
-      timeoutMs
+      }
     );
 
     if (!response.ok) {
@@ -150,15 +117,14 @@ export class AgentClient {
     return data;
   }
 
-  async createContext(parentId?: string, timeoutMs?: number): Promise<ContextInfo> {
-    const response = await this.fetchWithTimeout(
+  async createContext(parentId?: string): Promise<ContextInfo> {
+    const response = await fetch(
       `${this.url}/v1/context`,
       {
         method: "POST",
         headers: this.getHeaders(),
         body: JSON.stringify({ parentId }),
-      },
-      timeoutMs
+      }
     );
 
     if (!response.ok) {
@@ -183,32 +149,13 @@ export class AgentClient {
     await this.chat({ type: "steer", content: message });
   }
 
-  async listSkills(timeoutMs?: number): Promise<Skill[]> {
-    const response = await this.fetchWithTimeout(
-      `${this.url}/v1/skills`,
-      {
-        method: "GET",
-        headers: this.getHeaders(),
-      },
-      timeoutMs
-    );
-
-    if (!response.ok) {
-      throw new Error(`Failed to list skills: ${response.status}`);
-    }
-
-    const data = await response.json() as { skills: Skill[] };
-    return data.skills || [];
-  }
-
-  async listTools(timeoutMs?: number): Promise<ToolInfo[]> {
-    const response = await this.fetchWithTimeout(
+  async listTools(): Promise<ToolInfo[]> {
+    const response = await fetch(
       `${this.url}/v1/tools`,
       {
         method: "GET",
         headers: this.getHeaders(),
-      },
-      timeoutMs
+      }
     );
 
     if (!response.ok) {
@@ -240,14 +187,13 @@ export class AgentClient {
   }
 
   // Get server info (provider, model, context window)
-  async getServerInfo(timeoutMs?: number): Promise<ServerInfo> {
-    const response = await this.fetchWithTimeout(
+  async getServerInfo(): Promise<ServerInfo> {
+    const response = await fetch(
       `${this.url}/v1/info`,
       {
         method: "GET",
         headers: this.getHeaders(),
-      },
-      timeoutMs
+      }
     );
 
     if (!response.ok) {

@@ -1,323 +1,234 @@
 // Tools for the Clawflare Agent
-// These are the tools that the agent can use to interact with Cloudflare
+// These are the only four model-visible tools
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
+import type { Env, ExecutionResult } from "../types";
+import { getDatastore } from "../datastore";
+import { executeDynamicWorker } from "../runtime/dynamic-worker";
 
-export function createTools(): AgentTool[] {
-  return [
-    createDeployTool(),
-    createExecuteCodeTool(),
-    createListWorkersTool(),
-    createGetWorkerTool(),
-    createCreateKVTool(),
-    createCreateD1Tool(),
-    createListResourcesTool(),
-  ];
+// Tool parameter types
+interface StoreCodeParams {
+  name: string;
+  description?: string;
+  code: string;
 }
 
-interface DeployParams {
+interface ExecuteStoredCodeParams {
   name: string;
-  code: string;
-  description: string;
+  input?: unknown;
 }
 
 interface ExecuteCodeParams {
   code: string;
+  input?: unknown;
 }
 
-interface GetWorkerParams {
-  name: string;
+interface SearchParams {
+  collection?: "stored_code" | "egress_handlers" | "all";
+  query?: string;
+  limit?: number;
 }
 
-interface CreateKVParams {
-  title: string;
+// Name validation - conservative pattern
+const VALID_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+function validateName(name: string): void {
+  if (!VALID_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid name "${name}". Names must match pattern: ${VALID_NAME_PATTERN.source}`
+    );
+  }
 }
 
-interface CreateD1Params {
-  name: string;
+export function createTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
+  return [
+    createStoreCodeTool(env),
+    createExecuteStoredCodeTool(env, ctx),
+    createExecuteCodeTool(env, ctx),
+    createSearchTool(env),
+  ];
 }
 
-// Tool: Deploy a new Tool (creates a new Dynamic Worker)
-function createDeployTool(): AgentTool {
+// Tool: Store code for later execution
+function createStoreCodeTool(env: Env): AgentTool {
   return {
-    name: "deploy_tool",
-    description: "Deploy a new Cloudflare Worker tool. Use this when you need to create a new tool that can be called later.",
-    label: "Deploy Tool",
+    name: "store_code",
+    description:
+      "Store JavaScript code by name for later execution. Use this to save reusable code snippets.",
+    label: "Store Code",
     parameters: Type.Object({
-      name: Type.String({ description: "Name of the tool/worker" }),
-      code: Type.String({ description: "JavaScript code for the tool" }),
-      description: Type.String({ description: "Description of what the tool does" }),
+      name: Type.String({ description: "Name for the code (alphanumeric, hyphens, underscores)" }),
+      description: Type.Optional(Type.String({ description: "Description of what the code does" })),
+      code: Type.String({ description: "JavaScript code to store" }),
     }) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const p = params as DeployParams;
-      
-      // Use the Cloudflare API to create a new Worker
-      const accountId = getAccountId();
-      
-      const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${p.name}`,
-        {
-          method: "PUT",
-          headers: {
-            "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}`,
-            "Content-Type": "application/javascript",
-          },
-          body: p.code,
-        }
-      );
+    execute: async (
+      _toolCallId: string,
+      params: Static<TSchema>,
+      _signal?: AbortSignal
+    ): Promise<AgentToolResult<unknown>> => {
+      const p = params as StoreCodeParams;
 
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`Failed to deploy: ${error}`);
-      }
+      validateName(p.name);
+
+      const datastore = getDatastore(env);
+      await datastore.upsertStoredCode({
+        name: p.name,
+        description: p.description || "",
+        code: p.code,
+      });
 
       return {
-        content: [{ type: "text", text: `Successfully deployed tool: ${p.name}` }],
-        details: { name: p.name, status: "deployed" },
+        content: [{ type: "text", text: `Stored code "${p.name}".` }],
+        details: { name: p.name, description: p.description },
       };
     },
   };
 }
 
-// Tool: Execute code in a dynamic worker
-function createExecuteCodeTool(): AgentTool {
+// Tool: Execute previously stored code
+function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
+  return {
+    name: "execute_stored_code",
+    description:
+      "Execute previously stored JavaScript code by name. The code runs in an isolated Dynamic Worker.",
+    label: "Execute Stored Code",
+    parameters: Type.Object({
+      name: Type.String({ description: "Name of the stored code to execute" }),
+      input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
+    }) as TSchema,
+    execute: async (
+      _toolCallId: string,
+      params: Static<TSchema>,
+      _signal?: AbortSignal
+    ): Promise<AgentToolResult<unknown>> => {
+      const p = params as ExecuteStoredCodeParams;
+
+      validateName(p.name);
+
+      const datastore = getDatastore(env);
+      const stored = await datastore.getStoredCode(p.name);
+
+      if (!stored) {
+        throw new Error(`Code "${p.name}" not found. Use store_code to save it first.`);
+      }
+
+      const result = await executeDynamicWorker(env, ctx, stored.code, p.input);
+
+      return formatExecutionResult(result);
+    },
+  };
+}
+
+// Tool: Execute code inline
+function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
   return {
     name: "execute_code",
-    description: "Execute JavaScript code in an isolated Cloudflare Worker. Use this to run code that doesn't need to be deployed as a persistent tool.",
+    description:
+      "Execute JavaScript code in an isolated Dynamic Worker. Use this for one-off code execution.",
     label: "Execute Code",
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript code to execute" }),
+      input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
     }) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
+    execute: async (
+      _toolCallId: string,
+      params: Static<TSchema>,
+      _signal?: AbortSignal
+    ): Promise<AgentToolResult<unknown>> => {
       const p = params as ExecuteCodeParams;
-      
-      // For now, we'll return the code as a simulation
-      // In production, you'd use Cloudflare Codemode or a sandboxed execution environment
-      return {
-        content: [{ type: "text", text: `Code prepared for execution:\n${p.code}` }],
-        details: { code: p.code, mode: "simulation" },
-      };
+
+      const result = await executeDynamicWorker(env, ctx, p.code, p.input);
+
+      return formatExecutionResult(result);
     },
   };
 }
 
-// Tool: List existing Workers
-function createListWorkersTool(): AgentTool {
+// Tool: Search stored code and egress handlers
+function createSearchTool(env: Env): AgentTool {
   return {
-    name: "list_workers",
-    description: "List all Cloudflare Workers in your account.",
-    label: "List Workers",
-    parameters: Type.Object({}) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, _params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const accountId = getAccountId();
-      const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers`,
-        {
-          headers: { "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}` },
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
-      }
-
-      const data = await response.json() as { result: unknown[] };
-      
-      return {
-        content: [{ type: "text", text: `Workers: ${JSON.stringify(data.result, null, 2)}` }],
-        details: { workers: data.result },
-      };
-    },
-  };
-}
-
-// Tool: Get Worker details
-function createGetWorkerTool(): AgentTool {
-  return {
-    name: "get_worker",
-    description: "Get details about a specific Cloudflare Worker.",
-    label: "Get Worker",
+    name: "search",
+    description:
+      "Search stored code and egress handlers. Use this to find reusable code or check which network domains are supported before attempting outbound HTTP.",
+    label: "Search",
     parameters: Type.Object({
-      name: Type.String({ description: "Name of the worker" }),
+      collection: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("stored_code", { description: "Search stored code only" }),
+            Type.Literal("egress_handlers", { description: "Search egress handlers only" }),
+            Type.Literal("all", { description: "Search both collections" }),
+          ],
+          { description: "Collection to search" }
+        )
+      ),
+      query: Type.Optional(Type.String({ description: "Search query string" })),
+      limit: Type.Optional(Type.Number({ description: "Maximum results to return (max 20)" })),
     }) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const p = params as GetWorkerParams;
-      const accountId = getAccountId();
-      const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${p.name}`,
-        {
-          headers: { "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}` },
-        }
-      );
+    execute: async (
+      _toolCallId: string,
+      params: Static<TSchema>,
+      _signal?: AbortSignal
+    ): Promise<AgentToolResult<unknown>> => {
+      const p = params as SearchParams;
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status}`);
+      const collection = p.collection || "all";
+      const limit = Math.min(p.limit || 20, 20); // Cap at 20
+
+      const datastore = getDatastore(env);
+      const results = await datastore.search(collection, p.query, limit);
+
+      const lines: string[] = [];
+
+      if (collection === "stored_code" || collection === "all") {
+        lines.push(`Stored Code (${results.storedCode.length}):`);
+        for (const code of results.storedCode) {
+          lines.push(`  - ${code.name}: ${code.description || "(no description)"}`);
+          lines.push(`    updated: ${new Date(code.updatedAt).toISOString()}`);
+        }
+        if (results.storedCode.length === 0) {
+          lines.push("  (none found)");
+        }
       }
 
-      const data = await response.json() as { result: unknown };
-      return {
-        content: [{ type: "text", text: `Worker Details: ${JSON.stringify(data.result, null, 2)}` }],
-        details: { worker: data.result },
-      };
-    },
-  };
-}
-
-// Tool: Create a KV namespace
-function createCreateKVTool(): AgentTool {
-  return {
-    name: "create_kv",
-    description: "Create a new KV namespace.",
-    label: "Create KV",
-    parameters: Type.Object({
-      title: Type.String({ description: "Title of the KV namespace" }),
-    }) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const p = params as CreateKVParams;
-      const accountId = getAccountId();
-      const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ title: p.title }),
+      if (collection === "egress_handlers" || collection === "all") {
+        lines.push(`Egress Handlers (${results.egressHandlers.length}):`);
+        for (const handler of results.egressHandlers) {
+          lines.push(`  - ${handler.name}: ${handler.description || "(no description)"}`);
+          lines.push(`    enabled: ${handler.enabled}`);
+          lines.push(`    domains: ${handler.domains.join(", ")}`);
         }
-      );
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`API error: ${error}`);
+        if (results.egressHandlers.length === 0) {
+          lines.push("  (none found)");
+        }
       }
 
-      const data = await response.json() as { result: { id: string } };
       return {
-        content: [{ type: "text", text: `Created KV namespace: ${data.result.id}` }],
-        details: { namespaceId: data.result.id, title: p.title },
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: results,
       };
     },
   };
 }
 
-// Tool: Create a D1 database
-function createCreateD1Tool(): AgentTool {
-  return {
-    name: "create_d1",
-    description: "Create a new D1 database.",
-    label: "Create D1",
-    parameters: Type.Object({
-      name: Type.String({ description: "Name of the D1 database" }),
-    }) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const p = params as CreateD1Params;
-      const accountId = getAccountId();
-      const response = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`,
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ name: p.name }),
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.text();
-        throw new Error(`API error: ${error}`);
-      }
-
-      const data = await response.json() as { result: { uuid: string } };
-      return {
-        content: [{ type: "text", text: `Created D1 database: ${data.result.uuid}` }],
-        details: { databaseId: data.result.uuid, name: p.name },
-      };
-    },
-  };
-}
-
-// Tool: List Cloudflare resources
-function createListResourcesTool(): AgentTool {
-  return {
-    name: "list_resources",
-    description: "List all Cloudflare resources (Workers, KV, D1, R2, etc.) in your account.",
-    label: "List Resources",
-    parameters: Type.Object({}) as TSchema,
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    execute: async (_toolCallId: string, _params: Static<TSchema>, _signal?: AbortSignal): Promise<AgentToolResult<any>> => {
-      const accountId = getAccountId();
-      const resources: Record<string, unknown> = {};
-
-      // List Workers
-      try {
-        const workersRes = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers`,
-          { headers: { "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}` } }
-        );
-        if (workersRes.ok) {
-          const workersData = await workersRes.json() as { result: unknown[] };
-          resources.workers = workersData.result;
-        }
-      } catch { /* ignore */ }
-
-      // List KV namespaces
-      try {
-        const kvRes = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${accountId}/storage/kv/namespaces`,
-          { headers: { "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}` } }
-        );
-        if (kvRes.ok) {
-          const kvData = await kvRes.json() as { result: unknown[] };
-          resources.kv = kvData.result;
-        }
-      } catch { /* ignore */ }
-
-      // List D1 databases
-      try {
-        const d1Res = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database`,
-          { headers: { "Authorization": `Bearer ${CLOUDFLARE_API_TOKEN}` } }
-        );
-        if (d1Res.ok) {
-          const d1Data = await d1Res.json() as { result: unknown[] };
-          resources.d1 = d1Data.result;
-        }
-      } catch { /* ignore */ }
-
-      return {
-        content: [{ type: "text", text: `Resources:\n${JSON.stringify(resources, null, 2)}` }],
-        details: { resources },
-      };
-    },
-  };
-}
-
-// Helper functions - these would be injected via env in production
-let CLOUDFLARE_API_TOKEN = "";
-let CLOUDFLARE_ACCOUNT_ID = "";
-
-export function setCloudflareToken(token: string): void {
-  CLOUDFLARE_API_TOKEN = token;
-}
-
-export function setCloudflareAccountId(accountId: string): void {
-  CLOUDFLARE_ACCOUNT_ID = accountId;
-}
-
-function getAccountId(): string {
-  if (!CLOUDFLARE_ACCOUNT_ID || CLOUDFLARE_ACCOUNT_ID === "YOUR_ACCOUNT_ID") {
-    throw new Error("CLOUDFLARE_ACCOUNT_ID is not configured. Set via wrangler secret put CLOUDFLARE_ACCOUNT_ID");
+// Format execution result for the agent
+function formatExecutionResult(result: ExecutionResult): AgentToolResult<unknown> {
+  if (result.ok) {
+    const text = result.result !== undefined 
+      ? `Result: ${JSON.stringify(result.result, null, 2)}`
+      : "Code executed successfully.";
+    
+    return {
+      content: [{ type: "text", text }],
+      details: result,
+    };
+  } else {
+    const text = result.error ? `Error: ${result.error}` : "Unknown error during execution.";
+    return {
+      content: [{ type: "text", text }],
+      details: result,
+    };
   }
-  return CLOUDFLARE_ACCOUNT_ID;
 }

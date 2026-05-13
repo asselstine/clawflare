@@ -9,9 +9,13 @@
     "dev": "node scripts/dev.mjs",
     "dev:raw": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@clawflare/cloudflare": "workspace:*",
+    "@clawflare/egress-core": "workspace:*",
+    "@clawflare/github": "workspace:*",
     "@earendil-works/pi-agent-core": "^0.74.0",
     "@earendil-works/pi-ai": "^0.74.0",
     "zod": "^3.23.0"

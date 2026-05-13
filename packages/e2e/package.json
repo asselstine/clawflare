@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "node --import=tsx src/index.ts",
     "deploy": "cd ../harness && npx wrangler deploy",
     "dev": "cd ../harness && npx wrangler dev",

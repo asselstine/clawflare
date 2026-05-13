@@ -2,7 +2,12 @@
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
 import { createAgent } from "./agent";
+import { ClawflareDatastore } from "./datastore";
+import { HttpGateway } from "./egress/gateway";
 import type { Env, ChatRequest } from "./types";
+
+// Export the Datastore Durable Object class
+export { ClawflareDatastore, HttpGateway };
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -27,7 +32,7 @@ function authenticate(request: Request, env: Env): Response | null {
 
 // Handle HTTP requests
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     // Log all request details for debugging
     console.log(`[REQUEST] ${request.method} ${request.url}`);
     console.log(`[ENV] CLAWFLARE_API_TOKEN exists: ${!!env.CLAWFLARE_API_TOKEN}`);
@@ -62,42 +67,32 @@ export default {
       const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
       
       // Handle the WebSocket connection
-      handleWebSocket(server, env).catch(console.error);
+      handleWebSocket(server, env, ctx).catch(console.error);
       
       return new Response(null, { status: 101, webSocket: client });
     }
 
     // REST API endpoints
     if (path === "/v1/chat" && request.method === "POST") {
-      return handleChat(request, env);
+      return handleChat(request, env, ctx);
     }
 
     if (path === "/v1/context" && request.method === "GET") {
-      return handleGetContext(env);
+      return handleGetContext(env, ctx);
     }
 
     if (path === "/v1/context" && request.method === "POST") {
-      return handleNewContext(request, env);
-    }
-
-    if (path === "/v1/skills" && request.method === "GET") {
-      return handleListSkills(env);
+      return handleNewContext(request, env, ctx);
     }
 
     if (path === "/v1/tools" && request.method === "GET") {
-      return handleListTools(env);
+      return handleListTools(env, ctx);
     }
+
 
     // Server info endpoint (provides provider/model configuration)
     if (path === "/v1/info" && request.method === "GET") {
       return handleGetInfo(env);
-    }
-
-    // Health check (no auth required for simplicity in dev)
-    if (path === "/health") {
-      return new Response(JSON.stringify({ status: "ok" }), {
-        headers: { "Content-Type": "application/json" },
-      });
     }
 
     return new Response(JSON.stringify({ error: "Not found" }), {
@@ -108,10 +103,10 @@ export default {
 };
 
 // Handle chat requests via REST API
-async function handleChat(request: Request, env: Env): Promise<Response> {
+async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     const body = (await request.json()) as ChatRequest;
-    const agent = await createAgent(env);
+    const agent = await createAgent(env, ctx);
     const response = await agent.chat(body);
 
     return new Response(JSON.stringify(response), {
@@ -126,10 +121,10 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
 }
 
 // Handle get context
-async function handleGetContext(env: Env): Promise<Response> {
+async function handleGetContext(env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     console.log("[handleGetContext] Creating agent...");
-    const agent = await createAgent(env);
+    const agent = await createAgent(env, ctx);
     console.log("[handleGetContext] Getting context...");
     const context = await agent.getContext();
     console.log("[handleGetContext] Context retrieved successfully");
@@ -146,10 +141,10 @@ async function handleGetContext(env: Env): Promise<Response> {
 }
 
 // Handle new context creation
-async function handleNewContext(request: Request, env: Env): Promise<Response> {
+async function handleNewContext(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
     const body = (await request.json()) as { parentId?: string };
-    const agent = await createAgent(env);
+    const agent = await createAgent(env, ctx);
     const context = await agent.createContext(body.parentId);
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
@@ -162,32 +157,10 @@ async function handleNewContext(request: Request, env: Env): Promise<Response> {
   }
 }
 
-// Handle list skills
-async function handleListSkills(env: Env): Promise<Response> {
-  try {
-    const list = await env.SKILLS.list();
-    const skills = await Promise.all(
-      list.keys.map(async (key) => {
-        const value = await env.SKILLS.get(key.name);
-        return value ? JSON.parse(value) : null;
-      })
-    );
-    return new Response(
-      JSON.stringify({ skills: skills.filter(Boolean) }),
-      { headers: { "Content-Type": "application/json" } }
-    );
-  } catch (error) {
-    return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
-
 // Handle list tools
-async function handleListTools(env: Env): Promise<Response> {
+async function handleListTools(env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
-    const agent = await createAgent(env);
+    const agent = await createAgent(env, ctx);
     const tools = await agent.getTools();
     return new Response(JSON.stringify({ tools }), {
       headers: { "Content-Type": "application/json" },
@@ -206,11 +179,20 @@ async function handleGetInfo(env: Env): Promise<Response> {
     const provider = env.AI_PROVIDER || "amazon-bedrock";
     const model = env.AI_MODEL || "minimax.minimax-m2.5";
     const contextWindow = 128000; // Default context window for minimax-m2.5
+    const rawBedrockToken = env.AWS_BEARER_TOKEN_BEDROCK || "";
+    const normalizedBedrockToken = normalizeBedrockBearerToken(rawBedrockToken);
     
     return new Response(JSON.stringify({ 
       provider, 
       model, 
-      contextWindow 
+      contextWindow,
+      bedrockAuth: {
+        configured: normalizedBedrockToken.length > 0,
+        rawLength: rawBedrockToken.length,
+        normalizedLength: normalizedBedrockToken.length,
+        hadBearerPrefix: /^\s*Bearer\s+/i.test(rawBedrockToken),
+        fingerprint: normalizedBedrockToken ? await sha256Prefix(normalizedBedrockToken) : undefined,
+      },
     }), {
       headers: { "Content-Type": "application/json" },
     });
@@ -222,11 +204,27 @@ async function handleGetInfo(env: Env): Promise<Response> {
   }
 }
 
+function normalizeBedrockBearerToken(token: string): string {
+  const trimmed = token.trim();
+  if (!trimmed) return "";
+  const unquoted = trimmed.replace(/^(?:["'])(.*)(?:["'])$/, "$1").trim();
+  return unquoted.replace(/^Bearer\s+/i, "").trim();
+}
+
+async function sha256Prefix(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash))
+    .slice(0, 8)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // Handle WebSocket connections
-async function handleWebSocket(ws: WebSocket, env: Env): Promise<void> {
+async function handleWebSocket(ws: WebSocket, env: Env, ctx: ExecutionContext): Promise<void> {
   ws.accept();
 
-  const agent = await createAgent(env);
+  const agent = await createAgent(env, ctx);
 
   ws.addEventListener("message", async (event) => {
     try {

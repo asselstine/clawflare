@@ -1,0 +1,48 @@
+// wrangler.test.jsonc - Clawflare Harness test-only configuration
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "clawflare-harness-test",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/test-index.ts",
+
+  "minify": false,
+  "define": {
+    "process.env.NODE_ENV": "\"test\"",
+    "__DEV__": "true"
+  },
+
+  "worker_loaders": [
+    {
+      "binding": "LOADER"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DATASTORE",
+        "class_name": "ClawflareDatastore"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ClawflareDatastore"]
+    }
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "AGENT_STATE",
+      "id": "fd296c5aa01d4d1ba4a5613438466bee"
+    }
+  ],
+
+  "vars": {
+    "AI_PROVIDER": "amazon-bedrock",
+    "AI_MODEL": "minimax.minimax-m2.5"
+  }
+}

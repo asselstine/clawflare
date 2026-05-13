@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc --build",
+    "typecheck": "tsc --noEmit",
     "dev": "tsc --watch",
     "start": "node --import=tsx src/index.ts",
     "clean": "rm -rf dist"

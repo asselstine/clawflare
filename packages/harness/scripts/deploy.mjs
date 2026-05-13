@@ -16,7 +16,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, "..", "wrangler.jsonc");
 
 const KV_NAMESPACES = [
-  { binding: "SKILLS", placeholder: "local-skills-namespace-id" },
   { binding: "AGENT_STATE", placeholder: "local-agent-state-namespace-id" },
 ];
 

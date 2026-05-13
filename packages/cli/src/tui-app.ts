@@ -19,6 +19,7 @@ import {
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
 import type { AgentClient, ChatResponse, ContextInfo, ToolInfo, ServerInfo } from "./client.js";
+import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
 
@@ -105,14 +106,17 @@ export class ClawflareTUIApp {
   private loader?: Loader;
 
   // State
-  private messages: Array<{ role: "user" | "assistant" | "error"; content: string; usage?: { totalTokens: number; input: number; output: number } }> = [];
+  private messages: Array<{ role: "user" | "assistant" | "error"; content: string; usage?: { totalTokens: number; input: number; output: number }; expanded?: boolean }> = [];
   private contextId: string = "";
   private sessionName: string = "new";
   private isLoading = false;
   private error: string | null = null;
+  private selectedMessageIndex: number = -1;
   private serverInfo: { url: string; provider?: string; model?: string; contextTotal?: number } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
+  private skills: AgentSkill[] = [];
+  private skillsPrompt = "";
 
   // Estimate tokens using Pi's approach: chars/4 (conservative overestimate)
   private estimateTokens(text: string): number {
@@ -189,6 +193,18 @@ export class ClawflareTUIApp {
         this.abortCurrentOperation();
         return { consume: true };
       }
+      if (matchesKey(data, "ctrl+o")) {
+        this.toggleExpandSelectedMessage();
+        return { consume: true };
+      }
+      if (matchesKey(data, "up")) {
+        this.selectPreviousMessage();
+        return { consume: true };
+      }
+      if (matchesKey(data, "down")) {
+        this.selectNextMessage();
+        return { consume: true };
+      }
       return undefined;
     });
 
@@ -206,6 +222,9 @@ export class ClawflareTUIApp {
   private async loadInitialData(): Promise<void> {
     this.setStatus("Connecting...", "yellow");
     try {
+      this.skills = loadSkills();
+      this.skillsPrompt = formatSkillsForPrompt(this.skills);
+
       // Fetch server info (provider, model, context window)
       const serverInfo = await this.client.getServerInfo();
       this.serverInfo.provider = serverInfo.provider;
@@ -258,23 +277,31 @@ export class ClawflareTUIApp {
     }
 
     // Add each message
-    for (const msg of this.messages) {
+    for (let i = 0; i < this.messages.length; i++) {
+      const msg = this.messages[i]!;
+      const isSelected = i === this.selectedMessageIndex;
       const prefix = msg.role === "user" ? "❱ " : msg.role === "assistant" ? "🤖 " : "⚠ ";
       const colorFn =
         msg.role === "user" ? theme.user : msg.role === "assistant" ? theme.assistant : theme.error;
 
-      // Truncate long messages for display (show first 500 chars, with indicator if truncated)
+      // Show full content if selected+expanded, otherwise truncate
       let displayContent = msg.content;
       const maxLen = 500;
       const wasTruncated = displayContent.length > maxLen;
-      if (wasTruncated) {
-        displayContent = displayContent.substring(0, maxLen) + "... (truncated, press Ctrl+O to expand)";
+      const isExpanded = isSelected && msg.expanded;
+      
+      if (wasTruncated && !isExpanded) {
+        displayContent = displayContent.substring(0, maxLen) + "\n" + theme.dim("(truncated, press Ctrl+O to expand)");
       }
+
+      // Add selection indicator if selected
+      const indicator = isSelected ? theme.accent("▶ ") : "  ";
+
       // Use full-width block with background for user messages, plain text for others
       if (msg.role === "user") {
-        this.messageContainer.addChild(createUserBlock(colorFn(prefix + displayContent)));
+        this.messageContainer.addChild(createUserBlock(colorFn(indicator + prefix + displayContent)));
       } else {
-        this.messageContainer.addChild(createText(colorFn(prefix + displayContent)));
+        this.messageContainer.addChild(createText(colorFn(indicator + prefix + displayContent)));
       }
     }
 
@@ -376,14 +403,18 @@ export class ClawflareTUIApp {
       return;
     }
 
+    this.sendPrompt(trimmed, this.withSkillsSummary(trimmed));
+  }
+
+  private sendPrompt(displayContent: string, actualContent: string): void {
     // Don't allow new messages while loading
     if (this.isLoading) return;
 
     // Clear editor
     this.editor.setText("");
 
-    // Add user message
-    this.messages.push({ role: "user", content: trimmed });
+    // Add user message. For expanded skills, displayContent intentionally hides full SKILL.md content.
+    this.messages.push({ role: "user", content: displayContent });
     this.isLoading = true;
     this.error = null;
     this.renderMessages();
@@ -391,15 +422,15 @@ export class ClawflareTUIApp {
 
     // Create abort controller for this request
     this.abortController = new AbortController();
+    const requestAbortController = this.abortController;
 
     // Fire off the chat request with abort support
     this.client.chat(
-      { type: "prompt", content: trimmed, contextId: this.contextId },
-      30000, // 30 second timeout
-      this.abortController.signal
+      { type: "prompt", content: actualContent, contextId: this.contextId },
+      requestAbortController.signal
     ).then((response) => {
       // Track usage for context calculation
-      let assistantMessageIndex = this.messages.length;
+      const assistantMessageIndex = this.messages.length;
       if (response.type === "error") {
         this.messages.push({ role: "error", content: response.content });
       } else {
@@ -419,8 +450,8 @@ export class ClawflareTUIApp {
         messageIndex: assistantMessageIndex
       };
     }).catch((e) => {
-      if (e instanceof Error && e.name === "AbortError") {
-        // Request was aborted - already handled in abortCurrentOperation
+      if (e instanceof Error && e.name === "AbortError" && requestAbortController.signal.aborted) {
+        // Request was aborted by the user - already handled in abortCurrentOperation.
         return;
       }
       this.error = e instanceof Error ? e.message : "Unknown error";
@@ -429,13 +460,20 @@ export class ClawflareTUIApp {
       this.isLoading = false;
       this.abortController = null;
       this.renderMessages();
-      // Only show Ready if there was no error
+      // Only show Ready if there was no error and the user did not abort.
       if (this.error) {
         this.setStatus("Error", "red");
+      } else if (requestAbortController.signal.aborted) {
+        this.setStatus("Aborted", "yellow");
       } else {
         this.setStatus("Ready", "green");
       }
     });
+  }
+
+  private withSkillsSummary(prompt: string): string {
+    if (!this.skillsPrompt) return prompt;
+    return `${this.skillsPrompt}\n\n${prompt}`;
   }
 
   private abortCurrentOperation(): void {
@@ -449,12 +487,51 @@ export class ClawflareTUIApp {
     }
   }
 
+  private toggleExpandSelectedMessage(): void {
+    // If no message selected, select the last one
+    if (this.selectedMessageIndex < 0 && this.messages.length > 0) {
+      this.selectedMessageIndex = this.messages.length - 1;
+      // Don't expand - just select so user can see what's selected
+    } else if (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.messages.length) {
+      // Toggle expansion
+      const msg = this.messages[this.selectedMessageIndex]!;
+      msg.expanded = !msg.expanded;
+    }
+    this.renderMessages();
+  }
+
+  private selectPreviousMessage(): void {
+    if (this.messages.length === 0) return;
+    this.selectedMessageIndex = Math.max(0, this.selectedMessageIndex - 1);
+    this.renderMessages();
+  }
+
+  private selectNextMessage(): void {
+    if (this.messages.length === 0) return;
+    this.selectedMessageIndex = Math.min(this.messages.length - 1, this.selectedMessageIndex + 1);
+    this.renderMessages();
+  }
+
   private handleSlashCommand(command: string, args: string): void {
     // Clear the editor after slash command
     this.editor.setText("");
 
     // Fire and forget - use void to suppress unhandled promise warning
     void (async () => {
+      if (command.startsWith("skill:")) {
+        const skillName = command.slice("skill:".length);
+        const skill = this.skills.find((candidate) => candidate.name === skillName);
+        if (!skill) {
+          this.error = `Unknown skill: ${skillName}`;
+          this.renderMessages();
+          this.setStatus(`Unknown skill: ${skillName}`, "red");
+          return;
+        }
+        const display = `⚙ skill: ${skill.name}${args ? ` ${args}` : ""}`;
+        this.sendPrompt(display, this.withSkillsSummary(expandSkill(skill, args)));
+        return;
+      }
+
       switch (command) {
         case "new":
           this.setStatus("Creating new context...", "yellow");
@@ -510,7 +587,7 @@ export class ClawflareTUIApp {
         case "tools":
           this.setStatus("Loading tools...", "yellow");
           try {
-            const tools = await this.client.listTools(5000);
+            const tools = await this.client.listTools();
             const toolList = tools.map((t) => `- ${t.name}: ${t.description}`).join("\n");
             this.messages.push({
               role: "assistant",
@@ -539,13 +616,16 @@ export class ClawflareTUIApp {
 /fork - Fork the current context
 /name <name> - Name the current session
 /tools - List available tools
+/skill:<name> [args] - Invoke a local Agent Skill
 /clear - Clear chat history
 /exit - Exit the CLI
 /help - Show this help message
 
 Shortcuts:
 Ctrl+C - Quit
-Esc - Abort current operation`,
+Esc - Abort current operation
+↑/↓ - Select message
+Ctrl+O - Expand/collapse selected message`,
           });
           this.renderMessages();
           break;

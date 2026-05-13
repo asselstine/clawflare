@@ -115,6 +115,7 @@ async function deployLocal(): Promise<{ process: ChildProcess; url: string; port
     // Build wrangler dev args - include Cloudflare token if available
     const wranglerArgs = [
       "exec", "wrangler", "dev",
+      "--config", "wrangler.test.jsonc",
       "--port", String(port),
       "--local",
       "--var", `CLAWFLARE_API_TOKEN:${TEST_TOKEN}`,
@@ -438,16 +439,145 @@ async function runTests(url: string, token: string): Promise<void> {
     if (!Array.isArray(tools)) {
       throw new Error("Tools not returned as array");
     }
+    
+    // Verify exactly the four expected tools
+    const toolNames = tools.map(t => t.name).sort();
+    const expectedTools = ["execute_code", "execute_stored_code", "search", "store_code"].sort();
+    
+    if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
+      throw new Error(`Expected tools: ${JSON.stringify(expectedTools)}, got: ${JSON.stringify(toolNames)}`);
+    }
+    
+    // Verify old tools are NOT present
+    const oldTools = ["deploy_tool", "list_workers", "get_worker", "create_kv", "create_d1", "list_resources"];
+    for (const oldTool of oldTools) {
+      if (tools.some(t => t.name === oldTool)) {
+        throw new Error(`Old tool should not be present: ${oldTool}`);
+      }
+    }
+    
     console.log(`\n   Available tools: ${tools.length}`);
     for (const tool of tools) {
       console.log(`   - ${tool.name}: ${tool.description.substring(0, 50)}...`);
     }
   });
 
-  await runner.runTest("List skills", async () => {
-    const skills = await client.listSkills();
-    if (!Array.isArray(skills)) {
-      throw new Error("Skills not returned as array");
+  // === Skills endpoint removal ===
+  await runner.runTest("Skills endpoint removed", async () => {
+    const response = await fetch(`${url}/v1/skills`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    if (response.status !== 404) {
+      throw new Error(`Expected /v1/skills to return 404, got ${response.status}`);
+    }
+  });
+
+  // === Stored Code and Dynamic Worker Tests ===
+  await runner.runTest("execute_code runs inline Dynamic Worker code", async () => {
+    const response = await fetch(`${url}/__test/execute-code`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ code: "return { message: 'ok', input };", input: { value: 42 } }),
+    });
+    const data = await response.json() as { ok: boolean; result?: { message?: string; input?: { value?: number } }; error?: string };
+    if (!data.ok || data.result?.message !== "ok" || data.result?.input?.value !== 42) {
+      throw new Error(`Unexpected execute_code result: ${JSON.stringify(data)}`);
+    }
+  });
+
+  await runner.runTest("store_code stores reusable code", async () => {
+    const response = await fetch(`${url}/__test/store-code`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "double_number",
+        description: "Doubles a numeric input",
+        code: "return input.value * 2;",
+      }),
+    });
+    const data = await response.json() as { ok: boolean; error?: string };
+    if (!data.ok) throw new Error(`store_code failed: ${JSON.stringify(data)}`);
+  });
+
+  await runner.runTest("search finds stored code metadata", async () => {
+    const response = await fetch(`${url}/__test/search?collection=stored_code&q=double`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    const data = await response.json() as { ok: boolean; results?: { storedCode: Array<{ name: string; code?: string }> } };
+    const found = data.results?.storedCode.find((item) => item.name === "double_number");
+    if (!data.ok || !found) throw new Error(`Stored code not found: ${JSON.stringify(data)}`);
+    if (found.code) throw new Error("Search should not return stored code body");
+  });
+
+  await runner.runTest("execute_stored_code runs named code", async () => {
+    const response = await fetch(`${url}/__test/execute-stored-code`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "double_number", input: { value: 21 } }),
+    });
+    const data = await response.json() as { ok: boolean; result?: number; error?: string };
+    if (!data.ok || data.result !== 42) {
+      throw new Error(`Unexpected execute_stored_code result: ${JSON.stringify(data)}`);
+    }
+  });
+
+  // === Egress Tests ===
+  await runner.runTest("search finds GitHub and Cloudflare egress handlers", async () => {
+    const githubResponse = await fetch(`${url}/__test/search?collection=egress_handlers&q=api.github.com`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    const github = await githubResponse.json() as { results?: { egressHandlers: Array<{ name: string }> } };
+    if (!github.results?.egressHandlers.some((handler) => handler.name === "github")) {
+      throw new Error(`GitHub handler not found: ${JSON.stringify(github)}`);
+    }
+
+    const cloudflareResponse = await fetch(`${url}/__test/search?collection=egress_handlers&q=api.cloudflare.com`, {
+      headers: { "Authorization": `Bearer ${token}` },
+    });
+    const cloudflare = await cloudflareResponse.json() as { results?: { egressHandlers: Array<{ name: string }> } };
+    if (!cloudflare.results?.egressHandlers.some((handler) => handler.name === "cloudflare")) {
+      throw new Error(`Cloudflare handler not found: ${JSON.stringify(cloudflare)}`);
+    }
+  });
+
+  await runner.runTest("unsupported egress is blocked", async () => {
+    const response = await fetch(`${url}/__test/execute-code`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        code: "const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() };",
+      }),
+    });
+    const data = await response.json() as { ok: boolean; result?: { status?: number }; error?: string };
+    if (data.ok && data.result?.status !== 403) {
+      throw new Error(`Expected unsupported egress to be blocked, got: ${JSON.stringify(data)}`);
+    }
+  });
+
+  await runner.runTest("gateway delegates matching egress handler", async () => {
+    const response = await fetch(`${url}/__test/egress-fetch`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ url: "https://api.github.com" }),
+    });
+    const data = await response.json() as { ok: boolean; status?: number; body?: { handler?: string }; error?: string };
+    if (!data.ok || data.status !== 200 || data.body?.handler !== "github") {
+      throw new Error(`Expected GitHub egress handler delegation, got: ${JSON.stringify(data)}`);
     }
   });
 

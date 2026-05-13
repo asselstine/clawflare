@@ -2,15 +2,27 @@
 // This provides the agent logic that handles prompts, tools, and context
 
 import { Agent, type AgentTool, type AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel, streamSimple, type Model, type BedrockOptions } from "@earendil-works/pi-ai";
+import { getModel, streamSimple, type Model, type BedrockOptions, type Usage } from "@earendil-works/pi-ai";
 import type { Env, ChatRequest, ChatResponse, AgentContextData } from "./types";
-import { createTools, setCloudflareToken, setCloudflareAccountId } from "./tools";
+import { createTools } from "./tools";
 import { createMockStream, shouldUseMockAI } from "./mock-ai";
 
 // Default provider and model configuration
 // Tree-shaking: These are inlined for esbuild define substitution
 const DEFAULT_PROVIDER: "amazon-bedrock" = "amazon-bedrock";
 const DEFAULT_MODEL_ID: "minimax.minimax-m2.5" = "minimax.minimax-m2.5";
+
+function normalizeBedrockBearerToken(token: string | undefined): string | undefined {
+  const trimmed = token?.trim();
+  if (!trimmed) return undefined;
+
+  // Accept the common copy/paste forms: raw token, `Bearer <token>`, or a
+  // quoted value from a shell/.env snippet. AWS SDK's httpBearerAuth adds the
+  // `Bearer` scheme itself, so passing `Bearer ...` as the token produces an
+  // invalid `Authorization: Bearer Bearer ...` header.
+  const unquoted = trimmed.replace(/^(?:["'])(.*)(?:["'])$/, "$1").trim();
+  return unquoted.replace(/^Bearer\s+/i, "").trim() || undefined;
+}
 
 // Lazy-load Bedrock-specific imports for bearer token auth
 let bedrockModuleImport: typeof import("@earendil-works/pi-ai/bedrock-provider") | undefined;
@@ -72,12 +84,11 @@ export class ClawflareAgentWrapper {
   async getContext(): Promise<AgentContextData> {
     // Get current context from KV
     const stateJson = await this.env.AGENT_STATE.get(this.currentContextId);
-    const state = stateJson ? JSON.parse(stateJson) : { messages: [], skills: [] };
+    const state = stateJson ? JSON.parse(stateJson) : { messages: [] };
     
     return {
       id: this.currentContextId,
       messages: state.messages || [],
-      skills: state.skills || [],
       createdAt: state.createdAt || Date.now(),
     };
   }
@@ -88,7 +99,6 @@ export class ClawflareAgentWrapper {
       id: contextId,
       parentId,
       messages: [],
-      skills: [],
       createdAt: Date.now(),
     };
 
@@ -107,39 +117,104 @@ export class ClawflareAgentWrapper {
     const context = await this.getContext();
     this.agent.state.messages = [...context.messages];
 
-    // Set up a promise to capture the final response
+    // Capture text from both streaming updates and final messages. Some providers
+    // do not populate the final message exactly the same way, so keep a robust
+    // fallback instead of returning a misleading "No response received".
     let finalResponse = "";
+    let finalUsage: Usage | undefined;
+    let turnCount = 0;
+
+    const captureAssistantMessage = (message: AgentMessage | undefined): void => {
+      if (message?.role !== "assistant") return;
+
+      const text = this.extractAssistantText(message);
+      if (text) {
+        finalResponse = text;
+      }
+      finalUsage = message.usage;
+    };
 
     const unsubscribe = this.agent.subscribe(async (event) => {
-      if (event.type === "message_end") {
-        // Get the complete message from the event
-        const lastMessage = event.message;
-        if (lastMessage && lastMessage.role === "assistant" && Array.isArray(lastMessage.content)) {
-          finalResponse = lastMessage.content
-            .filter((c): c is { type: "text"; text: string } => c.type === "text")
-            .map(c => c.text)
-            .join("");
-        }
+      if (event.type === "turn_start") {
+        turnCount++;
+        console.log(`[AGENT] Turn ${turnCount} started`);
       }
+
+      if (event.type === "message_update") {
+        const assistantEvent = event.assistantMessageEvent;
+        if (assistantEvent.type === "text_delta") {
+          finalResponse += assistantEvent.delta;
+        } else if (assistantEvent.type === "text_end") {
+          finalResponse = assistantEvent.content;
+        }
+        captureAssistantMessage(event.message);
+      }
+
+      if (event.type === "message_end") {
+        captureAssistantMessage(event.message);
+      }
+
       if (event.type === "agent_end") {
+        captureAssistantMessage(this.findLastAssistantMessage(event.messages));
         // Save updated messages back to KV after the agent finishes
         await this.saveContext();
       }
     });
 
-    try {
-      // Run the agent with the prompt
-      await this.agent.prompt(content);
+    // Cloudflare Workers have a 30-second HTTP timeout.
+    // Set a slightly shorter timeout to ensure we can return a proper error message.
+    const WORKER_TIMEOUT_MS = 28000; // 28 seconds
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
-      // Wait for the agent to complete
-      await this.agent.waitForIdle();
+    try {
+      // Create a timeout promise that rejects if execution takes too long
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Request timed out after ${WORKER_TIMEOUT_MS / 1000}s. The agent took too many turns (${turnCount} completed). Cloudflare Workers have a 30s HTTP timeout - consider using WebSockets for complex multi-turn operations.`));
+        }, WORKER_TIMEOUT_MS);
+      });
+
+      // Run the agent with the prompt, racing against timeout
+      const promptPromise = this.agent.prompt(content);
+      await Promise.race([promptPromise, timeoutPromise]);
+
+      // Wait for the agent to complete (also with timeout protection)
+      const idlePromise = this.agent.waitForIdle();
+      await Promise.race([idlePromise, timeoutPromise]);
+
+      // Clear timeout since we completed successfully
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+
+      const lastAssistant = this.findLastAssistantMessage(this.agent.state.messages);
+      captureAssistantMessage(lastAssistant);
+
+      const errorMessage = this.agent.state.errorMessage || lastAssistant?.errorMessage;
+      if (!finalResponse && errorMessage) {
+        return {
+          type: "error",
+          content: `Error: ${errorMessage}`,
+          contextId: this.currentContextId,
+          usage: finalUsage,
+        };
+      }
 
       return {
         type: "message",
         content: finalResponse || "(No response received)",
         contextId: this.currentContextId,
+        usage: finalUsage,
       };
     } catch (error) {
+      // Clear timeout if it hasn't fired yet
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      
+      // Abort the agent to stop any ongoing work
+      try {
+        this.agent.abort();
+      } catch {
+        // Ignore abort errors
+      }
+      
       console.error("Prompt error:", error);
       return {
         type: "error",
@@ -151,11 +226,28 @@ export class ClawflareAgentWrapper {
     }
   }
 
+  private extractAssistantText(message: AgentMessage): string {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) {
+      return "";
+    }
+
+    return message.content
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+  }
+
+  private findLastAssistantMessage(messages: AgentMessage[]): Extract<AgentMessage, { role: "assistant" }> | undefined {
+    return messages
+      .slice()
+      .reverse()
+      .find((message): message is Extract<AgentMessage, { role: "assistant" }> => message.role === "assistant");
+  }
+
   private async saveContext(): Promise<void> {
     const context: AgentContextData = {
       id: this.currentContextId,
       messages: this.agent.state.messages,
-      skills: [],
       createdAt: Date.now(),
     };
     await this.env.AGENT_STATE.put(this.currentContextId, JSON.stringify(context));
@@ -211,17 +303,9 @@ export class ClawflareAgentWrapper {
 }
 
 // Create the agent instance
-export async function createAgent(env: Env): Promise<ClawflareAgentWrapper> {
+export async function createAgent(env: Env, ctx?: ExecutionContext): Promise<ClawflareAgentWrapper> {
   console.log("[createAgent] Starting agent creation...");
   
-  // Set the Cloudflare token for tools
-  console.log("[createAgent] Setting Cloudflare token...");
-  setCloudflareToken(env.CLOUDFLARE_API_TOKEN);
-  
-  // Set the Cloudflare account ID for tools
-  console.log("[createAgent] Setting Cloudflare account ID...");
-  setCloudflareAccountId(env.CLOUDFLARE_ACCOUNT_ID);
-
   // Get provider and model from environment or use defaults
   const provider = env.AI_PROVIDER || DEFAULT_PROVIDER;
   const modelId = env.AI_MODEL || DEFAULT_MODEL_ID;
@@ -241,15 +325,15 @@ export async function createAgent(env: Env): Promise<ClawflareAgentWrapper> {
   }
   console.log("[createAgent] Model retrieved successfully");
 
-  // Get API key/bearer token for the provider
-  const getApiKey = (): Promise<string> => {
-    // Always Bedrock bearer token - provider is statically known
-    return Promise.resolve(env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN || "");
+  // Get API key/bearer token for the provider. Do not fall back to the
+  // Cloudflare API token; Bedrock requires its own credential.
+  const getApiKey = (): Promise<string | undefined> => {
+    return Promise.resolve(normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK));
   };
 
   // Create tools
   console.log("[createAgent] Creating tools...");
-  const tools = createTools();
+  const tools = createTools(env, ctx);
   console.log(`[createAgent] Created ${tools.length} tools`);
 
   // Check mock mode
@@ -295,9 +379,15 @@ async function createBedrockStreaming(
   const { streamBedrock } = bedrockProviderModule;
   console.log("[createBedrockStreaming] Bedrock module loaded successfully");
 
+  const bearerToken = normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK);
+  if (!bearerToken && !env.AWS_PROFILE) {
+    throw new Error(
+      "AWS_BEARER_TOKEN_BEDROCK is not configured. Set it with: cd packages/harness && npx wrangler secret put AWS_BEARER_TOKEN_BEDROCK"
+    );
+  }
+
   return ((m: Model<"bedrock-converse-stream">, ctx: Parameters<typeof streamSimple>[1], opts?: BedrockOptions) => {
-    const bearerToken = env.AWS_BEARER_TOKEN_BEDROCK || env.CLOUDFLARE_API_TOKEN || "";
-    console.log(`[createBedrockStreaming] Calling streamBedrock with token configured: ${bearerToken.length > 0}`);
+    console.log(`[createBedrockStreaming] Calling streamBedrock with token configured: ${!!bearerToken}, token length: ${bearerToken?.length || 0}`);
     const bedrockOptions: BedrockOptions = {
       ...opts,
       bearerToken,
@@ -314,14 +404,14 @@ async function createBedrockStreaming(
 function getSystemPrompt(): string {
   return `You are Clawflare, an AI agent that runs on Cloudflare's platform.
 
-You can:
-- Create and deploy new Cloudflare Workers
-- Execute code in dynamic workers
-- Manage Cloudflare resources (D1, KV, R2, etc.)
-- Store and retrieve skills from the skills store
+You have exactly four tools:
+- execute_code: Run JavaScript in an isolated Dynamic Worker.
+- store_code: Save reusable JavaScript by name.
+- execute_stored_code: Run previously stored JavaScript by name.
+- search: Query available stored code, egress handlers, and other indexed records.
 
-When you need to create a new tool, use the deploy_tool tool.
-When you need to execute code, use the execute_code tool.
+Network egress from executed code is controlled by a gateway. Before relying on outbound HTTP, use search to inspect supported egress handlers/domains. Unsupported outbound requests are blocked.
 
+Prefer storing reusable code when it will save tokens in future turns.
 Be helpful, concise, and focus on getting tasks done efficiently.`;
 }
