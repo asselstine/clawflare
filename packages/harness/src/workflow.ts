@@ -1,6 +1,5 @@
 // Clawflare Workflow Agent - durable, workflow-native agent execution.
-// The Workflow owns the loop; Agent performs one replayable
-// transition at a time: prompt, assistant step, tool step, complete turn.
+// The Workflow owns persistence; Agent decides what steps to run.
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
 import type { Env, ChatRequest, ChatResponse } from "./types";
 import { createTools } from "./tools";
@@ -18,10 +17,19 @@ import {
   Agent,
   createEmptyAgentSession,
   type AgentSessionState,
-  type AssistantStepResult,
-  type CompleteTurnResult,
-  type ToolStepResult,
+  type NextStepInfo,
+  type RunStepResult,
 } from "./agent";
+import {
+  sessionKey,
+  workflowKey,
+  loadSession,
+  saveSession,
+  loadWorkflow,
+  saveWorkflow,
+  appendAgentEvents,
+  appendWorkflowProgress,
+} from "./workflow-state";
 
 export interface WorkflowProgressEvent {
   timestamp: number;
@@ -65,14 +73,17 @@ export interface WorkflowStatusResponse {
   response?: ChatResponse;
 }
 
-interface WorkflowStepState {
+interface InitializedState {
   session: AgentSessionState;
   workflow: DurableAgentWorkflow;
+  firstStep?: NextStepInfo;
 }
 
-type AssistantWorkflowStepResult = AssistantStepResult & { workflow: DurableAgentWorkflow };
-type ToolWorkflowStepResult = ToolStepResult & { workflow: DurableAgentWorkflow };
-type CompleteWorkflowStepResult = CompleteTurnResult & { workflow: DurableAgentWorkflow };
+interface StepExecutionResult {
+  session: AgentSessionState;
+  workflow: DurableAgentWorkflow;
+  nextStep?: NextStepInfo;
+}
 
 const DEFAULT_MAX_TURNS = 20;
 
@@ -133,46 +144,30 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
     const { sessionId, prompt, maxTurns = DEFAULT_MAX_TURNS } = event.payload;
     const workflowId = event.instanceId;
 
-    let { session, workflow } = (await step.do("initialize", async (): Promise<any> => {
-      const components = await buildAgentComponents(this.env, this.ctx);
-      const existingSession = await loadOrCreateSession(
-        this.env,
-        sessionId,
-        components.model,
-        getSystemPrompt(),
-      );
+    // Initialize once
+    const initResult = (await step.do(
+      "initialize",
+      async (): Promise<any> => {
+        return this.initializeWorkflow(sessionId, prompt, workflowId, maxTurns);
+      },
+    )) as InitializedState;
 
-      const workflow: DurableAgentWorkflow = {
-        id: workflowId,
-        sessionId,
-        status: "running",
-        turnCount: 0,
-        maxTurns,
-        progress: [
-          {
-            timestamp: Date.now(),
-            sequence: 1,
-            type: "workflow",
-            summary: "Workflow initialized",
-          },
-        ],
-      };
+    // Early exit if no work to do (shouldn't happen in practice)
+    if (!initResult.firstStep) {
+      return this.finalizeWorkflow(initResult.workflow, false);
+    }
 
-      const agent = createWorkflowAgent(components);
-      const initialized = agent.enqueuePrompt(existingSession, prompt);
-      const nextWorkflow = appendAgentEvents(workflow, initialized.events);
+    // Main execution loop - Workflow knows NOTHING about step internals
+    let currentStep: NextStepInfo | undefined = initResult.firstStep;
+    let currentSession = initResult.session;
+    let currentWorkflow = initResult.workflow;
+    let stepCount = 0;
 
-      await saveSession(this.env, initialized.session);
-      await saveWorkflow(this.env, nextWorkflow);
+    while (currentStep && currentWorkflow.turnCount < currentWorkflow.maxTurns) {
+      stepCount++;
 
-      return { session: initialized.session, workflow: nextWorkflow };
-    })) as WorkflowStepState;
-
-    while (workflow.status === "running" && workflow.turnCount < workflow.maxTurns) {
-      const turnIndex = workflow.turnCount + 1;
-
-      const assistantResult = (await step.do(
-        `turn-${turnIndex}-assistant`,
+      const result = await step.do(
+        currentStep.stepId,
         {
           retries: {
             limit: 3,
@@ -182,213 +177,189 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
           timeout: "2 minutes",
         },
         async (): Promise<any> => {
-          const components = await buildAgentComponents(this.env, this.ctx);
-          const agent = createWorkflowAgent(components);
-
-          const loadedSession = await loadSession(this.env, session.id);
-          const loadedWorkflow = await loadWorkflow(this.env, workflow.id);
-
-          const result = await agent.runAssistantStep(loadedSession);
-          const nextWorkflow = appendAgentEvents(loadedWorkflow, result.events);
-          await saveSession(this.env, result.session);
-          await saveWorkflow(this.env, nextWorkflow);
-
-          return { ...result, workflow: nextWorkflow };
+          return this.executeStep(currentSession, currentWorkflow, currentStep!);
         },
-      )) as AssistantWorkflowStepResult;
+      );
 
-      session = assistantResult.session;
-      workflow = assistantResult.workflow;
+      const stepResult = result as StepExecutionResult;
+      currentSession = stepResult.session;
+      currentWorkflow = stepResult.workflow;
+      currentStep = stepResult.nextStep;;
 
-      for (const toolCall of assistantResult.toolCalls) {
-        const toolResult = (await step.do(
-          `turn-${turnIndex}-tool-${safeStepName(toolCall.id)}`,
-          {
-            retries: {
-              limit: 3,
-              delay: "5 seconds",
-              backoff: "exponential",
-            },
-            timeout: "2 minutes",
-          },
-          async (): Promise<any> => {
-            const components = await buildAgentComponents(this.env, this.ctx);
-            const agent = createWorkflowAgent(components);
-
-            const loadedSession = await loadSession(this.env, session.id);
-            const loadedWorkflow = await loadWorkflow(this.env, workflow.id);
-
-            const result = await agent.runToolStep(loadedSession, toolCall.id);
-            const nextWorkflow = appendAgentEvents(loadedWorkflow, result.events);
-            await saveSession(this.env, result.session);
-            await saveWorkflow(this.env, nextWorkflow);
-
-            return { ...result, workflow: nextWorkflow };
-          },
-        )) as ToolWorkflowStepResult;
-
-        session = toolResult.session;
-        workflow = toolResult.workflow;
+      // Exit on error
+      if (currentWorkflow.status === "error") {
+        break;
       }
-
-      const completion = (await step.do(`turn-${turnIndex}-complete`, async (): Promise<any> => {
-        const components = await buildAgentComponents(this.env, this.ctx);
-        const agent = createWorkflowAgent(components);
-
-        const loadedSession = await loadSession(this.env, session.id);
-        const loadedWorkflow = await loadWorkflow(this.env, workflow.id);
-
-        const result = agent.completeTurn(loadedSession);
-        let nextWorkflow = appendAgentEvents(loadedWorkflow, result.events);
-        nextWorkflow = updateWorkflowAfterTurn(nextWorkflow, result);
-        await saveSession(this.env, result.session);
-        await saveWorkflow(this.env, nextWorkflow);
-
-        return { ...result, workflow: nextWorkflow };
-      })) as CompleteWorkflowStepResult;
-
-      session = completion.session;
-      workflow = completion.workflow;
-
-      if (completion.shouldStop) break;
     }
 
-    const finalWorkflow = (await step.do("finalize", async (): Promise<any> => {
-      const loadedSession = await loadSession(this.env, session.id);
-      const loadedWorkflow = await loadWorkflow(this.env, workflow.id);
-
-      let nextWorkflow = loadedWorkflow;
-      let nextSession = loadedSession;
-
-      if (nextWorkflow.turnCount >= nextWorkflow.maxTurns && nextWorkflow.status === "running") {
-        nextWorkflow = {
-          ...nextWorkflow,
-          status: "error",
-          errorMessage: `Exceeded maximum turns (${nextWorkflow.maxTurns})`,
-        };
-        nextWorkflow = appendWorkflowProgress(nextWorkflow, {
-          type: "error",
-          summary: nextWorkflow.errorMessage!,
-        });
-        nextSession = {
-          ...nextSession,
-          status: "error",
-          errorMessage: nextWorkflow.errorMessage,
-          updatedAt: Date.now(),
-        };
-      }
-
-      if (nextWorkflow.status === "running") {
-        nextWorkflow = appendWorkflowProgress(
-          { ...nextWorkflow, status: "idle" },
-          {
-            type: "workflow",
-            summary: "Workflow completed",
-          },
-        );
-      }
-
-      await saveSession(this.env, nextSession);
-      await saveWorkflow(this.env, nextWorkflow);
-
-      return nextWorkflow;
-    })) as DurableAgentWorkflow;
+    // Finalize
+    const finalWorkflow = await step.do("finalize", async (): Promise<DurableAgentWorkflow> => {
+      const loadedWorkflow = await loadWorkflow(this.env, currentWorkflow.id);
+      return this.finalizeWorkflow(
+        loadedWorkflow,
+        currentWorkflow.turnCount >= maxTurns && loadedWorkflow.status === "running",
+      );
+    });
 
     return finalWorkflow;
   }
-}
 
-function appendWorkflowProgress(
-  workflow: DurableAgentWorkflow,
-  event: Omit<WorkflowProgressEvent, "timestamp" | "sequence">,
-): DurableAgentWorkflow {
-  const sequence = (workflow.progress.at(-1)?.sequence ?? 0) + 1;
-  return {
-    ...workflow,
-    progress: [...workflow.progress, { ...event, timestamp: Date.now(), sequence }].slice(-100),
-  };
-}
-
-function appendAgentEvents(
-  workflow: DurableAgentWorkflow,
-  events: AgentEvent[],
-): DurableAgentWorkflow {
-  return events.reduce(
-    (nextWorkflow, event) => appendWorkflowProgress(nextWorkflow, summarizeAgentEvent(event)),
-    workflow,
-  );
-}
-
-function summarizeAgentEvent(event: AgentEvent): Omit<WorkflowProgressEvent, "timestamp" | "sequence"> {
-  const type = event.type.startsWith("tool_")
-    ? "tool"
-    : event.type.startsWith("message_")
-      ? "message"
-      : event.type.startsWith("turn_")
-        ? "turn"
-        : event.type.startsWith("agent_")
-          ? "agent"
-          : "workflow";
-
-  return { type, summary: agentEventSummary(event), event };
-}
-
-function agentEventSummary(event: AgentEvent): string {
-  switch (event.type) {
-    case "agent_start":
-      return "Agent run started";
-    case "agent_end":
-      return "Agent run completed";
-    case "turn_start":
-      return "Turn started";
-    case "turn_end":
-      return "Turn completed";
-    case "message_start":
-      return `${event.message.role} message started`;
-    case "message_update":
-      return `${event.message.role} message updated`;
-    case "message_end":
-      return `${event.message.role} message recorded`;
-    case "tool_execution_start":
-      return `Running ${event.toolName}`;
-    case "tool_execution_update":
-      return `${event.toolName} updated`;
-    case "tool_execution_end":
-      return `${event.toolName} ${event.isError ? "failed" : "completed"}`;
-  }
-}
-
-function updateWorkflowAfterTurn(
-  workflow: DurableAgentWorkflow,
-  result: CompleteTurnResult,
-): DurableAgentWorkflow {
-  if (result.session.status === "error") {
-    return appendWorkflowProgress(
-      {
-        ...workflow,
-        turnCount: result.completedTurnIndex,
-        status: "error",
-        errorMessage: result.session.errorMessage,
-      },
-      {
-        type: "error",
-        summary: result.session.errorMessage || "Assistant turn failed",
-      },
+  private async initializeWorkflow(
+    sessionId: string,
+    prompt: string,
+    workflowId: string,
+    maxTurns: number,
+  ): Promise<InitializedState> {
+    const components = await buildAgentComponents(this.env, this.ctx);
+    const existingSession = await loadOrCreateSession(
+      this.env,
+      sessionId,
+      components.model,
+      getSystemPrompt(),
     );
+
+    const workflow: DurableAgentWorkflow = {
+      id: workflowId,
+      sessionId,
+      status: "running",
+      turnCount: 0,
+      maxTurns,
+      progress: [
+        {
+          timestamp: Date.now(),
+          sequence: 1,
+          type: "workflow",
+          summary: "Workflow initialized",
+        },
+      ],
+    };
+
+    const agent = createWorkflowAgent(components);
+    const initialized = agent.enqueuePrompt(existingSession, prompt);
+    const nextWorkflow = appendAgentEvents(workflow, initialized.events);
+
+    await saveSession(this.env, initialized.session);
+    await saveWorkflow(this.env, nextWorkflow);
+
+    // Let the agent determine what step to run next
+    const firstStep = agent.determineNextStep(initialized.session);
+
+    return { session: initialized.session, workflow: nextWorkflow, firstStep };
   }
 
-  if (result.shouldStop) {
+  private async executeStep(
+    session: AgentSessionState,
+    workflow: DurableAgentWorkflow,
+    stepInfo: NextStepInfo,
+  ): Promise<StepExecutionResult> {
+    const components = await buildAgentComponents(this.env, this.ctx);
+    const agent = createWorkflowAgent(components);
+
+    const [loadedSession, loadedWorkflow] = await Promise.all([
+      loadSession(this.env, session.id),
+      loadWorkflow(this.env, workflow.id),
+    ]);
+
+    // Single call to Agent - it decides what happens
+    const stepResult = await agent.runSingleStep(loadedSession, stepInfo);
+
+    // Apply agent events to workflow
+    let nextWorkflow = appendAgentEvents(loadedWorkflow, stepResult.events);
+
+    // Update workflow state based on step result
+    nextWorkflow = this.updateWorkflowAfterStep(nextWorkflow, stepResult);
+
+    await saveSession(this.env, stepResult.session);
+    await saveWorkflow(this.env, nextWorkflow);
+
     return {
-      ...workflow,
-      turnCount: result.completedTurnIndex,
-      status: "idle",
+      session: stepResult.session,
+      workflow: nextWorkflow,
+      nextStep: stepResult.nextStep,
     };
   }
 
-  return {
-    ...workflow,
-    turnCount: result.completedTurnIndex,
-  };
+  private updateWorkflowAfterStep(
+    workflow: DurableAgentWorkflow,
+    result: RunStepResult,
+  ): DurableAgentWorkflow {
+    // Update turn count on complete steps
+    if (result.nextStep?.type === "assistant") {
+      // Check if this completed a turn and we're starting a new one
+      const currentTurn = workflow.turnCount;
+      const completedTurnIndex = this.extractTurnIndex(result.nextStep.stepId);
+      if (completedTurnIndex && completedTurnIndex > currentTurn) {
+        return { ...workflow, turnCount: completedTurnIndex };
+      }
+    }
+
+    // Handle error state
+    if (result.session.status === "error") {
+      return {
+        ...workflow,
+        status: "error",
+        errorMessage: result.session.errorMessage || "Agent error",
+      };
+    }
+
+    return workflow;
+  }
+
+  private extractTurnIndex(stepId: string): number | undefined {
+    const match = stepId.match(/^turn-(\d+)-/);
+    return match ? parseInt(match[1]!, 10) : undefined;
+  }
+
+  private async finalizeWorkflow(
+    workflow: DurableAgentWorkflow,
+    exceededMaxTurns: boolean,
+  ): Promise<DurableAgentWorkflow> {
+    let nextWorkflow = workflow;
+    let nextSession: AgentSessionState | undefined;
+
+    // Load session if we might need to update it
+    try {
+      nextSession = await loadSession(this.env, workflow.sessionId);
+    } catch {
+      // Session might not exist in edge cases
+    }
+
+    if (exceededMaxTurns && workflow.status === "running") {
+      const errorMessage = `Exceeded maximum turns (${workflow.maxTurns})`;
+      nextWorkflow = {
+        ...nextWorkflow,
+        status: "error",
+        errorMessage,
+      };
+      nextWorkflow = appendWorkflowProgress(nextWorkflow, {
+        type: "error",
+        summary: errorMessage,
+      });
+
+      if (nextSession) {
+        nextSession = {
+          ...nextSession,
+          status: "error",
+          errorMessage,
+          updatedAt: Date.now(),
+        };
+        await saveSession(this.env, nextSession);
+      }
+    }
+
+    if (nextWorkflow.status === "running") {
+      nextWorkflow = appendWorkflowProgress(
+        { ...nextWorkflow, status: "idle" },
+        {
+          type: "workflow",
+          summary: "Workflow completed",
+        },
+      );
+    }
+
+    await saveWorkflow(this.env, nextWorkflow);
+    return nextWorkflow;
+  }
 }
 
 function createWorkflowAgent(components: BuildAgentComponentsResult): Agent {
@@ -446,18 +417,6 @@ async function loadOrCreateSession(
   return session;
 }
 
-async function loadSession(env: Env, sessionId: string): Promise<AgentSessionState> {
-  const raw = await env.AGENT_SESSION.get(sessionKey(sessionId));
-  if (!raw) throw new Error(`Session not found: ${sessionId}`);
-  return JSON.parse(raw) as AgentSessionState;
-}
-
-async function loadWorkflow(env: Env, workflowId: string): Promise<DurableAgentWorkflow> {
-  const raw = await env.AGENT_SESSION.get(workflowKey(workflowId));
-  if (!raw) throw new Error(`Workflow not found: ${workflowId}`);
-  return JSON.parse(raw) as DurableAgentWorkflow;
-}
-
 function normalizeSession(
   value: Partial<AgentSessionState> & { messages?: AgentSessionState["messages"] },
   sessionId: string,
@@ -474,32 +433,6 @@ function normalizeSession(
     systemPrompt,
     messages: value.messages ?? [],
   });
-}
-
-async function saveSession(env: Env, session: AgentSessionState): Promise<void> {
-  const serialized = JSON.stringify({
-    ...session,
-    updatedAt: Date.now(),
-  });
-  await env.AGENT_SESSION.put(sessionKey(session.id), serialized);
-  // Keep the historic unprefixed context key readable by /v1/context and older clients.
-  await env.AGENT_SESSION.put(session.id, serialized);
-}
-
-async function saveWorkflow(env: Env, workflow: DurableAgentWorkflow): Promise<void> {
-  await env.AGENT_SESSION.put(workflowKey(workflow.id), JSON.stringify(workflow));
-}
-
-function sessionKey(sessionId: string): string {
-  return `session:${sessionId}`;
-}
-
-function workflowKey(workflowId: string): string {
-  return `workflow:${workflowId}`;
-}
-
-function safeStepName(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
 }
 
 export async function getWorkflowStatus(

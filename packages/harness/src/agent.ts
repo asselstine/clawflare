@@ -79,6 +79,23 @@ export interface CompleteTurnResult extends AgentStepResult {
   shouldStop: boolean;
 }
 
+// Workflow step types for decoupled execution
+export type StepType = "assistant" | "tool" | "complete" | "finalize";
+
+export interface NextStepInfo {
+  type: StepType;
+  stepId: string;
+  displayName: string;
+  toolCallId?: string;
+}
+
+export interface RunStepResult extends AgentStepResult {
+  session: AgentSessionState;
+  nextStep?: NextStepInfo;
+  shouldContinue: boolean;
+  shouldStop: boolean;
+}
+
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
   return messages.filter(
     (message): message is Message =>
@@ -538,5 +555,111 @@ export class Agent {
 
   pendingToolCalls(session: AgentSessionState): AgentToolCallState[] {
     return unsatisfiedToolCalls(session);
+  }
+
+  /**
+   * Determine what step should run next based on current session state.
+   * Returns undefined if the agent is done (idle or error state).
+   */
+  determineNextStep(session: AgentSessionState): NextStepInfo | undefined {
+    // Check for error state
+    if (session.status === "error") {
+      return undefined;
+    }
+
+    // Check for pending tool calls first
+    const pending = unsatisfiedToolCalls(session);
+    if (pending.length > 0) {
+      const toolCall = pending[0]!;
+      return {
+        type: "tool",
+        stepId: `tool-${toolCall.id}`,
+        displayName: `Running ${toolCall.name}`,
+        toolCallId: toolCall.id,
+      };
+    }
+
+    const turn = latestTurn(session);
+    if (!turn) {
+      // No turn yet - need assistant step
+      return {
+        type: "assistant",
+        stepId: "assistant",
+        displayName: "Assistant response",
+      };
+    }
+
+    // Handle turn states
+    if (turn.status === "awaiting_assistant") {
+      return {
+        type: "assistant",
+        stepId: `turn-${turn.index}-assistant`,
+        displayName: `Turn ${turn.index}: Assistant`,
+      };
+    }
+
+    if (turn.status === "awaiting_tools") {
+      return {
+        type: "complete",
+        stepId: `turn-${turn.index}-complete`,
+        displayName: `Turn ${turn.index}: Complete`,
+      };
+    }
+
+    // Turn is complete - check if we should continue
+    return undefined;
+  }
+
+  /**
+   * Run a single atomic step based on the provided step info.
+   * This is the core method for workflow-driven execution.
+   */
+  async runSingleStep(
+    session: AgentSessionState,
+    stepInfo: NextStepInfo,
+    signal?: AbortSignal,
+  ): Promise<RunStepResult> {
+    let result: AgentStepResult;
+
+    switch (stepInfo.type) {
+      case "assistant": {
+        const assistantResult = await this.runAssistantStep(session, signal);
+        result = {
+          session: assistantResult.session,
+          events: assistantResult.events,
+        };
+        break;
+      }
+      case "tool": {
+        if (!stepInfo.toolCallId) {
+          throw new Error("toolCallId required for tool step");
+        }
+        const toolResult = await this.runToolStep(session, stepInfo.toolCallId, signal);
+        result = {
+          session: toolResult.session,
+          events: toolResult.events,
+        };
+        break;
+      }
+      case "complete": {
+        const completeResult = this.completeTurn(session);
+        result = {
+          session: completeResult.session,
+          events: completeResult.events,
+        };
+        break;
+      }
+      default:
+        throw new Error(`Unknown step type: ${stepInfo.type}`);
+    }
+
+    const nextStep = this.determineNextStep(result.session);
+
+    return {
+      ...result,
+      shouldContinue: Boolean(nextStep) && result.session.status !== "error",
+      shouldStop: !nextStep || result.session.status === "error",
+      nextStep,
+    };
   }
 }
