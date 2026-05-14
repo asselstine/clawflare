@@ -72,7 +72,7 @@ pnpm test -- --keep-alive
 # - Health check (unauthenticated)
 # - Authentication (missing token, wrong token, valid token)
 # - Context management (get/create/fork)
-# - Chat/prompt functionality
+# - Workflow-backed chat/prompt functionality
 # - Tool listing
 # - Stored code and Dynamic Worker execution
 # - Controlled egress
@@ -137,6 +137,12 @@ pnpm dev
 # Build a specific package
 pnpm --filter @clawflare/harness build
 ```
+
+### Chat Workflows
+
+`POST /v1/chat` starts a durable Cloudflare Workflow and returns immediately with an instance ID and `pollUrl`. Clients should poll `GET /v1/workflow/:instanceId` until the status is no longer `running`. The CLI does this automatically.
+
+The WebSocket endpoint `/ws` is backed by a Durable Object. It starts workflows for prompt messages and sends workflow status updates plus the final chat response over the socket.
 
 ### Tools, Dynamic Code, Egress, and Skills
 

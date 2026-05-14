@@ -1,483 +1,542 @@
-// Clawflare Agent - Uses pi-agent-core for context management
-// This provides the agent logic that handles prompts, tools, and context
+import type {
+  AgentEvent,
+  AgentMessage,
+  AgentTool,
+  AgentToolCall,
+  AgentToolResult,
+  StreamFn,
+  ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, Context, Message, Model, ToolResultMessage } from "@earendil-works/pi-ai";
+import { streamSimple, validateToolArguments } from "@earendil-works/pi-ai";
 
-import { Agent, type AgentTool, type AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel, getProviders, streamSimple, type Api, type Model, type BedrockOptions, type Usage } from "@earendil-works/pi-ai";
-import type { Env, ChatRequest, ChatResponse, AgentContextData } from "./types";
-import { createTools } from "./tools";
-import { createMockStream, shouldUseMockAI } from "./mock-ai";
+export type QueueMode = "all" | "one-at-a-time";
 
-// Default provider and model configuration
-// Tree-shaking: These are inlined for esbuild define substitution
-const DEFAULT_PROVIDER: "amazon-bedrock" = "amazon-bedrock";
-const DEFAULT_MODEL_ID: "minimax.minimax-m2.5" = "minimax.minimax-m2.5";
-
-function normalizeBedrockBearerToken(token: string | undefined): string | undefined {
-  const trimmed = token?.trim();
-  if (!trimmed) return undefined;
-
-  // Accept the common copy/paste forms: raw token, `Bearer <token>`, or a
-  // quoted value from a shell/.env snippet. AWS SDK's httpBearerAuth adds the
-  // `Bearer` scheme itself, so passing `Bearer ...` as the token produces an
-  // invalid `Authorization: Bearer Bearer ...` header.
-  const unquoted = trimmed.replace(/^(?:["'])(.*)(?:["'])$/, "$1").trim();
-  return unquoted.replace(/^Bearer\s+/i, "").trim() || undefined;
+export interface AgentToolCallState {
+  id: string;
+  name: string;
+  args: unknown;
+  turnId: string;
+  status: "pending" | "running" | "complete" | "error";
+  result?: AgentToolResult<unknown>;
+  isError?: boolean;
 }
 
-// Lazy-load Bedrock-specific imports for bearer token auth
-let bedrockModuleImport: typeof import("@earendil-works/pi-ai/bedrock-provider") | undefined;
-
-async function getBedrockModule(): Promise<typeof bedrockModuleImport> {
-  if (!bedrockModuleImport) {
-    bedrockModuleImport = await import("@earendil-works/pi-ai/bedrock-provider");
-  }
-  return bedrockModuleImport;
+export interface AgentTurnState {
+  id: string;
+  index: number;
+  status: "awaiting_assistant" | "awaiting_tools" | "complete" | "error";
+  assistantMessage?: AssistantMessage;
+  toolCallIds: string[];
+  toolResultIds: string[];
 }
 
-export class ClawflareAgentWrapper {
-  private agent: Agent;
-  private tools: AgentTool[];
-  private currentContextId: string = "main";
-  private env: Env;
+export interface AgentSessionState {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  systemPrompt: string;
+  model: Model<any>;
+  thinkingLevel: ThinkingLevel;
+  messages: AgentMessage[];
+  steeringQueue: AgentMessage[];
+  followUpQueue: AgentMessage[];
+  steeringMode: QueueMode;
+  followUpMode: QueueMode;
+  turns: AgentTurnState[];
+  toolCalls: Record<string, AgentToolCallState>;
+  status: "idle" | "running" | "awaiting_input" | "error";
+  errorMessage?: string;
+}
 
-  constructor(agent: Agent, env: Env, tools: AgentTool[]) {
-    this.agent = agent;
-    this.env = env;
-    this.tools = tools;
+export interface AgentConfig {
+  model: Model<any>;
+  systemPrompt: string;
+  tools: AgentTool[];
+  streamFn?: StreamFn;
+  getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+  convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+}
 
-    // Set tools on the agent
-    this.agent.state.tools = tools;
+export interface AgentStepResult {
+  session: AgentSessionState;
+  events: AgentEvent[];
+}
+
+export interface AssistantStepResult extends AgentStepResult {
+  assistantMessage: AssistantMessage;
+  toolCalls: AgentToolCallState[];
+  shouldExecuteTools: boolean;
+}
+
+export interface ToolStepResult extends AgentStepResult {
+  toolResultMessage: ToolResultMessage;
+}
+
+export interface CompleteTurnResult extends AgentStepResult {
+  completedTurnIndex: number;
+  shouldContinue: boolean;
+  shouldStop: boolean;
+}
+
+function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+  return messages.filter(
+    (message): message is Message =>
+      message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+  );
+}
+
+function now(): number {
+  return Date.now();
+}
+
+function newId(prefix: string): string {
+  return `${prefix}_${crypto.randomUUID()}`;
+}
+
+function textMessage(text: string): AgentMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: now(),
+  } as AgentMessage;
+}
+
+function extractToolCalls(message: AssistantMessage): AgentToolCall[] {
+  if (!Array.isArray(message.content)) return [];
+  return message.content.filter((item): item is AgentToolCall => item.type === "toolCall");
+}
+
+function createErrorToolResult(message: string): AgentToolResult<unknown> {
+  return {
+    content: [{ type: "text", text: message }],
+    details: {},
+  };
+}
+
+function createToolResultMessage(
+  toolCall: AgentToolCallState,
+  result: AgentToolResult<unknown>,
+  isError: boolean,
+): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: toolCall.id,
+    toolName: toolCall.name,
+    content: result.content,
+    details: result.details,
+    isError,
+    timestamp: now(),
+  };
+}
+
+function latestTurn(session: AgentSessionState): AgentTurnState | undefined {
+  return session.turns.at(-1);
+}
+
+function unsatisfiedToolCalls(session: AgentSessionState): AgentToolCallState[] {
+  const turn = latestTurn(session);
+  if (!turn) return [];
+  return turn.toolCallIds
+    .map((id) => session.toolCalls[id])
+    .filter((toolCall): toolCall is AgentToolCallState => Boolean(toolCall))
+    .filter((toolCall) => toolCall.status === "pending" || toolCall.status === "running");
+}
+
+function drainQueue(queue: AgentMessage[], mode: QueueMode): {
+  drained: AgentMessage[];
+  remaining: AgentMessage[];
+} {
+  if (queue.length === 0) return { drained: [], remaining: [] };
+  if (mode === "all") return { drained: queue, remaining: [] };
+  return { drained: [queue[0]!], remaining: queue.slice(1) };
+}
+
+function nextTurnIndex(session: AgentSessionState): number {
+  return (session.turns.at(-1)?.index ?? 0) + 1;
+}
+
+function createEmptyTurn(index: number): AgentTurnState {
+  return {
+    id: newId("turn"),
+    index,
+    status: "awaiting_assistant",
+    toolCallIds: [],
+    toolResultIds: [],
+  };
+}
+
+export function createEmptyAgentSession(args: {
+  sessionId: string;
+  systemPrompt: string;
+  model: Model<any>;
+  thinkingLevel?: ThinkingLevel;
+  messages?: AgentMessage[];
+}): AgentSessionState {
+  const timestamp = now();
+  return {
+    id: args.sessionId,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    systemPrompt: args.systemPrompt,
+    model: args.model,
+    thinkingLevel: args.thinkingLevel ?? "off",
+    messages: args.messages ?? [],
+    steeringQueue: [],
+    followUpQueue: [],
+    steeringMode: "one-at-a-time",
+    followUpMode: "one-at-a-time",
+    turns: [],
+    toolCalls: {},
+    status: "idle",
+  };
+}
+
+export class Agent {
+  private readonly toolsByName: Map<string, AgentTool>;
+  private readonly streamFn: StreamFn;
+  private readonly convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+
+  constructor(private readonly config: AgentConfig) {
+    this.toolsByName = new Map(config.tools.map((tool) => [tool.name, tool]));
+    this.streamFn = config.streamFn ?? streamSimple;
+    this.convertToLlm = config.convertToLlm ?? defaultConvertToLlm;
   }
 
-  async chat(request: ChatRequest): Promise<ChatResponse> {
-    const content = request.content || "";
+  enqueuePrompt(session: AgentSessionState, prompt: string | AgentMessage): AgentStepResult {
+    const message = typeof prompt === "string" ? textMessage(prompt) : prompt;
+    const turn = createEmptyTurn(nextTurnIndex(session));
+    const events: AgentEvent[] = [
+      { type: "agent_start" },
+      { type: "turn_start" },
+      { type: "message_start", message },
+      { type: "message_end", message },
+    ];
 
-    // Switch to requested context if provided
-    if (request.contextId) {
-      this.currentContextId = request.contextId;
-    }
-
-    switch (request.type) {
-      case "prompt":
-        return this.handlePrompt(content);
-      case "steer":
-        return this.handleSteer(content);
-      case "fork":
-        return this.handleFork(request.contextId);
-      case "new_context":
-        return this.handleNewContext(request.contextId);
-      default:
-        return { type: "error", content: `Unknown request type: ${request.type}` };
-    }
-  }
-
-  async steer(message: string): Promise<string> {
-    // Queue a steering message to be injected after current turn
-    this.agent.steer({
-      role: "user",
-      content: message,
-      timestamp: Date.now(),
-    } as AgentMessage);
-    return "Steering message queued";
-  }
-
-  async getContext(): Promise<AgentContextData> {
-    // Get current context from KV
-    const stateJson = await this.env.AGENT_STATE.get(this.currentContextId);
-    const state = stateJson ? JSON.parse(stateJson) : { messages: [] };
-    
     return {
-      id: this.currentContextId,
-      messages: state.messages || [],
-      createdAt: state.createdAt || Date.now(),
+      session: {
+        ...session,
+        status: "running",
+        updatedAt: now(),
+        messages: [...session.messages, message],
+        turns: [...session.turns, turn],
+      },
+      events,
     };
   }
 
-  async createContext(parentId?: string): Promise<AgentContextData> {
-    const contextId = crypto.randomUUID();
-    const context: AgentContextData = {
-      id: contextId,
-      parentId,
-      messages: [],
-      createdAt: Date.now(),
+  enqueueSteering(session: AgentSessionState, message: string | AgentMessage): AgentSessionState {
+    return {
+      ...session,
+      updatedAt: now(),
+      steeringQueue: [...session.steeringQueue, typeof message === "string" ? textMessage(message) : message],
     };
-
-    // Store in KV
-    await this.env.AGENT_STATE.put(contextId, JSON.stringify(context));
-
-    return context;
   }
 
-  async getTools(): Promise<AgentTool[]> {
-    return this.tools;
+  enqueueFollowUp(session: AgentSessionState, message: string | AgentMessage): AgentSessionState {
+    return {
+      ...session,
+      updatedAt: now(),
+      followUpQueue: [...session.followUpQueue, typeof message === "string" ? textMessage(message) : message],
+    };
   }
 
-  private async handlePrompt(content: string): Promise<ChatResponse> {
-    // Load existing context from KV into agent state before prompting
-    const context = await this.getContext();
-    this.agent.state.messages = [...context.messages];
+  async runAssistantStep(session: AgentSessionState, signal?: AbortSignal): Promise<AssistantStepResult> {
+    const turn = latestTurn(session);
+    if (!turn) throw new Error("Cannot run assistant step without an active turn");
+    if (turn.status !== "awaiting_assistant") {
+      throw new Error(`Turn ${turn.id} is not awaiting an assistant response`);
+    }
 
-    // Capture text from both streaming updates and final messages. Some providers
-    // do not populate the final message exactly the same way, so keep a robust
-    // fallback instead of returning a misleading "No response received".
-    let finalResponse = "";
-    let finalUsage: Usage | undefined;
-    let turnCount = 0;
+    let contextMessages = session.messages;
 
-    const captureAssistantMessage = (message: AgentMessage | undefined): void => {
-      if (message?.role !== "assistant") return;
-
-      const text = this.extractAssistantText(message);
-      if (text) {
-        finalResponse = text;
-      }
-      finalUsage = message.usage;
+    const llmContext: Context = {
+      systemPrompt: session.systemPrompt,
+      messages: await this.convertToLlm(contextMessages),
+      tools: this.config.tools,
     };
 
-    const unsubscribe = this.agent.subscribe(async (event) => {
-      if (event.type === "turn_start") {
-        turnCount++;
-        console.log(`[AGENT] Turn ${turnCount} started`);
-      }
+    const apiKey = this.config.getApiKey
+      ? await this.config.getApiKey(session.model.provider)
+      : undefined;
 
-      if (event.type === "message_update") {
-        const assistantEvent = event.assistantMessageEvent;
-        if (assistantEvent.type === "text_delta") {
-          finalResponse += assistantEvent.delta;
-        } else if (assistantEvent.type === "text_end") {
-          finalResponse = assistantEvent.content;
-        }
-        captureAssistantMessage(event.message);
-      }
-
-      if (event.type === "message_end") {
-        captureAssistantMessage(event.message);
-      }
-
-      if (event.type === "agent_end") {
-        captureAssistantMessage(this.findLastAssistantMessage(event.messages));
-        // Save updated messages back to KV after the agent finishes
-        await this.saveContext();
-      }
+    const response = await this.streamFn(session.model, llmContext, {
+      apiKey: apiKey ?? undefined,
+      signal,
+      reasoning: session.thinkingLevel === "off" ? undefined : session.thinkingLevel,
     });
 
-    // Cloudflare Workers have a 30-second HTTP timeout.
-    // Set a slightly shorter timeout to ensure we can return a proper error message.
-    const WORKER_TIMEOUT_MS = 28000; // 28 seconds
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const events: AgentEvent[] = [];
+    let finalMessage: AssistantMessage | undefined;
 
-    try {
-      // Create a timeout promise that rejects if execution takes too long
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutHandle = setTimeout(() => {
-          reject(new Error(`Request timed out after ${WORKER_TIMEOUT_MS / 1000}s. The agent took too many turns (${turnCount} completed). Cloudflare Workers have a 30s HTTP timeout - consider using WebSockets for complex multi-turn operations.`));
-        }, WORKER_TIMEOUT_MS);
+    for await (const event of response) {
+      if (event.type === "start") {
+        events.push({ type: "message_start", message: { ...event.partial } });
+        continue;
+      }
+
+      if (event.type === "done" || event.type === "error") {
+        finalMessage = await response.result();
+        break;
+      }
+
+      events.push({
+        type: "message_update",
+        message: { ...event.partial },
+        assistantMessageEvent: event,
       });
+    }
 
-      // Run the agent with the prompt, racing against timeout
-      const promptPromise = this.agent.prompt(content);
-      await Promise.race([promptPromise, timeoutPromise]);
+    finalMessage ??= await response.result();
+    events.push({ type: "message_end", message: finalMessage });
 
-      // Wait for the agent to complete (also with timeout protection)
-      const idlePromise = this.agent.waitForIdle();
-      await Promise.race([idlePromise, timeoutPromise]);
+    const toolCalls = extractToolCalls(finalMessage);
+    const agentToolCalls: AgentToolCallState[] = toolCalls.map((toolCall) => ({
+      id: toolCall.id,
+      name: toolCall.name,
+      args: toolCall.arguments,
+      turnId: turn.id,
+      status: "pending",
+    }));
 
-      // Clear timeout since we completed successfully
-      if (timeoutHandle) clearTimeout(timeoutHandle);
+    const nextToolCalls = { ...session.toolCalls };
+    for (const toolCall of agentToolCalls) {
+      nextToolCalls[toolCall.id] = toolCall;
+    }
 
-      const lastAssistant = this.findLastAssistantMessage(this.agent.state.messages);
-      captureAssistantMessage(lastAssistant);
+    const isError = finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted";
+    const nextTurn: AgentTurnState = {
+      ...turn,
+      status: isError ? "error" : toolCalls.length > 0 ? "awaiting_tools" : "complete",
+      assistantMessage: finalMessage,
+      toolCallIds: agentToolCalls.map((toolCall) => toolCall.id),
+    };
 
-      const errorMessage = this.agent.state.errorMessage || lastAssistant?.errorMessage;
-      if (!finalResponse && errorMessage) {
-        return {
-          type: "error",
-          content: `Error: ${errorMessage}`,
-          contextId: this.currentContextId,
-          usage: finalUsage,
-        };
-      }
+    const nextSession: AgentSessionState = {
+      ...session,
+      updatedAt: now(),
+      messages: [...session.messages, finalMessage],
+      turns: session.turns.map((candidate) => (candidate.id === turn.id ? nextTurn : candidate)),
+      toolCalls: nextToolCalls,
+      status: isError ? "error" : "running",
+      errorMessage: finalMessage.errorMessage,
+    };
 
-      return {
-        type: "message",
-        content: finalResponse || "(No response received)",
-        contextId: this.currentContextId,
-        usage: finalUsage,
-      };
-    } catch (error) {
-      // Clear timeout if it hasn't fired yet
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      
-      // Abort the agent to stop any ongoing work
+    return {
+      session: nextSession,
+      events,
+      assistantMessage: finalMessage,
+      toolCalls: agentToolCalls,
+      shouldExecuteTools: agentToolCalls.length > 0,
+    };
+  }
+
+  async runToolStep(
+    session: AgentSessionState,
+    toolCallId: string,
+    signal?: AbortSignal,
+  ): Promise<ToolStepResult> {
+    const toolCall = session.toolCalls[toolCallId];
+    if (!toolCall) throw new Error(`Unknown tool call: ${toolCallId}`);
+    if (toolCall.status === "complete" || toolCall.status === "error") {
+      const existing = session.messages.find(
+        (message): message is ToolResultMessage =>
+          message.role === "toolResult" && message.toolCallId === toolCallId,
+      );
+      if (existing) return { session, events: [], toolResultMessage: existing };
+      throw new Error(`Tool call ${toolCallId} is already finalized without a result message`);
+    }
+
+    const events: AgentEvent[] = [];
+    const tool = this.toolsByName.get(toolCall.name);
+    events.push({
+      type: "tool_execution_start",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      args: toolCall.args,
+    });
+
+    let result: AgentToolResult<unknown>;
+    let isError = false;
+
+    if (!tool) {
+      result = createErrorToolResult(`Tool ${toolCall.name} not found`);
+      isError = true;
+    } else {
       try {
-        this.agent.abort();
-      } catch {
-        // Ignore abort errors
+        const preparedArgs = tool.prepareArguments ? tool.prepareArguments(toolCall.args) : toolCall.args;
+        const validatedArgs = validateToolArguments(tool, {
+          id: toolCall.id,
+          name: toolCall.name,
+          arguments: preparedArgs,
+          type: "toolCall",
+        } as AgentToolCall);
+
+        result = await tool.execute(toolCall.id, validatedArgs as never, signal, (partialResult) => {
+          events.push({
+            type: "tool_execution_update",
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            args: toolCall.args,
+            partialResult,
+          });
+        });
+      } catch (error) {
+        result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+        isError = true;
       }
-      
-      console.error("Prompt error:", error);
+    }
+
+    events.push({
+      type: "tool_execution_end",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      result,
+      isError,
+    });
+
+    const toolResultMessage = createToolResultMessage(toolCall, result, isError);
+    events.push({ type: "message_start", message: toolResultMessage });
+    events.push({ type: "message_end", message: toolResultMessage });
+
+    const turn = latestTurn(session);
+    const nextTurn = turn
+      ? {
+          ...turn,
+          toolResultIds: [...turn.toolResultIds, toolResultMessage.toolCallId],
+        }
+      : undefined;
+
+    const nextSession: AgentSessionState = {
+      ...session,
+      updatedAt: now(),
+      messages: [...session.messages, toolResultMessage],
+      toolCalls: {
+        ...session.toolCalls,
+        [toolCall.id]: {
+          ...toolCall,
+          status: isError ? "error" : "complete",
+          result,
+          isError,
+        },
+      },
+      turns: nextTurn
+        ? session.turns.map((candidate) => (candidate.id === nextTurn.id ? nextTurn : candidate))
+        : session.turns,
+    };
+
+    return { session: nextSession, events, toolResultMessage };
+  }
+
+  completeTurn(session: AgentSessionState): CompleteTurnResult {
+    const turn = latestTurn(session);
+    if (!turn) throw new Error("Cannot complete turn without active turn");
+
+    const remainingToolCalls = unsatisfiedToolCalls(session);
+    if (remainingToolCalls.length > 0) {
       return {
-        type: "error",
-        content: `Error: ${error instanceof Error ? error.message : String(error)}`,
-        contextId: this.currentContextId,
+        session,
+        events: [],
+        completedTurnIndex: turn.index,
+        shouldContinue: false,
+        shouldStop: false,
       };
-    } finally {
-      unsubscribe();
-    }
-  }
-
-  private extractAssistantText(message: AgentMessage): string {
-    if (message.role !== "assistant" || !Array.isArray(message.content)) {
-      return "";
     }
 
-    return message.content
-      .filter((c): c is { type: "text"; text: string } => c.type === "text")
-      .map((c) => c.text)
-      .join("");
-  }
-
-  private findLastAssistantMessage(messages: AgentMessage[]): Extract<AgentMessage, { role: "assistant" }> | undefined {
-    return messages
-      .slice()
-      .reverse()
-      .find((message): message is Extract<AgentMessage, { role: "assistant" }> => message.role === "assistant");
-  }
-
-  private async saveContext(): Promise<void> {
-    const context: AgentContextData = {
-      id: this.currentContextId,
-      messages: this.agent.state.messages,
-      createdAt: Date.now(),
-    };
-    await this.env.AGENT_STATE.put(this.currentContextId, JSON.stringify(context));
-  }
-
-  private async handleSteer(content: string): Promise<ChatResponse> {
-    this.agent.steer({
-      role: "user",
-      content,
-      timestamp: Date.now(),
-    } as AgentMessage);
-
-    return {
-      type: "message",
-      content: "Steering message queued",
-      contextId: this.currentContextId,
-    };
-  }
-
-  private async handleFork(requestedContextId?: string): Promise<ChatResponse> {
-    // Switch to requested context if provided, otherwise use current
-    if (requestedContextId) {
-      this.currentContextId = requestedContextId;
-    }
-    
-    // Fork the current context
-    const currentContext = await this.getContext();
-    const newContext = await this.createContext(currentContext.id);
-
-    // Copy messages to new context
-    newContext.messages = [...currentContext.messages];
-    await this.env.AGENT_STATE.put(newContext.id, JSON.stringify(newContext));
-
-    this.currentContextId = newContext.id;
-
-    return {
-      type: "context_update",
-      content: `Forked to new context: ${newContext.id}`,
-      contextId: newContext.id,
-    };
-  }
-
-  private async handleNewContext(_parentId?: string): Promise<ChatResponse> {
-    const context = await this.createContext(_parentId);
-    this.currentContextId = context.id;
-
-    return {
-      type: "context_update",
-      content: `Created new context: ${context.id}`,
-      contextId: context.id,
-    };
-  }
-}
-
-// Create the agent instance
-export async function createAgent(env: Env, ctx?: ExecutionContext): Promise<ClawflareAgentWrapper> {
-  console.log("[createAgent] Starting agent creation...");
-  
-  const { provider, modelId, model } = resolveConfiguredModel(env);
-  
-  console.log(`[AGENT] Using provider: ${provider}, model: ${modelId}`);
-  console.log(`[AGENT] MOCK_AI: ${env.MOCK_AI}`);
-
-  // Get API key/bearer token for the selected provider from Worker env bindings.
-  // pi-ai's process.env helper is not reliable inside Cloudflare Workers.
-  const getApiKey = (requestedProvider?: string): Promise<string | undefined> => {
-    return Promise.resolve(getApiKeyForProvider(env, requestedProvider || provider));
-  };
-
-  // Create tools
-  console.log("[createAgent] Creating tools...");
-  const tools = createTools(env, ctx);
-  console.log(`[createAgent] Created ${tools.length} tools`);
-
-  // Check mock mode
-  const useMock = shouldUseMockAI(env);
-  console.log(`[AGENT] Using mock AI: ${useMock}`);
-
-  const streamFn = useMock
-    ? createMockStream()
-    : provider === "amazon-bedrock"
-      ? await createBedrockStreaming(env)
-      : streamSimple;
-
-  if (useMock) {
-    console.log("[AGENT] Using mock AI mode");
-  } else {
-    console.log(`[AGENT] Using ${provider} streaming`);
-  }
-
-  // Create the pi-agent-core Agent
-  console.log("[createAgent] Creating Agent instance...");
-  const agent = new Agent({
-    getApiKey,
-    streamFn: streamFn as typeof streamSimple,
-    initialState: {
-      systemPrompt: getSystemPrompt(),
-      model,
-      tools,
-    },
-  });
-  console.log("[createAgent] Agent created successfully");
-
-  return new ClawflareAgentWrapper(agent, env, tools);
-}
-
-function resolveConfiguredModel(env: Env): { provider: string; modelId: string; model: Model<Api> } {
-  const provider = env.AI_PROVIDER || DEFAULT_PROVIDER;
-  const modelId = env.AI_MODEL || DEFAULT_MODEL_ID;
-
-  if (!getProviders().includes(provider as never)) {
-    throw new Error(`Unknown AI_PROVIDER: ${provider}`);
-  }
-
-  const model = getModel(provider as never, modelId as never) as Model<Api> | undefined;
-  if (!model) {
-    throw new Error(`Model not found: ${provider}/${modelId}`);
-  }
-
-  return { provider, modelId, model };
-}
-
-function getApiKeyForProvider(env: Env, provider: string): string | undefined {
-  switch (provider) {
-    case "amazon-bedrock":
-      return normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK);
-    case "anthropic":
-      return env.ANTHROPIC_OAUTH_TOKEN || env.ANTHROPIC_API_KEY;
-    case "openai":
-      return env.OPENAI_API_KEY;
-    case "azure-openai-responses":
-      return env.AZURE_OPENAI_API_KEY;
-    case "deepseek":
-      return env.DEEPSEEK_API_KEY;
-    case "google":
-      return env.GEMINI_API_KEY;
-    case "google-vertex":
-      return env.GOOGLE_CLOUD_API_KEY;
-    case "groq":
-      return env.GROQ_API_KEY;
-    case "cerebras":
-      return env.CEREBRAS_API_KEY;
-    case "xai":
-      return env.XAI_API_KEY;
-    case "openrouter":
-      return env.OPENROUTER_API_KEY;
-    case "vercel-ai-gateway":
-      return env.AI_GATEWAY_API_KEY;
-    case "zai":
-      return env.ZAI_API_KEY;
-    case "mistral":
-      return env.MISTRAL_API_KEY;
-    case "minimax":
-      return env.MINIMAX_API_KEY;
-    case "minimax-cn":
-      return env.MINIMAX_CN_API_KEY;
-    case "moonshotai":
-    case "moonshotai-cn":
-      return env.MOONSHOT_API_KEY;
-    case "huggingface":
-      return env.HF_TOKEN;
-    case "fireworks":
-      return env.FIREWORKS_API_KEY;
-    case "opencode":
-    case "opencode-go":
-      return env.OPENCODE_API_KEY;
-    case "kimi-coding":
-      return env.KIMI_API_KEY;
-    case "cloudflare-workers-ai":
-    case "cloudflare-ai-gateway":
-      return env.CLOUDFLARE_API_KEY || env.CLOUDFLARE_API_TOKEN;
-    case "xiaomi":
-      return env.XIAOMI_API_KEY;
-    case "xiaomi-token-plan-cn":
-      return env.XIAOMI_TOKEN_PLAN_CN_API_KEY;
-    case "xiaomi-token-plan-ams":
-      return env.XIAOMI_TOKEN_PLAN_AMS_API_KEY;
-    case "xiaomi-token-plan-sgp":
-      return env.XIAOMI_TOKEN_PLAN_SGP_API_KEY;
-    default:
-      return undefined;
-  }
-}
-
-// Create Bedrock streaming function.
-async function createBedrockStreaming(
-  env: Env,
-): Promise<typeof streamSimple> {
-  console.log("[createBedrockStreaming] Loading Bedrock module...");
-  const bedrockModule = await getBedrockModule();
-  if (!bedrockModule) {
-    throw new Error("Failed to load Bedrock module");
-  }
-  const { bedrockProviderModule } = bedrockModule;
-  const { streamBedrock } = bedrockProviderModule;
-  console.log("[createBedrockStreaming] Bedrock module loaded successfully");
-
-  const bearerToken = normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK);
-  if (!bearerToken && !env.AWS_PROFILE) {
-    throw new Error(
-      "AWS_BEARER_TOKEN_BEDROCK is not configured. Set it with: cd packages/harness && npx wrangler secret put AWS_BEARER_TOKEN_BEDROCK"
+    const toolResults = session.messages.filter(
+      (message): message is ToolResultMessage =>
+        message.role === "toolResult" && turn.toolCallIds.includes(message.toolCallId),
     );
+
+    const events: AgentEvent[] = [
+      {
+        type: "turn_end",
+        message: turn.assistantMessage ?? session.messages.at(-1)!,
+        toolResults,
+      },
+    ];
+
+    let nextSession: AgentSessionState = {
+      ...session,
+      updatedAt: now(),
+      turns: session.turns.map((candidate) =>
+        candidate.id === turn.id
+          ? { ...turn, status: turn.status === "error" ? "error" : "complete" }
+          : candidate,
+      ),
+    };
+
+    if (turn.status === "error" || nextSession.status === "error") {
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: false,
+        shouldStop: true,
+      };
+    }
+
+    if (toolResults.length > 0) {
+      nextSession = {
+        ...nextSession,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    const steering = drainQueue(nextSession.steeringQueue, nextSession.steeringMode);
+    if (steering.drained.length > 0) {
+      nextSession = {
+        ...nextSession,
+        messages: [...nextSession.messages, ...steering.drained],
+        steeringQueue: steering.remaining,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    const followUp = drainQueue(nextSession.followUpQueue, nextSession.followUpMode);
+    if (followUp.drained.length > 0) {
+      nextSession = {
+        ...nextSession,
+        messages: [...nextSession.messages, ...followUp.drained],
+        followUpQueue: followUp.remaining,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    events.push({ type: "agent_end", messages: [] });
+    nextSession = { ...nextSession, status: "idle" };
+
+    return {
+      session: nextSession,
+      events,
+      completedTurnIndex: turn.index,
+      shouldContinue: false,
+      shouldStop: true,
+    };
   }
 
-  return ((m: Model<"bedrock-converse-stream">, ctx: Parameters<typeof streamSimple>[1], opts?: BedrockOptions) => {
-    console.log(`[createBedrockStreaming] Calling streamBedrock with token configured: ${!!bearerToken}, token length: ${bearerToken?.length || 0}`);
-    const bedrockOptions: BedrockOptions = {
-      ...opts,
-      bearerToken,
-      apiKey: bearerToken,
-      region: env.AWS_REGION || "us-east-1",
-      profile: env.AWS_PROFILE,
-    };
-    return streamBedrock(m, ctx, bedrockOptions);
-  }) as typeof streamSimple;
-}
-
-// DEPRECATED: Generic createStreamingFunction removed
-
-function getSystemPrompt(): string {
-  return `You are Clawflare, an AI agent that runs on Cloudflare's platform.
-
-You have exactly four tools:
-- execute_code: Run JavaScript in an isolated Dynamic Worker.
-- store_code: Save reusable JavaScript by name.
-- execute_stored_code: Run previously stored JavaScript by name.
-- search: Query available stored code, egress handlers, and other indexed records.
-
-Network egress from executed code is controlled by a gateway. Before relying on outbound HTTP, use search to inspect supported egress handlers/domains. Unsupported outbound requests are blocked.
-
-Prefer storing reusable code when it will save tokens in future turns.
-Be helpful, concise, and focus on getting tasks done efficiently.`;
+  pendingToolCalls(session: AgentSessionState): AgentToolCallState[] {
+    return unsatisfiedToolCalls(session);
+  }
 }

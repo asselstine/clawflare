@@ -12,6 +12,14 @@
     "__DEV__": "true"
   },
 
+  "services": [
+    {
+      "binding": "HTTP_GATEWAY",
+      "service": "clawflare-harness-test",
+      "entrypoint": "HttpGateway"
+    }
+  ],
+
   "worker_loaders": [
     {
       "binding": "LOADER"
@@ -23,6 +31,10 @@
       {
         "name": "DATASTORE",
         "class_name": "ClawflareDatastore"
+      },
+      {
+        "name": "WEBSOCKET_SESSION",
+        "class_name": "ClawflareWebSocketSession"
       }
     ]
   },
@@ -31,6 +43,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ClawflareDatastore"]
+    },
+    {
+      "tag": "v2",
+      "new_classes": ["ClawflareWebSocketSession"]
     }
   ],
 
@@ -39,13 +55,13 @@
     {
       "name": "clawflare-agent-workflow-test",
       "binding": "AGENT_WORKFLOW",
-      "class_name": "ClawflareAgentWorkflow"
+      "class_name": "Workflow"
     }
   ],
 
   "kv_namespaces": [
     {
-      "binding": "AGENT_STATE",
+      "binding": "AGENT_SESSION",
       "id": "fd296c5aa01d4d1ba4a5613438466bee"
     }
   ],

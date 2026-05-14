@@ -7,13 +7,13 @@ interface DynamicExecutionOptions {
 
 export async function executeDynamicWorker(
   env: Env,
-  ctx: ExecutionContext | undefined,
+  _ctx: ExecutionContext | undefined,
   code: string,
   input?: unknown,
   options: DynamicExecutionOptions = {}
 ): Promise<ExecutionResult> {
   try {
-    const outbound = options.allowOutbound === false ? null : createGatewayOutbound(ctx, options.requestId);
+    const outbound = options.allowOutbound === false ? null : createGatewayOutbound(env);
 
     const workerCode: WorkerLoaderWorkerCode = {
       compatibilityDate: "2025-01-01",
@@ -64,16 +64,8 @@ export default {
   }
 }
 
-function createGatewayOutbound(ctx: ExecutionContext | undefined, requestId?: string): Fetcher | undefined {
-  const id = requestId || crypto.randomUUID();
-  // Get HttpGateway from ctx.exports if available (works in test-index.ts)
-  // In production, this returns undefined which allows default outbound
-  const exportsObject = (ctx as unknown as { exports?: { HttpGateway?: (options?: { props?: { requestId?: string } }) => Fetcher } } | undefined)?.exports;
-  const createGateway = exportsObject?.HttpGateway;
-  if (createGateway) {
-    return createGateway({ props: { requestId: id } });
-  }
-  return undefined;
+function createGatewayOutbound(env: Env): Fetcher {
+  return env.HTTP_GATEWAY;
 }
 
 function wrapUserCode(code: string): string {

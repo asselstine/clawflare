@@ -4,6 +4,7 @@
  * A terminal UI interface for the Clawflare harness.
  */
 
+import { pathToFileURL } from "node:url";
 import { config } from "dotenv";
 import { AgentClient } from "./client.js";
 import { createTUI } from "./tui-app.js";
@@ -84,16 +85,23 @@ Examples:
   return { host, token };
 }
 
-// Main entry point - always run if executed directly
-const { host, token } = parseArgs();
-
-if (!token) {
-  console.error("Error: CLAWFLARE_API_TOKEN required");
-  console.error("Usage: --token <token> or CLAWFLARE_API_TOKEN env var");
-  console.error("Run with -h for help");
-  process.exit(1);
+function isDirectExecution(): boolean {
+  const entrypoint = process.argv[1];
+  return !!entrypoint && import.meta.url === pathToFileURL(entrypoint).href;
 }
 
-const client = new AgentClient(host, token);
-const app = createTUI(client);
-app.start();
+// Main entry point
+if (isDirectExecution()) {
+  const { host, token } = parseArgs();
+
+  if (!token) {
+    console.error("Error: CLAWFLARE_API_TOKEN required");
+    console.error("Usage: --token <token> or CLAWFLARE_API_TOKEN env var");
+    console.error("Run with -h for help");
+    process.exit(1);
+  }
+
+  const client = new AgentClient(host, token);
+  const app = createTUI(client);
+  app.start();
+}

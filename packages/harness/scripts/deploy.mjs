@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(__dirname, "..", "wrangler.jsonc");
 
 const KV_NAMESPACES = [
-  { binding: "AGENT_STATE", placeholder: "local-agent-state-namespace-id" },
+  { binding: "AGENT_SESSION", placeholder: "local-agent-state-namespace-id" },
 ];
 
 const SECRETS = ["AWS_BEARER_TOKEN_BEDROCK", "CLOUDFLARE_API_TOKEN", "CLAWFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"];

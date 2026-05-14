@@ -143,13 +143,20 @@ async function writeTestConfig(workerName: string, workflowName: string, kvNames
       "process.env.NODE_ENV": "\"test\"",
       __DEV__: "true",
     },
+    services: [{ binding: "HTTP_GATEWAY", service: workerName, entrypoint: "HttpGateway" }],
     worker_loaders: [{ binding: "LOADER" }],
     durable_objects: {
-      bindings: [{ name: "DATASTORE", class_name: "ClawflareDatastore" }],
+      bindings: [
+        { name: "DATASTORE", class_name: "ClawflareDatastore" },
+        { name: "WEBSOCKET_SESSION", class_name: "ClawflareWebSocketSession" },
+      ],
     },
-    migrations: [{ tag: "v1", new_sqlite_classes: ["ClawflareDatastore"] }],
-    workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "ClawflareAgentWorkflow" }],
-    kv_namespaces: [{ binding: "AGENT_STATE", id: kvNamespaceId }],
+    migrations: [
+      { tag: "v1", new_sqlite_classes: ["ClawflareDatastore"] },
+      { tag: "v2", new_classes: ["ClawflareWebSocketSession"] },
+    ],
+    workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "Workflow" }],
+    kv_namespaces: [{ binding: "AGENT_SESSION", id: kvNamespaceId }],
     vars: {
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
@@ -313,9 +320,13 @@ async function runTests(url: string, token: string): Promise<void> {
     if (newContext.id === originalId) throw new Error("Fork returned same context ID");
   });
 
-  await runner.runTest("Steer message", async () => {
-    const response = await client.chat({ type: "steer", content: "Be more helpful" });
-    if (response.type !== "message") throw new Error(`Expected message, got ${response.type}`);
+  await runner.runTest("Workflow chat rejects steer messages", async () => {
+    const response = await fetch(`${url}/v1/chat`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "steer", content: "Be more helpful" }),
+    });
+    if (response.status !== 400) throw new Error(`Expected 400, got ${response.status}`);
   });
 
   await runner.runTest("List tools", async () => {
@@ -398,6 +409,20 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
+  await runner.runTest("execute_code can fetch through Cloudflare egress handler", async () => {
+    const response = await fetch(`${url}/__test/execute-code`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "const response = await fetch('https://api.cloudflare.com/client/v4/accounts'); return { status: response.status, body: await response.json() };",
+      }),
+    });
+    const data = await response.json() as { ok: boolean; result?: { status?: number; body?: { handler?: string } }; error?: string };
+    if (!data.ok || data.result?.status !== 200 || data.result?.body?.handler !== "cloudflare") {
+      throw new Error(`Expected Dynamic Worker Cloudflare egress delegation, got: ${JSON.stringify(data)}`);
+    }
+  });
+
   await runner.runTest("gateway delegates matching egress handler", async () => {
     const response = await fetch(`${url}/__test/egress-fetch`, {
       method: "POST",
@@ -410,8 +435,8 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
-  await runner.runTest("Workflow chat can be polled by instance ID", async () => {
-    const startResponse = await fetch(`${url}/v1/workflow/chat`, {
+  await runner.runTest("/v1/chat starts workflow that can be polled by instance ID", async () => {
+    const startResponse = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ type: "prompt", content: "workflow smoke test" }),
@@ -431,6 +456,40 @@ async function runTests(url: string, token: string): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
     throw new Error(`Workflow did not complete: ${lastStatus}`);
+  });
+
+  await runner.runTest("WebSocket starts workflow and streams final response", async () => {
+    const ws = await client.connectWebSocket();
+    try {
+      const result = await new Promise<{ type?: string; content?: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Timed out waiting for WebSocket workflow response")), 120000);
+
+        ws.on("message", (data) => {
+          const message = JSON.parse(data.toString()) as { type?: string; content?: string; status?: string };
+          if (message.type === "error") {
+            clearTimeout(timeout);
+            reject(new Error(message.content || "WebSocket returned error"));
+            return;
+          }
+          if (message.type === "message") {
+            clearTimeout(timeout);
+            resolve(message);
+          }
+        });
+        ws.on("error", (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        });
+
+        ws.send(JSON.stringify({ type: "prompt", content: "websocket workflow smoke test" }));
+      });
+
+      if (result.type !== "message" || !result.content) {
+        throw new Error(`Unexpected WebSocket result: ${JSON.stringify(result)}`);
+      }
+    } finally {
+      ws.close();
+    }
   });
 
   await runner.runTest("404 on unknown endpoint", async () => {

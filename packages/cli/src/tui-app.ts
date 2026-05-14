@@ -18,7 +18,7 @@ import {
   type EditorTheme,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, ChatResponse, ContextInfo, ToolInfo, ServerInfo } from "./client.js";
+import type { AgentClient, ChatResponse, ContextInfo, ToolInfo, ServerInfo, WorkflowStatusResponse } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -107,7 +107,7 @@ export class ClawflareTUIApp {
 
   // State
   private messages: Array<{ role: "user" | "assistant" | "error"; content: string; usage?: { totalTokens: number; input: number; output: number }; expanded?: boolean }> = [];
-  private contextId: string = "";
+  private sessionId: string = "";
   private sessionName: string = "new";
   private isLoading = false;
   private error: string | null = null;
@@ -115,6 +115,7 @@ export class ClawflareTUIApp {
   private serverInfo: { url: string; provider?: string; model?: string; contextTotal?: number } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
+  private workflowProgress: string[] = [];
   private skills: AgentSkill[] = [];
   private skillsPrompt = "";
 
@@ -233,7 +234,7 @@ export class ClawflareTUIApp {
       
       // Create a new context instead of loading existing one
       const ctx = await this.client.createContext();
-      this.contextId = ctx.id;
+      this.sessionId = ctx.id;
       this.messages = [];
       this.updateHeader();
       this.renderMessages();
@@ -260,7 +261,7 @@ export class ClawflareTUIApp {
 
   private updateHeader(): void {
     const title = "Clawflare AI Chat";
-    const contextInfo = this.contextId ? ` [${this.contextId.slice(0, 8)}] ` : "";
+    const contextInfo = this.sessionId ? ` [${this.sessionId.slice(0, 8)}] ` : "";
     const headerText = theme.header(title + contextInfo);
     this.header.setText(headerText);
   }
@@ -308,7 +309,10 @@ export class ClawflareTUIApp {
     // Show loading if needed
     if (this.isLoading) {
       this.messageContainer.addChild(createText(""));
-      this.messageContainer.addChild(createText(theme.dim(" Working... ")));
+      const lines = this.workflowProgress.length > 0
+        ? ["Workflow progress:", ...this.workflowProgress.slice(-8).map((line) => `  • ${line}`)]
+        : ["Workflow running... waiting for first update"];
+      this.messageContainer.addChild(createText(theme.dim(lines.join("\n"))));
     }
 
     // Show error if any
@@ -406,6 +410,14 @@ export class ClawflareTUIApp {
     this.sendPrompt(trimmed, this.withSkillsSummary(trimmed));
   }
 
+  private updateWorkflowProgress(status: WorkflowStatusResponse): void {
+    const progress = status.state?.progress || [];
+    this.workflowProgress = progress.map((event) => `#${event.sequence} ${event.summary}`);
+    const last = this.workflowProgress.at(-1) || status.currentStep || status.status;
+    this.renderMessages();
+    this.setStatus(`Workflow: ${last}`, status.status === "errored" ? "red" : "yellow");
+  }
+
   private sendPrompt(displayContent: string, actualContent: string): void {
     // Don't allow new messages while loading
     if (this.isLoading) return;
@@ -417,29 +429,34 @@ export class ClawflareTUIApp {
     this.messages.push({ role: "user", content: displayContent });
     this.isLoading = true;
     this.error = null;
+    this.workflowProgress = [];
     this.renderMessages();
-    this.setStatus("Thinking... (Esc to abort)", "yellow");
+    this.setStatus("Starting workflow... (Esc to abort)", "yellow");
 
     // Create abort controller for this request
     this.abortController = new AbortController();
     const requestAbortController = this.abortController;
 
-    // Fire off the chat request with abort support
-    this.client.chat(
-      { type: "prompt", content: actualContent, contextId: this.contextId },
+    // Fire off the workflow-backed chat request with abort support.
+    this.client.startChatWorkflow(
+      { type: "prompt", content: actualContent, sessionId: this.sessionId },
       requestAbortController.signal
-    ).then((response) => {
+    ).then((workflow) => {
+      this.workflowProgress = [`Workflow ${workflow.instanceId.slice(0, 8)} started`];
+      this.renderMessages();
+      this.setStatus(`Workflow ${workflow.instanceId.slice(0, 8)} running... (Esc to abort)`, "yellow");
+      return this.client.waitForWorkflow(workflow, requestAbortController.signal, {
+        onStatus: (status) => this.updateWorkflowProgress(status),
+      });
+    }).then((response) => {
       // Track usage for context calculation
       const assistantMessageIndex = this.messages.length;
       if (response.type === "error") {
         this.messages.push({ role: "error", content: response.content });
       } else {
         this.messages.push({ role: "assistant", content: response.content });
-        // If response has usage info, track it
-        // Note: For now we estimate since response doesn't include usage
-        // In future, response should include usage from the agent
-        if (response.contextId) {
-          this.contextId = response.contextId;
+        if (response.sessionId) {
+          this.sessionId = response.sessionId;
           this.updateHeader();
         }
       }
@@ -459,6 +476,7 @@ export class ClawflareTUIApp {
     }).finally(() => {
       this.isLoading = false;
       this.abortController = null;
+      this.workflowProgress = [];
       this.renderMessages();
       // Only show Ready if there was no error and the user did not abort.
       if (this.error) {
@@ -482,6 +500,7 @@ export class ClawflareTUIApp {
       this.messages.push({ role: "assistant", content: "⚠ Operation aborted by user" });
       this.isLoading = false;
       this.abortController = null;
+      this.workflowProgress = [];
       this.renderMessages();
       this.setStatus("Aborted", "yellow");
     }
@@ -537,7 +556,7 @@ export class ClawflareTUIApp {
           this.setStatus("Creating new context...", "yellow");
           try {
             const ctx = await this.client.createContext();
-            this.contextId = ctx.id;
+            this.sessionId = ctx.id;
             this.messages = [];
             this.updateHeader();
             this.renderMessages();
@@ -553,7 +572,7 @@ export class ClawflareTUIApp {
           this.setStatus("Forking context...", "yellow");
           try {
             const ctx = await this.client.forkContext();
-            this.contextId = ctx.id;
+            this.sessionId = ctx.id;
             this.messages = ctx.messages.map((m) => ({
               role: m.role as "user" | "assistant" | "error",
               content: this.extractContent(m.content),

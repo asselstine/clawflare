@@ -7,18 +7,55 @@ import WebSocket from "ws";
 export interface ChatRequest {
   type: "prompt" | "steer" | "fork" | "new_context";
   content?: string;
-  contextId?: string;
+  sessionId?: string;
+  maxTurns?: number;
+}
+
+export interface ChatUsage {
+  input: number;
+  output: number;
+  totalTokens: number;
 }
 
 export interface ChatResponse {
   type: "message" | "error" | "context_update";
   content: string;
-  contextId?: string;
-  usage?: {
-    input: number;
-    output: number;
-    totalTokens: number;
+  sessionId?: string;
+  usage?: ChatUsage;
+}
+
+export interface WorkflowStartedResponse {
+  type: "workflow_started";
+  id: string;
+  workflowId: string;
+  instanceId: string;
+  sessionId: string;
+  status: "running";
+  pollUrl: string;
+}
+
+export interface WorkflowProgressEvent {
+  timestamp: number;
+  sequence: number;
+  type: "workflow" | "agent" | "turn" | "tool" | "message" | "error";
+  summary: string;
+  event?: unknown;
+}
+
+export interface WorkflowStatusResponse {
+  status: "running" | "success" | "errored" | "paused";
+  currentStep?: string;
+  response?: ChatResponse;
+  state?: {
+    id: string;
+    sessionId: string;
+    turnCount: number;
+    maxTurns: number;
+    status: "running" | "idle" | "error" | "awaiting_input";
+    progress?: WorkflowProgressEvent[];
+    errorMessage?: string;
   };
+  session?: unknown;
 }
 
 export interface ContextInfo {
@@ -75,14 +112,19 @@ export class AgentClient {
   }
 
   // HTTP methods
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+  async startChatWorkflow(request: ChatRequest, signal?: AbortSignal): Promise<WorkflowStartedResponse> {
+    const requestWithContext: ChatRequest = {
+      ...request,
+      sessionId: request.sessionId ?? this.currentContextId ?? undefined,
+    };
+
     const response = await fetch(
       `${this.url}/v1/chat`,
       {
         method: "POST",
         headers: this.getHeaders(),
-        body: JSON.stringify(request),
-        signal: signal,
+        body: JSON.stringify(requestWithContext),
+        signal,
       }
     );
 
@@ -91,11 +133,64 @@ export class AgentClient {
       throw new Error(`Chat failed: ${response.status} - ${error}`);
     }
 
-    const data = await response.json() as ChatResponse;
-    if (data.contextId) {
-      this.currentContextId = data.contextId;
-    }
+    const data = await response.json() as WorkflowStartedResponse;
+    if (data.sessionId) this.currentContextId = data.sessionId;
     return data;
+  }
+
+  async getWorkflowStatus(workflowId: string, signal?: AbortSignal): Promise<WorkflowStatusResponse> {
+    const response = await fetch(`${this.url}/v1/workflow/${workflowId}`, {
+      method: "GET",
+      headers: this.getHeaders(),
+      signal,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Workflow status failed: ${response.status} - ${error}`);
+    }
+
+    return response.json() as Promise<WorkflowStatusResponse>;
+  }
+
+  async waitForWorkflow(
+    workflow: WorkflowStartedResponse,
+    signal?: AbortSignal,
+    options: { pollIntervalMs?: number; maxPolls?: number; onStatus?: (status: WorkflowStatusResponse) => void } = {}
+  ): Promise<ChatResponse> {
+    const pollIntervalMs = options.pollIntervalMs ?? 1000;
+    const maxPolls = options.maxPolls ?? 300;
+
+    for (let poll = 0; poll < maxPolls; poll++) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+
+      const status = await this.getWorkflowStatus(workflow.id, signal);
+      options.onStatus?.(status);
+      if (status.status === "running") continue;
+
+      if (status.response) {
+        if (status.response.sessionId) this.currentContextId = status.response.sessionId;
+        return status.response;
+      }
+
+      return {
+        type: "error",
+        content: `Workflow ${workflow.id} finished without a response`,
+        sessionId: workflow.sessionId,
+      };
+    }
+
+    return {
+      type: "error",
+      content: `Workflow ${workflow.id} did not finish before polling timed out`,
+      sessionId: workflow.sessionId,
+    };
+  }
+
+  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
+    const workflow = await this.startChatWorkflow(request, signal);
+    return this.waitForWorkflow(workflow, signal);
   }
 
   async getContext(): Promise<ContextInfo> {
@@ -137,16 +232,11 @@ export class AgentClient {
   }
 
   async forkContext(): Promise<ContextInfo> {
-    const response = await this.chat({ type: "fork", contextId: this.currentContextId || undefined });
-    if (response.contextId) {
-      this.currentContextId = response.contextId;
-    }
-    // Get the new context details
-    return this.getContext();
+    return this.createContext(this.currentContextId || undefined);
   }
 
-  async steer(message: string): Promise<void> {
-    await this.chat({ type: "steer", content: message });
+  async steer(_message: string): Promise<void> {
+    throw new Error("Steering is not supported for workflow-backed chat");
   }
 
   async listTools(): Promise<ToolInfo[]> {

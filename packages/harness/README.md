@@ -14,7 +14,7 @@ pnpm dev
 
 The harness uses:
 
-- `AGENT_STATE` KV namespace for conversation state
+- `AGENT_SESSION` KV namespace for conversation state
 - `DATASTORE` SQLite Durable Object for stored code and egress handler metadata
 - `LOADER` Worker Loader binding for Dynamic Worker execution
 

@@ -21,6 +21,7 @@ build/
 .wrangler/
 wrangler.toml
 .dev.vars
+**/wrangler.e2e.*
 
 # Logs
 *.log

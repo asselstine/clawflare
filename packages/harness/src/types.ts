@@ -8,10 +8,16 @@ export interface Env {
   CLAWFLARE_API_TOKEN: string;
 
   // KV namespace for agent conversation state
-  AGENT_STATE: KVNamespace;
+  AGENT_SESSION: KVNamespace;
 
   // SQLite Durable Object for stored code and egress handlers
   DATASTORE: DurableObjectNamespace;
+
+  // Durable Object for WebSocket workflow session coordination
+  WEBSOCKET_SESSION: DurableObjectNamespace;
+
+  // Service binding to the HttpGateway entrypoint for Dynamic Worker egress
+  HTTP_GATEWAY: Fetcher;
 
   // Worker Loader for Dynamic Worker execution
   LOADER: WorkerLoader;
@@ -64,13 +70,14 @@ export interface Env {
 export interface ChatRequest {
   type: "prompt" | "steer" | "fork" | "new_context";
   content?: string;
-  contextId?: string;
+  sessionId?: string;
+  maxTurns?: number;
 }
 
 export interface ChatResponse {
   type: "message" | "error" | "context_update";
   content: string;
-  contextId?: string;
+  sessionId?: string;
   messages?: AgentMessage[];
   usage?: Usage;
 }
@@ -83,7 +90,7 @@ export interface ToolDefinition {
 }
 
 // Context for agent
-export interface AgentContextData {
+export interface AgentSession {
   id: string;
   parentId?: string;
   messages: AgentMessage[];

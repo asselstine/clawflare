@@ -1,14 +1,16 @@
 // Clawflare Harness - Main Worker Entry Point
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
-import { createAgent } from "./agent";
 import { ClawflareDatastore } from "./datastore";
 import { HttpGateway } from "./egress/gateway";
-import { ClawflareAgentWorkflow, getWorkflowStatus } from "./workflow-agent";
-import type { Env, ChatRequest } from "./types";
+import { Workflow, getWorkflowStatus, startAgentWorkflow } from "./workflow";
+import { ClawflareWebSocketSession } from "./ws-session";
+import { createTools } from "./tools";
+import { normalizeBedrockBearerToken } from "./agent-config";
+import type { Env, ChatRequest, AgentSession } from "./types";
 
 // Export the Datastore Durable Object class and Workflow
-export { ClawflareDatastore, HttpGateway, ClawflareAgentWorkflow };
+export { ClawflareDatastore, HttpGateway, Workflow, ClawflareWebSocketSession };
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -34,10 +36,13 @@ function authenticate(request: Request, env: Env): Response | null {
 // Handle HTTP requests
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    // Log all request details for debugging
-    console.log(`[REQUEST] ${request.method} ${request.url}`);
-    console.log(`[ENV] CLAWFLARE_API_TOKEN exists: ${!!env.CLAWFLARE_API_TOKEN}`);
-    console.log(`[ENV] CLAWFLARE_API_TOKEN length: ${env.CLAWFLARE_API_TOKEN?.length || 0}`);
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/\/$/, ""); // Normalize trailing slash
+    const isWorkflowPoll = request.method === "GET" && path.startsWith("/v1/workflow/");
+
+    if (!isWorkflowPoll) {
+      console.log(`[REQUEST] ${request.method} ${request.url}`);
+    }
     
     // Validate API_TOKEN is configured
     if (!env.CLAWFLARE_API_TOKEN || env.CLAWFLARE_API_TOKEN.trim() === "") {
@@ -47,9 +52,6 @@ export default {
         { status: 500, headers: { "Content-Type": "application/json" } }
       );
     }
-
-    const url = new URL(request.url);
-    const path = url.pathname.replace(/\/$/, ""); // Normalize trailing slash
 
     // Health check (no auth required for simplicity in dev)
     if (path === "/health") {
@@ -62,34 +64,30 @@ export default {
     const authError = authenticate(request, env);
     if (authError) return authError;
 
-    // WebSocket upgrade for interactive sessions
+    // WebSocket upgrade for interactive workflow sessions. A Durable Object owns
+    // the socket so status polling survives beyond the initial Worker request.
     if (path === "/ws") {
-      // Get the WebSocket pair
-      const [client, server] = Object.values(new WebSocketPair()) as [WebSocket, WebSocket];
-      
-      // Handle the WebSocket connection
-      handleWebSocket(server, env, ctx).catch(console.error);
-      
-      return new Response(null, { status: 101, webSocket: client });
+      const id = env.WEBSOCKET_SESSION.idFromName(crypto.randomUUID());
+      return env.WEBSOCKET_SESSION.get(id).fetch(request);
     }
 
-    // REST API endpoints
+    // REST API endpoints. Chat is workflow-backed and returns immediately with
+    // a workflow instance that clients can poll via /v1/workflow/:id.
     if (path === "/v1/chat" && request.method === "POST") {
-      return handleChat(request, env, ctx);
+      return handleWorkflowChat(request, env);
     }
 
     if (path === "/v1/context" && request.method === "GET") {
-      return handleGetContext(env, ctx);
+      return handleGetContext(env);
     }
 
     if (path === "/v1/context" && request.method === "POST") {
-      return handleNewContext(request, env, ctx);
+      return handleNewContext(request, env);
     }
 
     if (path === "/v1/tools" && request.method === "GET") {
       return handleListTools(env, ctx);
     }
-
 
     // Server info endpoint (provides provider/model configuration)
     if (path === "/v1/info" && request.method === "GET") {
@@ -113,32 +111,19 @@ export default {
   },
 };
 
-// Handle chat requests via REST API
-async function handleChat(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// Handle get context - read from KV directly
+async function handleGetContext(env: Env): Promise<Response> {
   try {
-    const body = (await request.json()) as ChatRequest;
-    const agent = await createAgent(env, ctx);
-    const response = await agent.chat(body);
-
-    return new Response(JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch (error) {
-    return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
-
-// Handle get context
-async function handleGetContext(env: Env, ctx: ExecutionContext): Promise<Response> {
-  try {
-    console.log("[handleGetContext] Creating agent...");
-    const agent = await createAgent(env, ctx);
-    console.log("[handleGetContext] Getting context...");
-    const context = await agent.getContext();
-    console.log("[handleGetContext] Context retrieved successfully");
+    const sessionId = "main"; // Default context
+    const stateJson = await env.AGENT_SESSION.get(sessionId);
+    const state = stateJson ? JSON.parse(stateJson) : { messages: [] };
+    
+    const context: AgentSession = {
+      id: sessionId,
+      messages: state.messages || [],
+      createdAt: state.createdAt || Date.now(),
+    };
+    
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
     });
@@ -151,12 +136,26 @@ async function handleGetContext(env: Env, ctx: ExecutionContext): Promise<Respon
   }
 }
 
-// Handle new context creation
-async function handleNewContext(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+// Handle new context creation - create in KV directly
+async function handleNewContext(request: Request, env: Env): Promise<Response> {
   try {
-    const body = (await request.json()) as { parentId?: string };
-    const agent = await createAgent(env, ctx);
-    const context = await agent.createContext(body.parentId);
+    const body = (await request.json()) as { parentId?: string; };
+    const sessionId = crypto.randomUUID();
+    
+    // Load parent context if provided
+    const parentJson = body.parentId ? await env.AGENT_SESSION.get(body.parentId) : null;
+    const parent = parentJson ? JSON.parse(parentJson) as AgentSession : null;
+    
+    const context: AgentSession = {
+      id: sessionId,
+      parentId: body.parentId,
+      messages: parent?.messages ? [...parent.messages] : [],
+      createdAt: Date.now(),
+    };
+
+    // Store in KV
+    await env.AGENT_SESSION.put(sessionId, JSON.stringify(context));
+    
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
     });
@@ -168,11 +167,10 @@ async function handleNewContext(request: Request, env: Env, ctx: ExecutionContex
   }
 }
 
-// Handle list tools
+// Handle list tools - create tools directly
 async function handleListTools(env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
-    const agent = await createAgent(env, ctx);
-    const tools = await agent.getTools();
+    const tools = createTools(env, ctx);
     return new Response(JSON.stringify({ tools }), {
       headers: { "Content-Type": "application/json" },
     });
@@ -191,7 +189,7 @@ async function handleGetInfo(env: Env): Promise<Response> {
     const model = env.AI_MODEL || "minimax.minimax-m2.5";
     const contextWindow = 128000; // Default context window for minimax-m2.5
     const rawBedrockToken = env.AWS_BEARER_TOKEN_BEDROCK || "";
-    const normalizedBedrockToken = normalizeBedrockBearerToken(rawBedrockToken);
+    const normalizedBedrockToken = normalizeBedrockBearerToken(rawBedrockToken) || "";
     
     return new Response(JSON.stringify({ 
       provider, 
@@ -215,13 +213,6 @@ async function handleGetInfo(env: Env): Promise<Response> {
   }
 }
 
-function normalizeBedrockBearerToken(token: string): string {
-  const trimmed = token.trim();
-  if (!trimmed) return "";
-  const unquoted = trimmed.replace(/^(?:["'])(.*)(?:["'])$/, "$1").trim();
-  return unquoted.replace(/^Bearer\s+/i, "").trim();
-}
-
 async function sha256Prefix(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const hash = await crypto.subtle.digest("SHA-256", bytes);
@@ -231,79 +222,22 @@ async function sha256Prefix(value: string): Promise<string> {
     .join("");
 }
 
-// Handle WebSocket connections
-async function handleWebSocket(ws: WebSocket, env: Env, ctx: ExecutionContext): Promise<void> {
-  ws.accept();
-
-  const agent = await createAgent(env, ctx);
-
-  ws.addEventListener("message", async (event) => {
-    try {
-      const data = JSON.parse(event.data as string);
-      
-      if (data.type === "prompt") {
-        const response = await agent.chat(data);
-        ws.send(JSON.stringify(response));
-      } else if (data.type === "steer") {
-        const response = await agent.steer(data.content);
-        ws.send(JSON.stringify({ type: "steer_ack", content: response }));
-      }
-    } catch (error) {
-      ws.send(
-        JSON.stringify({
-          type: "error",
-          content: error instanceof Error ? error.message : "Unknown error",
-        })
-      );
-    }
-  });
-
-  ws.addEventListener("close", () => {
-    // Cleanup if needed
-  });
-}
-
 // Handle durable workflow-based chat
 async function handleWorkflowChat(request: Request, env: Env): Promise<Response> {
   try {
     const body = (await request.json()) as ChatRequest;
     
-    // Validate request
-    if (body.type !== "prompt" || !body.content) {
-      return new Response(
-        JSON.stringify({ error: "Invalid request. type='prompt' and content required" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
-    }
-
-    // Create a context if not provided
-    const contextId = body.contextId || crypto.randomUUID();
-
-    // Trigger workflow instance
-    const instance = await env.AGENT_WORKFLOW.create({
-      params: {
-        contextId,
-        prompt: body.content,
-        maxTurns: 10,
-      },
+    const response = await startAgentWorkflow(env, body);
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json" },
     });
-
-    // Return immediately with instance info for polling
-    return new Response(
-      JSON.stringify({
-        type: "workflow_started",
-        instanceId: instance.id,
-        contextId,
-        status: "running",
-        pollUrl: `/v1/workflow/${instance.id}`,
-      }),
-      { headers: { "Content-Type": "application/json" } }
-    );
   } catch (error) {
     console.error("[handleWorkflowChat] Error:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    const status = message.startsWith("Invalid request.") ? 400 : 500;
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
+      JSON.stringify({ error: message }),
+      { status, headers: { "Content-Type": "application/json" } }
     );
   }
 }
