@@ -191,6 +191,13 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
         );
       }
 
+      // Mark session as processing BEFORE returning - guarantees the session
+      // cannot appear idle on immediate subsequent polls.
+      existingSession.status = "processing";
+      existingSession.updatedAt = Date.now();
+      await saveSessionState(env, existingSession);
+      logTiming(env, sessionId, "chat.session.processing_marked", requestStart);
+
       // Queue the event first (for ordering guarantees)
       const enqueueResult = await enqueueSessionInput(env, sessionId, {
         type: "prompt",
@@ -214,9 +221,13 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
       });
       logTiming(env, sessionId, "chat.sendEvent.done", eventStart);
 
+      // Get fresh event cursor - not the potentially stale one from session state
+      const freshEventCursor = await getLatestEventCursor(env, sessionId);
+      logTiming(env, sessionId, "chat.event_cursor.fresh", requestStart);
+
       const response: ChatSubmittedResponse = {
         sessionId,
-        eventCursor: existingSession.nextEventCursor,
+        eventCursor: freshEventCursor,
         isNewSession: false,
       };
 

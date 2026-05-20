@@ -157,6 +157,11 @@ export class ClawflareTUIApp {
   private agentEvents: SessionEvent[] = [];
   private skills: AgentSkill[] = [];
   private skillsPrompt = "";
+  
+  // Track pending optimistic user message during processing
+  private pendingUserMessage: DisplayMessage | null = null;
+  private pendingMessageCount = 0;  // Counter to detect new server messages
+  private sawProcessingStatus = false; // Track if we've seen processing during this poll
 
   // Estimate tokens using Pi's approach: chars/4 (conservative overestimate)
   private estimateTokens(text: string): number {
@@ -317,7 +322,8 @@ export class ClawflareTUIApp {
 
   private formatMessageForDisplay(message: AgentMessage): DisplayMessage {
     const role = this.toDisplayRole(message.role);
-    const content = this.extractContent(message.content);
+    const rawContent = this.extractContent(message.content);
+    const content = this.stripSkillsPrefix(rawContent);
 
     if (role === "assistant" && this.hasToolCalls(message.content)) {
       const toolNames = this.getToolCallNames(message.content);
@@ -342,6 +348,16 @@ export class ClawflareTUIApp {
       isError: Boolean(toolMessage.isError),
       content: `${toolName}: ${content}`,
     };
+  }
+
+  // Strip skills prompt prefix from displayed user messages
+  private stripSkillsPrefix(content: string): string {
+    if (!this.skillsPrompt) return content;
+    const prefix = this.skillsPrompt + "\n\n";
+    if (content.startsWith(prefix)) {
+      return content.slice(prefix.length);
+    }
+    return content;
   }
 
   private updateHeader(): void {
@@ -539,7 +555,11 @@ export class ClawflareTUIApp {
     // Clear editor
     this.editor.setText("");
 
-    // Add user message
+    // Add user message optimistically - but also track it
+    this.pendingUserMessage = { role: "user", content: displayContent };
+    this.pendingMessageCount = this.messages.length;
+    this.sawProcessingStatus = false;
+    
     this.messages.push({ role: "user", content: displayContent });
     this.isLoading = true;
     this.error = null;
@@ -574,6 +594,9 @@ export class ClawflareTUIApp {
       this.setStatus("Error", "red");
     }).finally(() => {
       this.isLoading = false;
+      this.pendingUserMessage = null;
+      this.pendingMessageCount = 0;
+      this.sawProcessingStatus = false;
       this.abortController = null;
       this.agentEvents = [];
       this.renderMessages();
@@ -581,9 +604,36 @@ export class ClawflareTUIApp {
   }
 
   private async pollSession(sessionId: string, signal?: AbortSignal, initialCursor?: string): Promise<void> {
+    // Track whether we've seen processing status - defensive check against stale idle
     for await (const update of this.client.streamSession(sessionId, signal, { initialCursor })) {
+      // Track if we've seen processing status during this poll cycle
+      if (update.session.status === "processing") {
+        this.sawProcessingStatus = true;
+      }
+      
+      // Only treat idle as complete if we've seen evidence of processing
+      // (new events, message count increased, or status was processing)
+      const hasNewEvents = update.newEvents.length > 0;
+      const hasMoreMessages = update.session.messages.length > this.pendingMessageCount;
+      const safeToComplete = this.sawProcessingStatus || hasNewEvents || hasMoreMessages;
+      
+      // Defensive: don't accept idle until we've seen evidence this submit was processed
+      const actuallyComplete = update.complete && (safeToComplete || update.session.status === "error");
+      
       // Update messages (conversation history)
-      this.messages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
+      // If we have a pending optimistic message, check if server caught up
+      const serverMessages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
+      
+      if (this.pendingUserMessage && !this.messagesHaveUserMessage(serverMessages, this.pendingUserMessage)) {
+        // Server hasn't caught up yet - show server messages + our pending message
+        this.messages = [...serverMessages, this.pendingUserMessage];
+      } else {
+        // Server is caught up or no pending message - use server messages directly
+        if (this.pendingUserMessage) {
+          this.pendingUserMessage = null; // Successfully reconciled
+        }
+        this.messages = serverMessages;
+      }
       
       // Update events for progress display
       if (update.newEvents.length > 0) {
@@ -591,7 +641,7 @@ export class ClawflareTUIApp {
       }
       
       // Check if complete
-      if (update.complete) {
+      if (actuallyComplete) {
         if (update.session.status === "error") {
           this.error = update.session.errorMessage || "Processing failed";
           this.messages.push({ role: "error", content: this.error });
@@ -599,6 +649,15 @@ export class ClawflareTUIApp {
         break;
       }
     }
+  }
+
+  // Check if server messages contain content matching our pending optimistic message
+  private messagesHaveUserMessage(serverMessages: DisplayMessage[], pendingMessage: DisplayMessage): boolean {
+    // Compare by content - if any user message matches our pending content, consider it reconciled
+    return serverMessages.some((m) => 
+      m.role === "user" && 
+      m.content.trim() === pendingMessage.content.trim()
+    );
   }
 
   private withSkillsSummary(prompt: string): string {
