@@ -2,8 +2,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { D1SessionRepository } from "./d1-sessions.js";
-import type { SessionMetadataState } from "../interfaces.js";
+import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
+import type { SessionMetadataState } from "../../../src/data/interfaces.js";
 
 // Mock D1Database for testing
 class MockD1Database {
@@ -57,6 +57,9 @@ class MockD1PreparedStatement {
   }
 
   run(): Promise<unknown> {
+    void this.db;
+    void this.sql;
+    void this.bindings;
     return Promise.resolve({});
   }
 }

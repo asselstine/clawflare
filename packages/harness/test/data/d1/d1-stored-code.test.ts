@@ -2,8 +2,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { D1StoredCodeRepository } from "./d1-stored-code.js";
-import type { UpsertStoredCodeParams, StoredCodeEntry } from "../interfaces.js";
+import { D1StoredCodeRepository } from "../../../src/data/d1/d1-stored-code.js";
+import type { UpsertStoredCodeParams, StoredCodeEntry } from "../../../src/data/interfaces.js";
 
 test("D1StoredCodeRepository is defined", () => {
   assert.ok(D1StoredCodeRepository, "D1StoredCodeRepository should be defined");

@@ -9,7 +9,7 @@ import {
   formatSkillsForPrompt,
   expandSkill,
   type AgentSkill,
-} from "./skills.js";
+} from "../src/skills.js";
 
 describe("skills", () => {
   describe("formatSkillsForPrompt", () => {
@@ -216,13 +216,13 @@ describe("skills", () => {
     });
 
     it("should parse boolean false", () => {
-      const rawValue = "false";
+      const rawValue: string = "false";
       const parsed = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
       assert.strictEqual(parsed, false);
     });
 
     it("should keep string values", () => {
-      const rawValue = "some string";
+      const rawValue: string = "some string";
       const parsed = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
       assert.strictEqual(parsed, "some string");
     });

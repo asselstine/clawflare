@@ -137,7 +137,7 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
     name: workerName,
     compatibility_date: "2025-01-01",
     compatibility_flags: ["nodejs_compat"],
-    main: "src/test-index.ts",
+    main: "src/e2e-entry.ts",
     minify: false,
     define: {
       "process.env.NODE_ENV": "\"test\"",

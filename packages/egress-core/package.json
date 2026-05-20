@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
-    "test": "node --import=tsx **/*.test.ts"
+    "test": "node --import=tsx --test $(find test -name '*.test.ts' | sort)"
   },
   "devDependencies": {
     "tsx": "^4.19.0",

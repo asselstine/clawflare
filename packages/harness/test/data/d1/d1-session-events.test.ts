@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
-import { D1SessionEventRepository } from "./d1-session-events.js";
-import { D1SessionRepository } from "./d1-sessions.js";
+import { D1SessionEventRepository } from "../../../src/data/d1/d1-session-events.js";
+import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATION_PATH = join(__dirname, "../../../migrations/0001_initial_data_layer.sql");

@@ -8,7 +8,7 @@ import {
   isTimingDebugEnabled,
   logTiming,
   type Env,
-} from "./diagnostics.js";
+} from "../src/diagnostics.js";
 
 describe("diagnostics", () => {
   describe("timingStart", () => {

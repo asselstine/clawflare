@@ -3,7 +3,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { EgressRegistry, hostnameMatchesDomain, type EgressHandler, type EgressContext } from "./index.js";
+import { EgressRegistry, hostnameMatchesDomain, type EgressHandler, type EgressContext } from "../src/index.js";
 
 describe("egress-core", () => {
   describe("EgressRegistry", () => {
@@ -111,8 +111,8 @@ describe("egress-core", () => {
         name: "fetch-handler",
         description: "Handler with fetch",
         domains: ["api.example.com"],
-        handles: (req: Request) => new URL(req.url).hostname === "api.example.com",
-        fetch: async (req: Request, ctx: EgressContext<{ TOKEN: string }>) => {
+        handles: (_req: Request, _ctx: EgressContext<{ TOKEN: string }>) => true,
+        fetch: async (_req: Request, ctx: EgressContext<{ TOKEN: string }>) => {
           return new Response(JSON.stringify({ token: ctx.env.TOKEN }));
         },
       };
@@ -120,9 +120,9 @@ describe("egress-core", () => {
       const request = new Request("https://api.example.com/data");
       const context: EgressContext<{ TOKEN: string }> = { env: { TOKEN: "secret123" } };
 
-      assert.strictEqual(handler.handles(request), true);
+      assert.strictEqual(await handler.handles(request, context), true);
       const response = await handler.fetch!(request, context);
-      const data = await response.json();
+      const data = await response.json() as { token: string };
       assert.strictEqual(data.token, "secret123");
     });
 
@@ -132,7 +132,7 @@ describe("egress-core", () => {
         description: "Handler with connect",
         domains: ["ws.example.com"],
         handles: () => true,
-        connect: (socket: unknown) => {
+        connect: (_socket: unknown) => {
           // WebSocket connection logic
         },
       };
@@ -140,7 +140,7 @@ describe("egress-core", () => {
       assert.strictEqual(typeof handler.connect, "function");
     });
 
-    it("should work with minimal implementation (handles only)", () => {
+    it("should work with minimal implementation (handles only)", async () => {
       const handler: EgressHandler = {
         name: "minimal",
         description: "Minimal handler",
@@ -150,7 +150,7 @@ describe("egress-core", () => {
 
       assert.strictEqual(typeof handler.fetch, "undefined");
       assert.strictEqual(typeof handler.connect, "undefined");
-      assert.strictEqual(handler.handles(new Request("https://example.com")), true);
+      assert.strictEqual(await handler.handles(new Request("https://example.com"), {} as EgressContext), true);
     });
   });
 });

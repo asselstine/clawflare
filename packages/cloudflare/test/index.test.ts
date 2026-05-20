@@ -3,7 +3,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { registerEgressHandlers } from "./index.js";
+import { registerEgressHandlers } from "../src/index.js";
 import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
 
 describe("cloudflare egress handler", () => {
@@ -78,7 +78,7 @@ describe("cloudflare egress handler", () => {
       const context = createContext({ CLOUDFLARE_API_TOKEN: "test", MOCK_AI: "true" });
 
       const response = await handler.fetch!(request, context);
-      const data = await response.json();
+      const data = await response.json() as { ok: boolean; handler: string; url: string };
 
       assert.strictEqual(data.ok, true);
       assert.strictEqual(data.handler, "cloudflare");
@@ -95,7 +95,7 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };
@@ -126,7 +126,7 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };
@@ -157,7 +157,7 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };

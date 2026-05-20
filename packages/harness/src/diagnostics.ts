@@ -1,5 +1,3 @@
-import type { Env } from "./internal-types/index.js";
-
 export type { Env } from "./internal-types/index.js";
 
 interface TimingEvent {
@@ -37,7 +35,7 @@ export function timingStart(): number {
  * Log a timing event for diagnostics.
  */
 export function logTiming(
-  env: Env,
+  env: { CLAWFLARE_DEBUG_TIMING?: unknown },
   sessionId: string | undefined,
   phase: string,
   startedAt?: number,

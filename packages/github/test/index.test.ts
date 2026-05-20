@@ -3,8 +3,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { registerEgressHandlers } from "./index.js";
-import { EgressRegistry, hostnameMatchesDomain, type EgressContext } from "@clawflare/egress-core";
+import { registerEgressHandlers } from "../src/index.js";
+import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
 
 describe("github egress handler", () => {
   interface MockEnv {
@@ -97,7 +97,7 @@ describe("github egress handler", () => {
       const context = createContext({ MOCK_AI: "true" });
 
       const response = await handler.fetch!(request, context);
-      const data = await response.json();
+      const data = await response.json() as { ok: boolean; handler: string; url: string };
 
       assert.strictEqual(data.ok, true);
       assert.strictEqual(data.handler, "github");
@@ -115,7 +115,7 @@ describe("github egress handler", () => {
       // Mock fetch by creating a custom response
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };
@@ -139,7 +139,7 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };
@@ -165,7 +165,7 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };
@@ -193,7 +193,7 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: RequestInfo | URL) => {
+      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
       };

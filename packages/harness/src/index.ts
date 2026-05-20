@@ -2,7 +2,7 @@
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
 import { HttpGateway } from "./egress/gateway.js";
-import { PersistentSessionWorkflow } from "./persistent-workflow.js";
+import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import { handleHttpRequest } from "./http/router.js";
 

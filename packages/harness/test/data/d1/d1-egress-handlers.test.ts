@@ -2,8 +2,8 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { D1EgressHandlerRepository } from "./d1-egress-handlers.js";
-import type { UpsertEgressHandlerParams, EgressHandlerMetadata } from "../interfaces.js";
+import { D1EgressHandlerRepository } from "../../../src/data/d1/d1-egress-handlers.js";
+import type { UpsertEgressHandlerParams, EgressHandlerMetadata } from "../../../src/data/interfaces.js";
 
 test("D1EgressHandlerRepository is defined", () => {
   assert.ok(D1EgressHandlerRepository, "D1EgressHandlerRepository should be defined");

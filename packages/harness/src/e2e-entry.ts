@@ -2,7 +2,7 @@
 // This is used for E2E testing
 
 import { HttpGateway, routeOutboundRequest } from "./egress/gateway.js";
-import { PersistentSessionWorkflow } from "./persistent-workflow.js";
+import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";

@@ -13,6 +13,7 @@ export async function routeOutboundRequest(
   const data = getDataLayer(env);
   const metadata = await data.egressHandlers.list(true);
 
+  // Check registered handlers first for domain-specific handling
   for (const item of metadata) {
     const handler = registry.get(item.name);
     if (!handler?.fetch) continue;
@@ -28,13 +29,8 @@ export async function routeOutboundRequest(
     }
   }
 
-  return new Response(
-    JSON.stringify({
-      error: "Outbound request blocked",
-      url: request.url,
-    }),
-    { status: 403, headers: { "Content-Type": "application/json" } }
-  );
+  // Allow generic outbound requests by default for tools
+  return fetch(request);
 }
 
 export class HttpGateway extends WorkerEntrypoint<Env, { requestId?: string }> {

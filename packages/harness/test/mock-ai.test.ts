@@ -6,7 +6,7 @@ import assert from "node:assert";
 import {
   createMockStream,
   shouldUseMockAI,
-} from "./mock-ai.js";
+} from "../src/mock-ai.js";
 import type { Model, Context, AssistantMessage } from "@earendil-works/pi-ai";
 
 describe("mock-ai", () => {
@@ -27,11 +27,11 @@ describe("mock-ai", () => {
   });
 
   describe("createMockStream", () => {
-    const mockModel: Model<"openai-completions"> = {
+    const mockModel = {
       id: "mock-model",
       provider: "mock",
       api: "openai-completions",
-    };
+    } as Model<"openai-completions">;
 
     it("should return a stream function", () => {
       const streamFn = createMockStream();
@@ -90,8 +90,8 @@ describe("mock-ai", () => {
       }
 
       assert.strictEqual(textDeltas.length, 1);
-      assert(textDeltas[0].includes("Hello"));
-      assert(textDeltas[0].includes("[HARNESS MOCK]"));
+      assert(textDeltas[0]!.includes("Hello"));
+      assert(textDeltas[0]!.includes("[HARNESS MOCK]"));
     });
 
     it("should emit done event with final message", async () => {
@@ -146,7 +146,7 @@ describe("mock-ai", () => {
         }
       }
 
-      assert(textDeltas[0].includes("[CUSTOM]"));
+      assert(textDeltas[0]!.includes("[CUSTOM]"));
     });
 
     it("should handle HISTORY_TEST mode", async () => {
@@ -167,8 +167,8 @@ describe("mock-ai", () => {
         }
       }
 
-      assert(textDeltas[0].includes("HISTORY_TEST_MODE"));
-      assert(textDeltas[0].includes("Found 2 user messages"));
+      assert(textDeltas[0]!.includes("HISTORY_TEST_MODE"));
+      assert(textDeltas[0]!.includes("Found 2 user messages"));
     });
 
     it("should handle array-based message content", async () => {
@@ -190,7 +190,7 @@ describe("mock-ai", () => {
         }
       }
 
-      assert(textDeltas[0].includes("Array content"));
+      assert(textDeltas[0]!.includes("Array content"));
     });
 
     it("should set usage in final message", async () => {

@@ -18,7 +18,7 @@
     "timing:analyze": "node scripts/analyze-timing.mjs",
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
-    "test": "node --import=tsx --test $(find src -name '*.test.ts' | sort)",
+    "test": "node --import=tsx --test $(find test -name '*.test.ts' | sort)",
     "db:migrations:create": "wrangler d1 migrations create clawflare",
     "db:migrations:list": "wrangler d1 migrations list clawflare",
     "db:migrations:apply:local": "wrangler d1 migrations apply clawflare --local",

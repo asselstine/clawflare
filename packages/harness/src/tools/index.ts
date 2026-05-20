@@ -18,11 +18,13 @@ interface StoreCodeParams {
 
 interface ExecuteStoredCodeParams {
   name: string;
+  description?: string;
   input?: unknown;
 }
 
 interface ExecuteCodeParams {
   code: string;
+  description?: string;
   input?: unknown;
 }
 
@@ -97,6 +99,7 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
     label: "Execute Stored Code",
     parameters: Type.Object({
       name: Type.String({ description: "Name of the stored code to execute" }),
+      description: Type.Optional(Type.String({ description: "Brief description of this execution (80 chars max)" })),
       input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
     }) as TSchema,
     execute: async (
@@ -131,6 +134,7 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
     label: "Execute Code",
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript code to execute" }),
+      description: Type.Optional(Type.String({ description: "Brief description of what the code does (80 chars max)" })),
       input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
     }) as TSchema,
     execute: async (
@@ -152,7 +156,7 @@ function createSearchTool(env: Env): AgentTool {
   return {
     name: "search",
     description:
-      "Search stored code and egress handlers. Use this to find reusable code or check which network domains are supported before attempting outbound HTTP.",
+      "Search stored code and egress handlers. Use this to find reusable code or discover domain-specific egress handlers that provide enhanced authentication/capabilities for outbound HTTP requests.",
     label: "Search",
     parameters: Type.Object({
       collection: Type.Optional(
