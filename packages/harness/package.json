@@ -18,7 +18,11 @@
     "timing:analyze": "node scripts/analyze-timing.mjs",
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
-    "test": "node --import=tsx **/*.test.ts"
+    "test": "node --import=tsx **/*.test.ts",
+    "db:migrations:create": "wrangler d1 migrations create clawflare",
+    "db:migrations:list": "wrangler d1 migrations list clawflare",
+    "db:migrations:apply:local": "wrangler d1 migrations apply clawflare --local",
+    "db:migrations:apply:remote": "wrangler d1 migrations apply clawflare --remote"
   },
   "dependencies": {
     "@clawflare/cloudflare": "workspace:*",

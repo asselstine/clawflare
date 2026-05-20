@@ -1,14 +1,13 @@
 // Test entry point with additional test endpoints
 // This is used for E2E testing
 
-import { ClawflareDatastore } from "./datastore.js";
 import { HttpGateway } from "./egress/gateway.js";
 import { ClawflareSessionStore } from "./session-do.js";
 import { PersistentSessionWorkflow } from "./persistent-workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import type { Env } from "./internal-types/index.js";
 
-export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
+export { HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Test endpoints
 export default {

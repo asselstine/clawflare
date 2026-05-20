@@ -1,39 +1,26 @@
-// Session state management - backed by a per-session Durable Object.
+// Session state management - backed by D1
+// This module provides a lightweight facade over the D1 data layer
+
 import type {
   Env,
   SessionMetadataState,
   SessionInputEvent,
-  StoredSessionEvent,
   NewSessionEvent,
 } from "./internal-types/index.js";
 import type { SessionEvent } from "./types.js";
+import { createDataLayer } from "./data/index.js";
 
-function getSessionStore(env: Env, sessionId: string): DurableObjectStub {
-  const id = env.SESSION_STORE.idFromName(sessionId);
-  return env.SESSION_STORE.get(id);
-}
+// Cached data layer per environment to avoid recreating
+const dataLayerCache = new WeakMap<Env, ReturnType<typeof createDataLayer>>();
 
-async function jsonFetch<T>(stub: DurableObjectStub, path: string, init?: RequestInit): Promise<T> {
-  const response = await stub.fetch(`https://session-store.local${path}`, init);
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`Session store request failed: ${response.status} ${error}`);
+function getDataLayer(env: Env) {
+  let layer = dataLayerCache.get(env);
+  if (!layer) {
+    layer = createDataLayer(env);
+    dataLayerCache.set(env, layer);
   }
-  return response.json() as Promise<T>;
+  return layer;
 }
-
-// Storage keys for session data (documented for reference)
-// const STATE_KEY = "state";
-// const EVENT_META_KEY = "event_meta";
-// const EVENT_PREFIX = "evt/";
-// const WORKFLOW_SESSION_KEY = "workflowSession";
-// const WORKFLOW_ID_KEY = "workflowId";
-// const INPUT_QUEUE_KEY = "inputQueue";
-// const SESSION_ACTIVE_KEY = "sessionActive";
-
-// const MAX_EVENTS_PER_SESSION = 1000;
-// const EVENT_TRIM_BATCH = 100;
-// const MAX_QUEUE_SIZE = 100;
 
 /**
  * Create or update a session state.
@@ -42,10 +29,7 @@ export async function saveSessionState(
   env: Env,
   session: SessionMetadataState,
 ): Promise<void> {
-  await jsonFetch(getSessionStore(env, session.id), "/state", {
-    method: "PUT",
-    body: JSON.stringify(session),
-  });
+  await getDataLayer(env).sessions.save(session);
 }
 
 /**
@@ -55,18 +39,11 @@ export async function loadSessionState(
   env: Env,
   sessionId: string,
 ): Promise<SessionMetadataState | null> {
-  const stub = getSessionStore(env, sessionId);
-  const response = await stub.fetch("https://session-store.local/state");
-  if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(`Session state fetch failed: ${response.status} ${await response.text()}`);
-  }
-  return response.json() as Promise<SessionMetadataState>;
+  return getDataLayer(env).sessions.findById(sessionId);
 }
 
 /**
- * Mark a polling session as failed so clients do not wait forever when
- * Workflow execution throws outside the normal agent/session update path.
+ * Mark a polling session as failed.
  */
 export async function markSessionError(
   env: Env,
@@ -74,20 +51,18 @@ export async function markSessionError(
   error: unknown,
 ): Promise<void> {
   const message = error instanceof Error ? error.message : String(error);
-  await jsonFetch(getSessionStore(env, sessionId), "/state/error", {
-    method: "POST",
-    body: JSON.stringify({ message }),
-  });
+  await getDataLayer(env).sessions.markError(sessionId, message);
 }
 
+/**
+ * Get the latest event cursor for a session.
+ */
 export async function getLatestEventCursor(env: Env, sessionId: string): Promise<string> {
-  const response = await jsonFetch<{ cursor: string }>(getSessionStore(env, sessionId), "/cursor");
-  return response.cursor;
+  return getDataLayer(env).events.latestCursor(sessionId);
 }
 
 /**
  * Get events for a session, optionally filtered by sequence cursor.
- * Returns public SessionEvent type (converts from stored events).
  */
 export async function getSessionEvents(
   env: Env,
@@ -95,39 +70,18 @@ export async function getSessionEvents(
   sinceCursor?: string,
   limit: number = 100,
 ): Promise<{ events: SessionEvent[]; nextCursor: string }> {
-  const url = new URL("https://session-store.local/events");
-  url.searchParams.set("since", sinceCursor || "0");
-  url.searchParams.set("limit", String(limit));
-  const result = await jsonFetch<{ events: StoredSessionEvent[]; nextCursor: string }>(
-    getSessionStore(env, sessionId),
-    `${url.pathname}${url.search}`
-  );
-  // Convert stored events to public SessionEvent type
-  const events = result.events.map(convertStoredToPublicEvent);
-  return { events, nextCursor: result.nextCursor };
+  return getDataLayer(env).events.listSince(sessionId, sinceCursor, limit);
 }
 
 /**
- * Convert stored event to public SessionEvent
- */
-function convertStoredToPublicEvent(stored: StoredSessionEvent): SessionEvent {
-  // Storedevents are a subset of SessionEvent - cast for now
-  // In production, this would properly convert between the formats
-  return stored as unknown as SessionEvent;
-}
-
-/**
- * Append events to a session's event log and assign per-session sequence numbers.
+ * Append events to a session's event log.
  */
 export async function appendSessionEvents(
   env: Env,
   sessionId: string,
   newEvents: NewSessionEvent[],
 ): Promise<void> {
-  await jsonFetch(getSessionStore(env, sessionId), "/events", {
-    method: "POST",
-    body: JSON.stringify({ events: newEvents }),
-  });
+  await getDataLayer(env).events.append(sessionId, newEvents);
 }
 
 /**
@@ -137,12 +91,7 @@ export async function getSessionWorkflowId(
   env: Env,
   sessionId: string,
 ): Promise<string | null> {
-  try {
-    const response = await jsonFetch<{ workflowId: string }>(getSessionStore(env, sessionId), "/workflow-id");
-    return response.workflowId;
-  } catch {
-    return null;
-  }
+  return getDataLayer(env).runtime.getWorkflowId(sessionId);
 }
 
 /**
@@ -153,10 +102,7 @@ export async function saveSessionWorkflowId(
   sessionId: string,
   workflowId: string,
 ): Promise<void> {
-  await jsonFetch(getSessionStore(env, sessionId), "/workflow-id", {
-    method: "PUT",
-    body: JSON.stringify({ workflowId }),
-  });
+  await getDataLayer(env).runtime.saveWorkflowId(sessionId, workflowId);
 }
 
 /**
@@ -166,29 +112,18 @@ export async function getSessionInputQueue(
   env: Env,
   sessionId: string,
 ): Promise<{ pending: number; max: number; events: SessionInputEvent[] }> {
-  return jsonFetch(getSessionStore(env, sessionId), "/input-queue");
+  return getDataLayer(env).inputQueue.status(sessionId);
 }
 
 /**
  * Enqueue an input event for the session workflow.
- * Returns 429 if queue is full.
  */
 export async function enqueueSessionInput(
   env: Env,
   sessionId: string,
   event: SessionInputEvent,
 ): Promise<{ ok: boolean; queued: number; error?: string }> {
-  const stub = getSessionStore(env, sessionId);
-  const response = await stub.fetch("https://session-store.local/input-queue", {
-    method: "POST",
-    body: JSON.stringify(event),
-  });
-  if (!response.ok) {
-    const error = await response.json() as { error: string; current: number; max: number };
-    return { ok: false, queued: error.current, error: error.error };
-  }
-  const result = await response.json() as { ok: boolean; queued: number };
-  return result;
+  return getDataLayer(env).inputQueue.enqueue(sessionId, event);
 }
 
 /**
@@ -198,9 +133,7 @@ export async function dequeueSessionInput(
   env: Env,
   sessionId: string,
 ): Promise<{ event: SessionInputEvent | null; remaining: number }> {
-  return jsonFetch(getSessionStore(env, sessionId), "/input-queue", {
-    method: "DELETE",
-  });
+  return getDataLayer(env).inputQueue.dequeue(sessionId);
 }
 
 /**
@@ -210,8 +143,7 @@ export async function isSessionActive(
   env: Env,
   sessionId: string,
 ): Promise<boolean> {
-  const response = await jsonFetch<{ active: boolean }>(getSessionStore(env, sessionId), "/session-active");
-  return response.active;
+  return getDataLayer(env).runtime.isActive(sessionId);
 }
 
 /**
@@ -222,10 +154,7 @@ export async function setSessionActive(
   sessionId: string,
   active: boolean,
 ): Promise<void> {
-  await jsonFetch(getSessionStore(env, sessionId), "/session-active", {
-    method: "PUT",
-    body: JSON.stringify({ active }),
-  });
+  await getDataLayer(env).runtime.setActive(sessionId, active);
 }
 
 /**
@@ -236,13 +165,9 @@ export async function markSessionClosed(
   sessionId: string,
   reason: "user" | "timeout" | "error",
 ): Promise<void> {
-  const state = await loadSessionState(env, sessionId);
-  if (state) {
-    state.status = reason === "timeout" ? "expired" : "closed";
-    state.updatedAt = Date.now();
-    await saveSessionState(env, state);
-  }
-  await setSessionActive(env, sessionId, false);
+  const layer = getDataLayer(env);
+  await layer.sessions.markClosed(sessionId, reason);
+  await layer.runtime.setActive(sessionId, false);
 }
 
 // Re-export status for convenience

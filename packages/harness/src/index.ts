@@ -1,7 +1,6 @@
 // Clawflare Harness - Main Worker Entry Point
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
-import { ClawflareDatastore } from "./datastore.js";
 import { HttpGateway } from "./egress/gateway.js";
 import { ClawflareSessionStore } from "./session-do.js";
 import { PersistentSessionWorkflow } from "./persistent-workflow.js";
@@ -39,8 +38,8 @@ export type {
   SessionEvent,
 } from "./types.js";
 
-// Export the Datastore Durable Object class and Workflow
-export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
+// Export the entrypoints for Cloudflare Workers
+export { HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -434,38 +433,61 @@ async function handleCloseSession(sessionId: string, env: Env): Promise<Response
   }
 }
 
-// List sessions - returns active and recent sessions
+// List sessions - returns active and recent sessions using D1
 async function handleListSessions(url: URL, env: Env): Promise<Response> {
   try {
-    // Read optional status filter
-    const statusFilter = url.searchParams.get("status");
+    const { createDataLayer } = await import("./data/index.js");
+    const dataLayer = createDataLayer(env);
 
-    const response: SessionListResponse = {
-      sessions: [],
-      total: 0,
-    };
+    // Parse query parameters
+    const statusFilter = url.searchParams.get("status") || "all";
+    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
+    const offset = parseInt(url.searchParams.get("offset") || "0", 10);
 
     // If specific session ID provided, return that one
     const sessionId = url.searchParams.get("sessionId");
     if (sessionId) {
-      const state = await loadSessionState(env, sessionId);
+      const state = await dataLayer.sessions.findById(sessionId);
       if (state) {
         const summary: SessionSummary = {
           id: state.id,
           workflowId: state.workflowId,
           status: state.status,
-          messageCount: 0,
+          messageCount: 0, // Could query events for count
           updatedAt: state.updatedAt,
           isActive: state.status === "idle" || state.status === "processing",
         };
-        if (!statusFilter || statusFilter === "all" || state.status === statusFilter) {
-          response.sessions.push(summary);
-          response.total = 1;
-        }
+
+        const sessions = [summary];
+        const total = 1;
+
+        const response: SessionListResponse = { sessions, total };
+        return new Response(JSON.stringify(response), {
+          headers: { "Content-Type": "application/json" },
+        });
       }
+      
+      // Session not found
+      const response: SessionListResponse = { sessions: [], total: 0 };
+      return new Response(JSON.stringify(response), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
-    return new Response(JSON.stringify(response), {
+    // List sessions from D1
+    const sessions = await dataLayer.sessions.list({
+      status: statusFilter as "all" | import("./data/interfaces.js").SessionStatus,
+      limit,
+      offset,
+    });
+
+    const total = await dataLayer.sessions.count({
+      status: statusFilter as "all" | import("./data/interfaces.js").SessionStatus,
+    });
+
+    const response: SessionListResponse = { sessions, total };
+
+    return new Response(JSON.stringify(response, null, 2), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
@@ -569,11 +591,10 @@ async function handleGetInfo(env: Env): Promise<Response> {
   }
 }
 
-// Handle cf_debug - inspect DO storage details
+// Handle cf_debug - inspect session details from D1
 async function handleCfDebug(env: Env, url: URL): Promise<Response> {
   try {
     const sessionId = url.searchParams.get("sessionId");
-    const key = url.searchParams.get("key");
 
     if (!sessionId) {
       return new Response(
@@ -582,20 +603,47 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
       );
     }
 
-    const response = await getSessionStore(env, sessionId).fetch(
-      `https://session-store.local/cf_debug${key ? `?key=${key}` : ""}`
-    );
+    const { createDataLayer } = await import("./data/index.js");
+    const dataLayer = createDataLayer(env);
 
-    if (!response.ok) {
-      const errorText = await response.text();
+    // Get session metadata
+    const session = await dataLayer.sessions.findById(sessionId);
+    if (!session) {
       return new Response(
-        JSON.stringify({ error: `Debug fetch failed: ${response.status} - ${errorText}` }),
-        { status: response.status, headers: { "Content-Type": "application/json" } }
+        JSON.stringify({ error: "Session not found" }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
       );
     }
 
-    const data = await response.json();
-    return new Response(JSON.stringify(data, null, 2), {
+    // Get event count from events repository
+    const eventCursor = await dataLayer.events.latestCursor(sessionId);
+    const eventCount = { count: parseInt(eventCursor, 10) };
+
+    // Get queue depth
+    const queueStatus = await dataLayer.inputQueue.status(sessionId);
+
+    // Get recent events
+    const { events: recentEvents } = await dataLayer.events.listSince(sessionId, undefined, 20);
+
+    const debugInfo = {
+      timestamp: Date.now(),
+      sessionId,
+      session: {
+        ...session,
+        isActive: session.status === "idle" || session.status === "processing",
+      },
+      stats: {
+        eventCount: eventCount.count,
+        queueDepth: queueStatus.pending,
+      },
+      recentEvents: recentEvents.map(e => ({
+        sequence: e.sequence,
+        timestamp: e.timestamp,
+        type: e.type,
+      })),
+    };
+
+    return new Response(JSON.stringify(debugInfo, null, 2), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
@@ -604,11 +652,6 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
-}
-
-function getSessionStore(env: Env, sessionId: string): DurableObjectStub {
-  const id = env.SESSION_STORE.idFromName(sessionId);
-  return env.SESSION_STORE.get(id);
 }
 
 async function sha256Prefix(value: string): Promise<string> {

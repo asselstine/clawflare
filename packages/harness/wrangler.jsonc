@@ -29,13 +29,21 @@
     }
   ],
 
-  // SQLite Durable Object for centralized storage
+  // D1 Database - Primary persistent storage for sessions, events, and code
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "clawflare",
+      "database_id": "<database-id>",
+      "preview_database_id": "<preview-database-id>",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Durable Objects - WebSocket coordination only
+  // Session state and stored data are now in D1
   "durable_objects": {
     "bindings": [
-      {
-        "name": "DATASTORE",
-        "class_name": "ClawflareDatastore"
-      },
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
@@ -51,7 +59,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ClawflareDatastore"]
+      "deleted_classes": ["ClawflareDatastore"]
     },
     {
       "tag": "v2",

@@ -32,11 +32,11 @@ export interface Env {
   // API token for authentication
   CLAWFLARE_API_TOKEN: string;
 
-  // Durable Object for strongly consistent agent session state/events
-  SESSION_STORE: DurableObjectNamespace;
+  // D1 Database - Primary persistent storage
+  DB: D1Database;
 
-  // SQLite Durable Object for stored code and egress handlers
-  DATASTORE: DurableObjectNamespace;
+  // Durable Object for session coordination (optional, may be removed)
+  SESSION_STORE: DurableObjectNamespace;
 
   // Durable Object for WebSocket workflow session coordination
   WEBSOCKET_SESSION: DurableObjectNamespace;
