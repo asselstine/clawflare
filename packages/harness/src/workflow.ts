@@ -68,11 +68,10 @@ async function runWorkflowStep<T>(
   name: string,
   callback: () => Promise<T>,
 ): Promise<T> {
-  const doStep = step.do.bind(step) as unknown as (
+  return (step.do as unknown as (
     stepName: string,
     stepCallback: () => Promise<T>,
-  ) => Promise<T>;
-  return doStep(name, callback);
+  ) => Promise<T>)(name, callback);
 }
 
 function messageTimestamp(event: AgentEvent): number | undefined {

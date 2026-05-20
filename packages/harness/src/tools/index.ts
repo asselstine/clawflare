@@ -7,7 +7,7 @@ import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "./../internal-types/index.js";
 import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDataLayer } from "../data/index.js";
-import { executeDynamicWorker } from "../runtime/dynamic-worker";
+import { executeDynamicWorker } from "./dynamic-worker";
 
 // Tool parameter types
 interface StoreCodeParams {

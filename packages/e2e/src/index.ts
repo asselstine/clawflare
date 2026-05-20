@@ -154,19 +154,13 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
       },
     ],
     durable_objects: {
-      bindings: [
-        { name: "WEBSOCKET_SESSION", class_name: "ClawflareWebSocketSession" },
-        { name: "SESSION_COORDINATOR", class_name: "ClawflareSessionCoordinator" },
-      ],
+      bindings: [{ name: "WEBSOCKET_SESSION", class_name: "ClawflareWebSocketSession" }],
     },
     // E2E deploys a brand-new Worker, so only declare currently bound DO
     // classes. Legacy production migration history is intentionally not used
     // here because delete-class migrations require a previously deployed script
     // version that exported the deleted class.
-    migrations: [
-      { tag: "v1", new_classes: ["ClawflareWebSocketSession"] },
-      { tag: "v2", new_classes: ["ClawflareSessionCoordinator"] },
-    ],
+    migrations: [{ tag: "v1", new_classes: ["ClawflareWebSocketSession"] }],
     workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "PersistentSessionWorkflow" }],
     vars: {
       AI_PROVIDER: "amazon-bedrock",
@@ -493,7 +487,7 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
-  await runner.runTest("unsupported egress is blocked", async () => {
+  await runner.runTest("generic egress is allowed", async () => {
     const response = await fetch(`${url}/__test/execute-code`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -501,9 +495,9 @@ async function runTests(url: string, token: string): Promise<void> {
         code: "const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() };",
       }),
     });
-    const data = await response.json() as { ok: boolean; result?: { status?: number } };
-    if (data.ok && data.result?.status !== 403) {
-      throw new Error(`Expected unsupported egress to be blocked, got: ${JSON.stringify(data)}`);
+    const data = await response.json() as { ok: boolean; result?: { status?: number; body?: string } };
+    if (!data.ok || data.result?.status !== 200 || !data.result.body?.includes("Example Domain")) {
+      throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
     }
   });
 

@@ -70,10 +70,6 @@
     {
       "tag": "v4",
       "deleted_classes": ["ClawflareDatastore"]
-    },
-    {
-      "tag": "v5",
-      "new_classes": ["ClawflareSessionCoordinator"]
     }
   ],
 

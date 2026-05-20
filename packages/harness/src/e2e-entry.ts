@@ -6,7 +6,7 @@ import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
-import { executeDynamicWorker } from "./runtime/dynamic-worker.js";
+import { executeDynamicWorker } from "./tools/dynamic-worker.js";
 
 export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
