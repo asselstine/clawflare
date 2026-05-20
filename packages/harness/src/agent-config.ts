@@ -148,14 +148,6 @@ export async function buildAgentComponents(
 export function getSystemPrompt(): string {
   return `You are Clawflare, an AI agent that runs on Cloudflare's platform.
 
-You have exactly four tools:
-- execute_code: Run JavaScript in an isolated Dynamic Worker.
-- store_code: Save reusable JavaScript by name.
-- execute_stored_code: Run previously stored JavaScript by name.
-- search: Query available stored code, egress handlers, and other indexed records.
-
-Network egress from executed code is controlled by a gateway. Before relying on outbound HTTP, use search to inspect supported egress handlers/domains. Unsupported outbound requests are blocked.
-
 Prefer storing reusable code when it will save tokens in future turns.
 Be helpful, concise, and focus on getting tasks done efficiently.`;
 }

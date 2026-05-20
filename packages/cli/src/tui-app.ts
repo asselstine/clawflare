@@ -230,6 +230,10 @@ export class ClawflareTUIApp {
         this.exit();
         return { consume: true };
       }
+      if (matchesKey(data, "ctrl+d")) {
+        this.exit();
+        return { consume: true };
+      }
       if (matchesKey(data, "esc")) {
         this.abortCurrentOperation();
         return { consume: true };
@@ -238,11 +242,20 @@ export class ClawflareTUIApp {
         this.toggleExpandSelectedMessage();
         return { consume: true };
       }
+      // Only handle up/down for message navigation when autocomplete is not showing
       if (matchesKey(data, "up")) {
+        if (this.editor.isShowingAutocomplete()) {
+          // Let the Editor handle up arrow for autocomplete navigation
+          return undefined;
+        }
         this.selectPreviousMessage();
         return { consume: true };
       }
       if (matchesKey(data, "down")) {
+        if (this.editor.isShowingAutocomplete()) {
+          // Let the Editor handle down arrow for autocomplete navigation
+          return undefined;
+        }
         this.selectNextMessage();
         return { consume: true };
       }
@@ -678,9 +691,15 @@ export class ClawflareTUIApp {
   }
 
   private toggleExpandSelectedMessage(): void {
-    if (this.selectedMessageIndex < 0 && this.messages.length > 0) {
+    if (this.messages.length === 0) return;
+    
+    if (this.selectedMessageIndex < 0) {
+      // First press: select the last message AND expand it
       this.selectedMessageIndex = this.messages.length - 1;
-    } else if (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.messages.length) {
+      const msg = this.messages[this.selectedMessageIndex]!;
+      msg.expanded = true;
+    } else if (this.selectedMessageIndex < this.messages.length) {
+      // Subsequent presses: toggle expand on the selected message
       const msg = this.messages[this.selectedMessageIndex]!;
       msg.expanded = !msg.expanded;
     }
@@ -806,9 +825,9 @@ export class ClawflareTUIApp {
 /help - Show this help message
 
 Shortcuts:
-Ctrl+C - Quit
+Ctrl+C or Ctrl+D - Quit
 Esc - Abort current operation
-↑/↓ - Select message
+↑/↓ - Select message (or navigate autocomplete)
 Ctrl+O - Expand/collapse selected message`,
           });
           this.renderMessages();
