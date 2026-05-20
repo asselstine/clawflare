@@ -19,6 +19,7 @@ interface RemoteDeployment {
   workerName: string;
   url: string;
   configPath: string;
+  d1Name: string;
 }
 
 interface TestResult {
@@ -111,6 +112,16 @@ function runWrangler(args: string[], options: { capture?: boolean } = {}): Promi
   });
 }
 
+function extractD1DatabaseId(output: string): string {
+  const hclMatch = output.match(/database_id\s*=\s*"([^"]+)"/);
+  if (hclMatch?.[1]) return hclMatch[1];
+  const jsonMatch = output.match(/"database_id"\s*:\s*"([^"]+)"/);
+  if (jsonMatch?.[1]) return jsonMatch[1];
+  const uuidMatch = output.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (uuidMatch?.[0]) return uuidMatch[0];
+  throw new Error(`Could not find D1 database_id in wrangler output: ${output}`);
+}
+
 function extractWorkerUrl(output: string, workerName: string): string {
   const urls = output.match(/https:\/\/[^\s]+\.workers\.dev/g) || [];
   const preferred = urls.find((url) => url.includes(workerName));
@@ -119,7 +130,7 @@ function extractWorkerUrl(output: string, workerName: string): string {
   return url.replace(/\/+$/, "");
 }
 
-async function writeTestConfig(workerName: string, workflowName: string): Promise<string> {
+async function writeTestConfig(workerName: string, workflowName: string, d1Name: string, d1DatabaseId: string): Promise<string> {
   const configPath = pathResolve(HARNESS_DIR, `wrangler.e2e.${workerName}.jsonc`);
   const config = {
     $schema: "./node_modules/wrangler/config-schema.json",
@@ -134,17 +145,27 @@ async function writeTestConfig(workerName: string, workflowName: string): Promis
     },
     services: [{ binding: "HTTP_GATEWAY", service: workerName, entrypoint: "HttpGateway" }],
     worker_loaders: [{ binding: "LOADER" }],
+    d1_databases: [
+      {
+        binding: "DB",
+        database_name: d1Name,
+        database_id: d1DatabaseId,
+        migrations_dir: "migrations",
+      },
+    ],
     durable_objects: {
       bindings: [
-        { name: "DATASTORE", class_name: "ClawflareDatastore" },
         { name: "WEBSOCKET_SESSION", class_name: "ClawflareWebSocketSession" },
-        { name: "SESSION_STORE", class_name: "ClawflareSessionStore" },
+        { name: "SESSION_COORDINATOR", class_name: "ClawflareSessionCoordinator" },
       ],
     },
+    // E2E deploys a brand-new Worker, so only declare currently bound DO
+    // classes. Legacy production migration history is intentionally not used
+    // here because delete-class migrations require a previously deployed script
+    // version that exported the deleted class.
     migrations: [
-      { tag: "v1", new_sqlite_classes: ["ClawflareDatastore"] },
-      { tag: "v2", new_classes: ["ClawflareWebSocketSession"] },
-      { tag: "v3", new_classes: ["ClawflareSessionStore"] },
+      { tag: "v1", new_classes: ["ClawflareWebSocketSession"] },
+      { tag: "v2", new_classes: ["ClawflareSessionCoordinator"] },
     ],
     workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "PersistentSessionWorkflow" }],
     vars: {
@@ -165,14 +186,19 @@ async function deployRemote(): Promise<RemoteDeployment> {
   const runId = randomUUID().slice(0, 8);
   const workerName = `clawflare-harness-e2e-${runId}`;
   const workflowName = `clawflare-agent-workflow-e2e-${runId}`;
+  const d1Name = `clawflare-e2e-${runId}`;
   let configPath = "";
 
   console.log("🚀 Creating remote E2E deployment...");
   console.log(`   Worker: ${workerName}`);
   console.log(`   Workflow: ${workflowName}`);
+  console.log(`   D1: ${d1Name}`);
 
   try {
-    configPath = await writeTestConfig(workerName, workflowName);
+    const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
+    const d1DatabaseId = extractD1DatabaseId(d1Output);
+    configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+    await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
 
     const deployOutput = await runWrangler(
       [
@@ -189,9 +215,10 @@ async function deployRemote(): Promise<RemoteDeployment> {
     const url = extractWorkerUrl(deployOutput, workerName);
 
     console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
-    return { workerName, url, configPath };
+    return { workerName, url, configPath, d1Name };
   } catch (error) {
     await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
+    await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
     if (configPath) {
       await rm(configPath, { force: true }).catch(() => undefined);
     }
@@ -628,6 +655,12 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
     await runWrangler(["delete", deployment.workerName, "--force"]);
   } catch (error) {
     console.error(`   Failed to delete Worker ${deployment.workerName}:`, error instanceof Error ? error.message : String(error));
+  }
+
+  try {
+    await runWrangler(["d1", "delete", deployment.d1Name, "--skip-confirmation"]);
+  } catch (error) {
+    console.error(`   Failed to delete D1 database ${deployment.d1Name}:`, error instanceof Error ? error.message : String(error));
   }
 
   try {

@@ -75,6 +75,7 @@ export {
 
 export type {
   SessionRow,
+  SessionWithCountRow,
   SessionEventRow,
   QueueRow,
   RuntimeRow,
@@ -84,7 +85,7 @@ export type {
 
 export {
   mapSessionRow,
-  mapSessionSummaryRow,
+  mapSessionSummaryRowWithCount,
   mapSessionEventRow,
   mapQueueRow,
   mapStoredCodeRow,

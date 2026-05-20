@@ -35,10 +35,13 @@ export interface Env {
   // D1 Database - Primary persistent storage
   DB: D1Database;
 
-  // Durable Object for session coordination (optional, may be removed)
-  SESSION_STORE: DurableObjectNamespace;
-
-  // Durable Object for WebSocket workflow session coordination
+  // Durable Objects
+  // SESSION_STORE is deprecated - kept only for migration compatibility.
+  // It is not bound in the active Worker config.
+  SESSION_STORE?: DurableObjectNamespace;
+  // SESSION_COORDINATOR handles per-session queue/event serialization
+  SESSION_COORDINATOR: DurableObjectNamespace;
+  // WebSocket session Durable Object
   WEBSOCKET_SESSION: DurableObjectNamespace;
 
   // Service binding to the HttpGateway entrypoint for Dynamic Worker egress

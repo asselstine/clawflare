@@ -2,9 +2,11 @@
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
 import { HttpGateway } from "./egress/gateway.js";
-import { ClawflareSessionStore } from "./session-do.js";
+import { ClawflareSessionCoordinator } from "./session-coordinator.js";
 import { PersistentSessionWorkflow } from "./persistent-workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
+import { ClawflareSessionStore } from "./session-do.js";
+import { ClawflareDatastore } from "./legacy-datastore-do.js";
 import { createTools } from "./tools/index.js";
 import { normalizeBedrockBearerToken } from "./agent-config.js";
 import { logTiming, timingStart } from "./diagnostics.js";
@@ -18,6 +20,7 @@ import {
 } from "./session-store.js";
 import type { Env, SessionMetadataState, SessionInputEvent } from "./internal-types/index.js";
 import type {
+  AgentMessage,
   AgentSession,
   ChatSubmittedResponse,
   ChatRequest,
@@ -39,7 +42,9 @@ export type {
 } from "./types.js";
 
 // Export the entrypoints for Cloudflare Workers
-export { HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
+// ClawflareSessionStore is exported only for legacy Durable Object migration history.
+// Active code uses D1 via session-store.ts and ClawflareSessionCoordinator.
+export { HttpGateway, ClawflareDatastore, ClawflareSessionCoordinator, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -260,21 +265,22 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
       await saveSessionState(env, initialState);
       logTiming(env, sessionId, "chat.session_state.saved", requestStart);
 
-      // Create persistent workflow
-      await env.AGENT_WORKFLOW.create({
-        id: workflowId,
-        params: { sessionId },
-      });
-      logTiming(env, sessionId, "chat.workflow.create.done", requestStart);
-
-      // Queue the event before waking the workflow so the workflow has a
-      // durable source of truth even if the wake event arrives while it is not
-      // yet waiting for input.
+      // Queue the event before creating/waking the workflow so the workflow has
+      // durable input available as soon as it starts.
       await enqueueSessionInput(env, sessionId, {
         type: "prompt",
         content: body.content,
         maxTurns: body.maxTurns,
       });
+
+      // Create persistent workflow after the initial input is queued. The
+      // workflow drains queued input on startup, so the initial prompt does not
+      // depend on wake-event timing.
+      await env.AGENT_WORKFLOW.create({
+        id: workflowId,
+        params: { sessionId },
+      });
+      logTiming(env, sessionId, "chat.workflow.create.done", requestStart);
 
       // Get workflow instance and wake it to consume the queued prompt.
       const workflowInstance = await env.AGENT_WORKFLOW.get(workflowId);
@@ -358,11 +364,17 @@ async function handleGetSession(
       getEventsMs: Date.now() - eventsStart,
     });
 
+    const { createDataLayer } = await import("./data/index.js");
+    const dataLayer = createDataLayer(env);
+    const workflowSession = await dataLayer.runtime.getWorkflowSession(sessionId) as
+      | { messages?: AgentMessage[] }
+      | null;
+
     // Assemble public SessionResponse
     const response: SessionResponse = {
       id: sessionState.id,
       status: sessionState.status,
-      messages: [],
+      messages: workflowSession?.messages ?? [],
       events,
       nextEventCursor: nextCursor,
       errorMessage: sessionState.errorMessage,
@@ -449,13 +461,17 @@ async function handleListSessions(url: URL, env: Env): Promise<Response> {
     if (sessionId) {
       const state = await dataLayer.sessions.findById(sessionId);
       if (state) {
+        const [messageCount, isActive] = await Promise.all([
+          dataLayer.events.count(sessionId),
+          dataLayer.runtime.isActive(sessionId),
+        ]);
         const summary: SessionSummary = {
           id: state.id,
           workflowId: state.workflowId,
           status: state.status,
-          messageCount: 0, // Could query events for count
+          messageCount,
           updatedAt: state.updatedAt,
-          isActive: state.status === "idle" || state.status === "processing",
+          isActive,
         };
 
         const sessions = [summary];
@@ -615,15 +631,12 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
       );
     }
 
-    // Get event count from events repository
-    const eventCursor = await dataLayer.events.latestCursor(sessionId);
-    const eventCount = { count: parseInt(eventCursor, 10) };
+    // Get actual event count and recent events (both use D1 now)
+    const eventCount = await dataLayer.events.count(sessionId);
+    const recentEvents = await dataLayer.events.listRecent(sessionId, 20);
 
     // Get queue depth
     const queueStatus = await dataLayer.inputQueue.status(sessionId);
-
-    // Get recent events
-    const { events: recentEvents } = await dataLayer.events.listSince(sessionId, undefined, 20);
 
     const debugInfo = {
       timestamp: Date.now(),
@@ -633,7 +646,7 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
         isActive: session.status === "idle" || session.status === "processing",
       },
       stats: {
-        eventCount: eventCount.count,
+        eventCount: eventCount,
         queueDepth: queueStatus.pending,
       },
       recentEvents: recentEvents.map(e => ({

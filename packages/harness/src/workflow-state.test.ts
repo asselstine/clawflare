@@ -1,7 +1,7 @@
 /**
  * Unit tests for workflow state management
  */
-import { describe, it } from "node:test";
+import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import type { AgentSessionState } from "./agent.js";
 import type { SessionEvent } from "./types.js";
@@ -35,8 +35,10 @@ function createMockEnv(): MockEnv {
               return new Response(JSON.stringify({ ok: true }));
             }
             // GET
-            const sessionId = url.match(/session-store\.local\/workflow-session/)?.input?.split("/").pop() || "";
-            const data = mockStorage.get(`workflow-session:${sessionId}`);
+            const sessionId = url.match(/session-store\.local\/workflow-session\/(.+)$/)?.[1] || "";
+            const data = sessionId
+              ? mockStorage.get(`workflow-session:${sessionId}`)
+              : Array.from(mockStorage.entries()).find(([key]) => key.startsWith("workflow-session:"))?.[1];
             if (!data) {
               return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
             }

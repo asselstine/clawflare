@@ -1,13 +1,17 @@
 // Test entry point with additional test endpoints
 // This is used for E2E testing
 
-import { HttpGateway } from "./egress/gateway.js";
+import { HttpGateway, routeOutboundRequest } from "./egress/gateway.js";
 import { ClawflareSessionStore } from "./session-do.js";
+import { ClawflareSessionCoordinator } from "./session-coordinator.js";
+import { ClawflareDatastore } from "./legacy-datastore-do.js";
 import { PersistentSessionWorkflow } from "./persistent-workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import type { Env } from "./internal-types/index.js";
+import { getDatastore } from "./datastore.js";
+import { executeDynamicWorker } from "./runtime/dynamic-worker.js";
 
-export { HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
+export { HttpGateway, ClawflareDatastore, ClawflareSessionCoordinator, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Test endpoints
 export default {
@@ -23,8 +27,57 @@ export default {
     }
 
     // Test-only endpoints
-    if (path === "__test/reset" && request.method === "POST") {
+    if (path === "/__test/reset" && request.method === "POST") {
       return new Response(JSON.stringify({ ok: true, action: "reset" }));
+    }
+
+    if (path === "/__test/store-code" && request.method === "POST") {
+      const body = await request.json<{ name: string; code: string; description?: string; tags?: string[] }>();
+      await getDatastore(env).upsertStoredCode(body);
+      return Response.json({ ok: true });
+    }
+
+    if (path === "/__test/search" && request.method === "GET") {
+      const collection = url.searchParams.get("collection") || "all";
+      const query = url.searchParams.get("q") || "*";
+      const results = await getDatastore(env).search(collection, query, 20);
+      return Response.json({
+        ok: true,
+        results: {
+          storedCode: results.storedCode.map(({ code: _code, ...entry }) => entry),
+          egressHandlers: results.egressHandlers,
+        },
+      });
+    }
+
+    if (path === "/__test/execute-stored-code" && request.method === "POST") {
+      const body = await request.json<{ name: string; input?: unknown }>();
+      const entry = await getDatastore(env).getStoredCode(body.name);
+      if (!entry) return Response.json({ ok: false, error: "Code not found" }, { status: 404 });
+      return Response.json(await executeDynamicWorker(env, ctx, entry.code, body.input));
+    }
+
+    if (path === "/__test/execute-code" && request.method === "POST") {
+      const body = await request.json<{ code: string; input?: unknown; allowOutbound?: boolean }>();
+      return Response.json(await executeDynamicWorker(env, ctx, body.code, body.input, {
+        allowOutbound: body.allowOutbound,
+      }));
+    }
+
+    if (path === "/__test/egress-fetch" && request.method === "POST") {
+      const body = await request.json<{ url: string; method?: string; headers?: Record<string, string>; body?: string }>();
+      const response = await routeOutboundRequest(env, new Request(body.url, {
+        method: body.method || "GET",
+        headers: body.headers,
+        body: body.body,
+      }));
+      let payload: unknown;
+      try {
+        payload = await response.clone().json();
+      } catch {
+        payload = await response.text();
+      }
+      return Response.json({ ok: response.ok, status: response.status, body: payload });
     }
 
     // Delegate to main handler for other endpoints

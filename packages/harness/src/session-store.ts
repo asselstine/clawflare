@@ -1,5 +1,6 @@
 // Session state management - backed by D1
 // This module provides a lightweight facade over the D1 data layer
+// Queue operations optionally go through the Session Coordinator for concurrency safety
 
 import type {
   Env,
@@ -9,6 +10,11 @@ import type {
 } from "./internal-types/index.js";
 import type { SessionEvent } from "./types.js";
 import { createDataLayer } from "./data/index.js";
+import {
+  coordinatorEnqueueSessionInput,
+  coordinatorDequeueSessionInput,
+  coordinatorAppendSessionEvents as coordinatorAppendEvents,
+} from "./session-coordinator.js";
 
 // Cached data layer per environment to avoid recreating
 const dataLayerCache = new WeakMap<Env, ReturnType<typeof createDataLayer>>();
@@ -20,6 +26,14 @@ function getDataLayer(env: Env) {
     dataLayerCache.set(env, layer);
   }
   return layer;
+}
+
+/**
+ * Check if coordinator-based concurrency control should be used.
+ * Uses coordinator when SESSION_COORDINATOR binding is available.
+ */
+function useCoordinator(env: Env): boolean {
+  return Boolean((env as unknown as { SESSION_COORDINATOR?: DurableObjectNamespace }).SESSION_COORDINATOR);
 }
 
 /**
@@ -75,13 +89,18 @@ export async function getSessionEvents(
 
 /**
  * Append events to a session's event log.
+ * Goes through coordinator if available for concurrency safety.
  */
 export async function appendSessionEvents(
   env: Env,
   sessionId: string,
   newEvents: NewSessionEvent[],
 ): Promise<void> {
-  await getDataLayer(env).events.append(sessionId, newEvents);
+  if (useCoordinator(env)) {
+    await coordinatorAppendEvents(env, sessionId, newEvents);
+  } else {
+    await getDataLayer(env).events.append(sessionId, newEvents);
+  }
 }
 
 /**
@@ -117,22 +136,30 @@ export async function getSessionInputQueue(
 
 /**
  * Enqueue an input event for the session workflow.
+ * Goes through coordinator if available for concurrency safety.
  */
 export async function enqueueSessionInput(
   env: Env,
   sessionId: string,
   event: SessionInputEvent,
 ): Promise<{ ok: boolean; queued: number; error?: string }> {
+  if (useCoordinator(env)) {
+    return coordinatorEnqueueSessionInput(env, sessionId, event);
+  }
   return getDataLayer(env).inputQueue.enqueue(sessionId, event);
 }
 
 /**
  * Dequeue the next input event - called by workflow to get pending input.
+ * Goes through coordinator if available for concurrency safety.
  */
 export async function dequeueSessionInput(
   env: Env,
   sessionId: string,
 ): Promise<{ event: SessionInputEvent | null; remaining: number }> {
+  if (useCoordinator(env)) {
+    return coordinatorDequeueSessionInput(env, sessionId);
+  }
   return getDataLayer(env).inputQueue.dequeue(sessionId);
 }
 

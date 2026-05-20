@@ -1,5 +1,7 @@
 import type { Env } from "./internal-types/index.js";
 
+export type { Env } from "./internal-types/index.js";
+
 interface TimingEvent {
   phase: string;
   at: number;
@@ -17,10 +19,18 @@ const MAX_SESSIONS = 100;
 const MAX_EVENTS_PER_SESSION = 1000;
 
 /**
+ * Check if timing debug is enabled.
+ */
+export function isTimingDebugEnabled(env: { CLAWFLARE_DEBUG_TIMING?: unknown }): boolean {
+  const value = env.CLAWFLARE_DEBUG_TIMING;
+  return value === "true" || value === "1" || value === "TRUE" || value === "True" || value === "YES" || value === "yes";
+}
+
+/**
  * Start timing a phase. Returns a timestamp that should be passed to logTiming.
  */
 export function timingStart(): number {
-  return performance.now();
+  return Date.now();
 }
 
 /**
@@ -33,22 +43,21 @@ export function logTiming(
   startedAt?: number,
   details?: Record<string, unknown>,
 ): void {
-  const isDebugEnabled = env.CLAWFLARE_DEBUG_TIMING === "true" || env.CLAWFLARE_DEBUG_TIMING === "1";
-  if (!isDebugEnabled) return;
-  if (!sessionId) return;
+  if (!isTimingDebugEnabled(env)) return;
 
-  const now = performance.now();
+  const now = Date.now();
   const elapsedMs = startedAt !== undefined ? now - startedAt : undefined;
 
-  let session = sessions.get(sessionId);
+  const sessionKey = sessionId ?? "__undefined__";
+  let session = sessions.get(sessionKey);
   if (!session) {
     // Prune if at capacity
     if (sessions.size >= MAX_SESSIONS) {
       const oldest = sessions.keys().next().value;
       if (oldest) sessions.delete(oldest);
     }
-    session = { sessionId, events: [] };
-    sessions.set(sessionId, session);
+    session = { sessionId: sessionId ?? "", events: [] };
+    sessions.set(sessionKey, session);
   }
 
   // Prune events if at capacity
@@ -63,10 +72,14 @@ export function logTiming(
     details,
   });
 
-  // Also log to console for tail -f visibility
-  const elapsedStr = elapsedMs !== undefined ? `${elapsedMs.toFixed(2)}ms` : "";
-  const detailStr = details ? ` ${JSON.stringify(details)}` : "";
-  console.log(`[TIMING] ${sessionId} ${phase}${elapsedStr ? ` (${elapsedStr})` : ""}${detailStr}`);
+  console.log(JSON.stringify({
+    source: "clawflare-timing",
+    sessionId,
+    phase,
+    at: Date.now(),
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    ...(details ?? {}),
+  }));
 }
 
 /**

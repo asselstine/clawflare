@@ -45,6 +45,18 @@ CREATE INDEX idx_session_events_type ON session_events(type);
 CREATE INDEX idx_session_events_timestamp ON session_events(timestamp);
 
 -- =============================================================================
+-- Session Counters Table
+-- =============================================================================
+
+CREATE TABLE session_counters (
+  session_id TEXT PRIMARY KEY,
+  next_queue_sequence INTEGER NOT NULL DEFAULT 1,
+  next_event_sequence INTEGER NOT NULL DEFAULT 1,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+-- =============================================================================
 -- Session Input Queue Table
 -- =============================================================================
 
@@ -111,17 +123,5 @@ CREATE INDEX idx_egress_handlers_enabled ON egress_handlers(enabled);
 CREATE INDEX idx_egress_handlers_name ON egress_handlers(name);
 CREATE INDEX idx_egress_handlers_updated ON egress_handlers(updated_at DESC);
 
--- =============================================================================
--- Migration metadata
--- =============================================================================
-
--- Track applied migrations
-CREATE TABLE IF NOT EXISTS _d1_migrations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT NOT NULL UNIQUE,
-  applied_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
-) STRICT;
-
--- Record this migration
-INSERT INTO _d1_migrations (name, applied_at) VALUES 
-  ('0001_initial_data_layer.sql', unixepoch() * 1000);
+-- Migration complete - tables created for sessions, counters, events, queues, stored code, and egress handlers
+-- Note: D1 migration tracking is handled by Wrangler automatically

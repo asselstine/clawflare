@@ -30,8 +30,8 @@ export async function buildAgentComponents(env: Env): Promise<BuildAgentComponen
 
   // Get the model
   const model = getModel(
-    provider,
-    modelId
+    provider as "amazon-bedrock",
+    modelId as "minimax.minimax-m2.5"
   ) as unknown as Model<"bedrock-converse-stream">;
 
   return {

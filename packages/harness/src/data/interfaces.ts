@@ -196,6 +196,9 @@ export interface SessionEventRepository {
   /** Get the latest event cursor (sequence number as string) */
   latestCursor(sessionId: string): Promise<string>;
 
+  /** Get event count for a session */
+  count(sessionId: string): Promise<number>;
+
   /** Append events to the session's event log */
   append(
     sessionId: string,
@@ -208,6 +211,12 @@ export interface SessionEventRepository {
     sinceCursor?: string,
     limit?: number
   ): Promise<{ events: SessionEvent[]; nextCursor: string }>;
+
+  /** List most recent events (descending order) */
+  listRecent(
+    sessionId: string,
+    limit?: number
+  ): Promise<SessionEvent[]>;
 
   /** Trim old events to keep within limit */
   trim(sessionId: string, maxEvents: number): Promise<void>;

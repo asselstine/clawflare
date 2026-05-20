@@ -51,17 +51,26 @@ export class D1InputQueueRepository implements InputQueueRepository {
       };
     }
 
-    // Get next sequence
+    const now = Date.now();
+
+    // Reserve a unique sequence number. The session coordinator serializes
+    // normal application traffic, and this counter also prevents duplicate
+    // sequence numbers if the repository is called directly.
     const row = await this.db
       .prepare(
         `
-        SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
-        FROM session_input_queue
-        WHERE session_id = ?
+        INSERT INTO session_counters (
+          session_id, next_queue_sequence, next_event_sequence, updated_at
+        )
+        VALUES (?, 2, 1, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          next_queue_sequence = next_queue_sequence + 1,
+          updated_at = excluded.updated_at
+        RETURNING next_queue_sequence - 1 AS sequence
       `
       )
-      .bind(sessionId)
-      .first<{ next_sequence: number }>();
+      .bind(sessionId, now)
+      .first<{ sequence: number }>();
 
     await this.db
       .prepare(
@@ -74,9 +83,9 @@ export class D1InputQueueRepository implements InputQueueRepository {
       )
       .bind(
         sessionId,
-        row?.next_sequence ?? 1,
+        row?.sequence ?? 1,
         JSON.stringify(event),
-        Date.now()
+        now
       )
       .run();
 
@@ -87,18 +96,25 @@ export class D1InputQueueRepository implements InputQueueRepository {
   }
 
   async dequeue(sessionId: string): Promise<DequeueResult> {
+    // Atomically remove and return the first queued event. This prevents two
+    // direct repository callers from observing the same queue row.
     const row = await this.db
       .prepare(
         `
-        SELECT sequence, event_json
-        FROM session_input_queue
+        DELETE FROM session_input_queue
         WHERE session_id = ?
-        ORDER BY sequence ASC
-        LIMIT 1
+          AND sequence = (
+            SELECT sequence
+            FROM session_input_queue
+            WHERE session_id = ?
+            ORDER BY sequence ASC
+            LIMIT 1
+          )
+        RETURNING event_json
       `
       )
-      .bind(sessionId)
-      .first<{ sequence: number; event_json: string }>();
+      .bind(sessionId, sessionId)
+      .first<{ event_json: string }>();
 
     if (!row) {
       return {
@@ -106,17 +122,6 @@ export class D1InputQueueRepository implements InputQueueRepository {
         remaining: 0,
       };
     }
-
-    // Delete the row
-    await this.db
-      .prepare(
-        `
-        DELETE FROM session_input_queue
-        WHERE session_id = ? AND sequence = ?
-      `
-      )
-      .bind(sessionId, row.sequence)
-      .run();
 
     // Count remaining
     const remainingRow = await this.db

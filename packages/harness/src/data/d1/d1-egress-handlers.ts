@@ -7,6 +7,40 @@ import type {
 import type { EgressHandlerRow } from "./row-mappers.js";
 import { mapEgressHandlerRow } from "./row-mappers.js";
 
+const BUILT_IN_EGRESS_HANDLERS: EgressHandlerMetadata[] = [
+  {
+    name: "github",
+    description: "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers when GITHUB_TOKEN is configured",
+    domains: ["api.github.com", "github.com", "raw.githubusercontent.com"],
+    enabled: true,
+    config: {},
+    updatedAt: 0,
+  },
+  {
+    name: "cloudflare",
+    description: "Cloudflare REST API access - automatically injects Authorization: Bearer token from CLOUDFLARE_API_TOKEN",
+    domains: ["api.cloudflare.com"],
+    enabled: true,
+    config: {},
+    updatedAt: 0,
+  },
+];
+
+function mergeBuiltIns(rows: EgressHandlerMetadata[]): EgressHandlerMetadata[] {
+  const byName = new Map<string, EgressHandlerMetadata>();
+  for (const handler of BUILT_IN_EGRESS_HANDLERS) byName.set(handler.name, handler);
+  for (const handler of rows) byName.set(handler.name, handler);
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function matchesQuery(handler: EgressHandlerMetadata, query: string): boolean {
+  if (query === "*" || query === "") return true;
+  const normalized = query.replace(/^\*/, "").toLowerCase();
+  return handler.name.toLowerCase().includes(normalized)
+    || handler.description.toLowerCase().includes(normalized)
+    || handler.domains.some((domain) => domain.toLowerCase().includes(normalized));
+}
+
 export class D1EgressHandlerRepository implements EgressHandlerRepository {
   constructor(private readonly db: D1Database) {}
 
@@ -69,7 +103,9 @@ export class D1EgressHandlerRepository implements EgressHandlerRepository {
       `;
 
     const result = await this.db.prepare(sql).all<EgressHandlerRow>();
-    return result.results.map(mapEgressHandlerRow);
+    const rows = result.results.map(mapEgressHandlerRow);
+    const merged = mergeBuiltIns(rows);
+    return enabledOnly ? merged.filter((handler) => handler.enabled) : merged;
   }
 
   async search(query: string, limit = 20): Promise<EgressHandlerMetadata[]> {
@@ -80,14 +116,18 @@ export class D1EgressHandlerRepository implements EgressHandlerRepository {
         `
         SELECT name, description, domains_json, enabled, config_json, updated_at
         FROM egress_handlers
-        WHERE name LIKE ? OR description LIKE ?
+        WHERE name LIKE ?
+           OR description LIKE ?
+           OR domains_json LIKE ?
         ORDER BY name ASC
         LIMIT ?
       `
       )
-      .bind(q, q, limit)
+      .bind(q, q, q, limit)
       .all<EgressHandlerRow>();
 
-    return result.results.map(mapEgressHandlerRow);
+    const dbResults = result.results.map(mapEgressHandlerRow);
+    const merged = mergeBuiltIns(dbResults).filter((handler) => matchesQuery(handler, query));
+    return merged.slice(0, limit);
   }
 }

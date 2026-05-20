@@ -1,3 +1,9 @@
+/**
+ * Legacy Durable Object session store.
+ * Deprecated: D1 is now the source of truth and active code paths use
+ * session-store.ts plus ClawflareSessionCoordinator. This class remains only
+ * for Durable Object migration-history compatibility and temporary inspection.
+ */
 import { DurableObject } from "cloudflare:workers";
 import type {
   Env,

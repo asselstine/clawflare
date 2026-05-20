@@ -30,18 +30,20 @@
   ],
 
   // D1 Database - Primary persistent storage for sessions, events, and code
+  // Note: database_id and preview_database_id must be set via environment-specific config
+  // or via `wrangler d1 create clawflare` to get a real database ID
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "clawflare",
-      "database_id": "<database-id>",
-      "preview_database_id": "<preview-database-id>",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "preview_database_id": "REPLACE_WITH_PREVIEW_DATABASE_ID",
       "migrations_dir": "migrations"
     }
   ],
 
-  // Durable Objects - WebSocket coordination only
-  // Session state and stored data are now in D1
+  // Durable Objects - Used for session coordination only
+  // All persistent state is now in D1
   "durable_objects": {
     "bindings": [
       {
@@ -49,17 +51,17 @@
         "class_name": "ClawflareWebSocketSession"
       },
       {
-        "name": "SESSION_STORE",
-        "class_name": "ClawflareSessionStore"
+        "name": "SESSION_COORDINATOR",
+        "class_name": "ClawflareSessionCoordinator"
       }
     ]
   },
 
-  // Migrations for Durable Objects
+  // Migrations for Durable Objects - APPEND-ONLY, never modify existing tags
   "migrations": [
     {
       "tag": "v1",
-      "deleted_classes": ["ClawflareDatastore"]
+      "new_sqlite_classes": ["ClawflareDatastore"]
     },
     {
       "tag": "v2",
@@ -68,6 +70,14 @@
     {
       "tag": "v3",
       "new_classes": ["ClawflareSessionStore"]
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": ["ClawflareDatastore"]
+    },
+    {
+      "tag": "v5",
+      "new_classes": ["ClawflareSessionCoordinator"]
     }
   ],
 

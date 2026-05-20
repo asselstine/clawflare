@@ -7,7 +7,13 @@ import type {
 } from "../interfaces.js";
 import type { SessionStatus } from "../../types.js";
 import type { SessionRow } from "./row-mappers.js";
-import { mapSessionRow, mapSessionSummaryRow } from "./row-mappers.js";
+import { mapSessionRow, mapSessionSummaryRowWithCount } from "./row-mappers.js";
+
+// Extended row type including event count from JOIN
+interface SessionWithCountRow extends SessionRow {
+  event_count: number;
+  active?: number;
+}
 
 export class D1SessionRepository implements SessionRepository {
   constructor(private readonly db: D1Database) {}
@@ -43,6 +49,20 @@ export class D1SessionRepository implements SessionRepository {
         session.maxQueueSize ?? 100,
         session.idleTimeout ?? null
       )
+      .run();
+
+    await this.db
+      .prepare(
+        `
+        INSERT INTO session_counters (
+          session_id, next_queue_sequence, next_event_sequence, updated_at
+        )
+        VALUES (?, 1, 1, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          updated_at = excluded.updated_at
+      `
+      )
+      .bind(session.id, session.updatedAt || now)
       .run();
   }
 
@@ -114,48 +134,46 @@ export class D1SessionRepository implements SessionRepository {
     const limit = Math.min(filter.limit ?? 50, 100);
     const offset = filter.offset ?? 0;
 
+    // Single query with JOIN to get event counts efficiently
     let query: string;
     let bindings: (string | number)[];
 
     if (filter.status && filter.status !== "all") {
       query = `
         SELECT 
-          id, workflow_id, status, next_event_cursor,
-          updated_at, error_message, max_queue_size, idle_timeout
-        FROM sessions
-        WHERE status = ?
-        ORDER BY updated_at DESC
+          s.id, s.workflow_id, s.status, s.next_event_cursor,
+          s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
+          COUNT(e.sequence) AS event_count,
+          COALESCE(MAX(r.active), 0) AS active
+        FROM sessions s
+        LEFT JOIN session_events e ON e.session_id = s.id
+        LEFT JOIN session_runtime r ON r.session_id = s.id
+        WHERE s.status = ?
+        GROUP BY s.id
+        ORDER BY s.updated_at DESC
         LIMIT ? OFFSET ?
       `;
       bindings = [filter.status, limit, offset];
     } else {
       query = `
         SELECT 
-          id, workflow_id, status, next_event_cursor,
-          updated_at, error_message, max_queue_size, idle_timeout
-        FROM sessions
-        ORDER BY updated_at DESC
+          s.id, s.workflow_id, s.status, s.next_event_cursor,
+          s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
+          COUNT(e.sequence) AS event_count,
+          COALESCE(MAX(r.active), 0) AS active
+        FROM sessions s
+        LEFT JOIN session_events e ON e.session_id = s.id
+        LEFT JOIN session_runtime r ON r.session_id = s.id
+        GROUP BY s.id
+        ORDER BY s.updated_at DESC
         LIMIT ? OFFSET ?
       `;
       bindings = [limit, offset];
     }
 
-    const result = await this.db.prepare(query).bind(...bindings).all<SessionRow>();
+    const result = await this.db.prepare(query).bind(...bindings).all<SessionWithCountRow>();
 
-    // Get event counts for each session
-    const summaries: SessionSummary[] = [];
-    for (const row of result.results) {
-      const summary = mapSessionSummaryRow(row);
-      // Count events for this session
-      const countResult = await this.db
-        .prepare(`SELECT COUNT(*) as count FROM session_events WHERE session_id = ?`)
-        .bind(row.id)
-        .first<{ count: number }>();
-      summary.messageCount = countResult?.count ?? 0;
-      summaries.push(summary);
-    }
-
-    return summaries;
+    return result.results.map(mapSessionSummaryRowWithCount);
   }
 
   async count(filter: SessionListFilter): Promise<number> {

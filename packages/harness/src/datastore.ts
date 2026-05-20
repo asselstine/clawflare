@@ -70,7 +70,7 @@ class D1DatastoreClient implements Datastore {
   }
 
   async search(
-    _collection: string,
+    collection: string,
     query: string,
     limit: number
   ): Promise<{
@@ -90,6 +90,23 @@ class D1DatastoreClient implements Datastore {
       config: unknown;
     }[];
   }> {
-    return getDataLayer(this.env).search(query, limit);
+    const data = getDataLayer(this.env);
+
+    if (collection === "stored_code") {
+      return {
+        storedCode: await data.storedCode.search(query, limit),
+        egressHandlers: [],
+      };
+    }
+
+    if (collection === "egress_handlers") {
+      return {
+        storedCode: [],
+        egressHandlers: await data.egressHandlers.search(query, limit),
+      };
+    }
+
+    // Default: search both
+    return data.search(query, limit);
   }
 }

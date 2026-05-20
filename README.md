@@ -11,6 +11,43 @@ An agent harness that runs directly on Cloudflare infrastructure as a worker.
 - Cloudflare account with API token
 - AWS account with Bedrock access (for default AI provider)
 
+### D1 Database Setup
+
+Clawflare uses Cloudflare D1 as its primary persistent storage for sessions, events, code, and egress handlers.
+
+#### Create the D1 database
+
+```bash
+cd packages/harness
+wrangler d1 create clawflare
+```
+
+Copy the database ID from the output and update `wrangler.jsonc`:
+
+```json
+"d1_databases": [
+  {
+    "binding": "DB",
+    "database_name": "clawflare",
+    "database_id": "YOUR_ACTUAL_DATABASE_ID",
+    "preview_database_id": "YOUR_PREVIEW_DATABASE_ID",
+    "migrations_dir": "migrations"
+  }
+]
+```
+
+#### Apply migrations
+
+Local development:
+```bash
+pnpm --filter @clawflare/harness db:migrations:apply:local
+```
+
+Remote (production):
+```bash
+pnpm --filter @clawflare/harness db:migrations:apply:remote
+```
+
 ### Setup
 
 ```bash

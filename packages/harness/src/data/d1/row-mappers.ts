@@ -24,6 +24,12 @@ export interface SessionRow {
   idle_timeout: string | null;
 }
 
+// Extended row type including event count from JOIN
+export interface SessionWithCountRow extends SessionRow {
+  event_count: number;
+  active?: number;
+}
+
 export interface SessionEventRow {
   session_id: string;
   sequence: number;
@@ -92,6 +98,18 @@ export function mapSessionSummaryRow(row: SessionRow): SessionSummary {
     messageCount: 0, // Will need to query events for this
     updatedAt: row.updated_at,
     isActive: status === "idle" || status === "processing",
+  };
+}
+
+export function mapSessionSummaryRowWithCount(row: SessionWithCountRow): SessionSummary {
+  const status = row.status as SessionStatus;
+  return {
+    id: row.id,
+    workflowId: row.workflow_id,
+    status,
+    messageCount: row.event_count ?? 0,
+    updatedAt: row.updated_at,
+    isActive: row.active !== undefined ? Boolean(row.active) : status === "idle" || status === "processing",
   };
 }
 

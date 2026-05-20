@@ -33,20 +33,28 @@ export class D1SessionEventRepository implements SessionEventRepository {
       return { nextCursor: await this.latestCursor(sessionId) };
     }
 
-    // Get current sequence cursor
+    const now = Date.now();
+
+    // Reserve a contiguous block of event sequence numbers. The session
+    // coordinator serializes normal application traffic, and this counter also
+    // prevents duplicate sequence numbers if the repository is called directly.
     const cursorRow = await this.db
       .prepare(
         `
-        SELECT COALESCE(MAX(sequence), 0) AS cursor
-        FROM session_events
-        WHERE session_id = ?
+        INSERT INTO session_counters (
+          session_id, next_queue_sequence, next_event_sequence, updated_at
+        )
+        VALUES (?, 1, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+          next_event_sequence = next_event_sequence + ?,
+          updated_at = excluded.updated_at
+        RETURNING next_event_sequence - ? AS start_sequence
       `
       )
-      .bind(sessionId)
-      .first<{ cursor: number }>();
+      .bind(sessionId, newEvents.length + 1, now, newEvents.length, newEvents.length)
+      .first<{ start_sequence: number }>();
 
-    const start = (cursorRow?.cursor ?? 0) + 1;
-    const now = Date.now();
+    const start = cursorRow?.start_sequence ?? 1;
 
     // Build batch statements
     const statements: D1PreparedStatement[] = [];
@@ -128,6 +136,46 @@ export class D1SessionEventRepository implements SessionEventRepository {
         : String(since);
 
     return { events, nextCursor };
+  }
+
+  async count(sessionId: string): Promise<number> {
+    const row = await this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM session_events
+        WHERE session_id = ?
+      `
+      )
+      .bind(sessionId)
+      .first<{ count: number }>();
+
+    return row?.count ?? 0;
+  }
+
+  async listRecent(
+    sessionId: string,
+    limit = 20
+  ): Promise<SessionEvent[]> {
+    const cappedLimit = Math.min(limit, 100);
+
+    const result = await this.db
+      .prepare(
+        `
+        SELECT session_id, sequence, timestamp, type, payload_json
+        FROM session_events
+        WHERE session_id = ?
+        ORDER BY sequence DESC
+        LIMIT ?
+      `
+      )
+      .bind(sessionId, cappedLimit)
+      .all<SessionEventRow>();
+
+    // Return in ascending order
+    return result.results
+      .map(mapSessionEventRow)
+      .sort((a, b) => a.sequence - b.sequence);
   }
 
   async trim(sessionId: string, maxEvents: number): Promise<void> {
