@@ -8,12 +8,26 @@ An agent harness that runs directly on Cloudflare infrastructure as a worker.
 
 - Node.js 22+
 - pnpm 9+
-- Cloudflare account with API token
+- Cloudflare account with an API token that can manage Workers and D1
 - AWS account with Bedrock access (for default AI provider)
+
+### Cloudflare API Token Permissions
+
+For deployment and remote E2E tests, use a Cloudflare API token scoped to the target account with at least:
+
+| Scope | Permission |
+|-------|------------|
+| Account | Workers Scripts:Edit |
+| Account | D1:Edit |
+| Account | Account Settings:Read |
+
+If you deploy route-based Workers instead of `workers.dev`, also grant the relevant zone route permissions.
+
+Remote E2E tests create and delete temporary Workers and D1 databases, so `D1:Edit` is required; `D1:Read` is not enough.
 
 ### D1 Database Setup
 
-Clawflare uses Cloudflare D1 as its primary persistent storage for sessions, events, code, and egress handlers.
+Clawflare uses Cloudflare D1 as its source of truth for sessions, events, input queues, runtime state, stored code, and egress handler metadata. Durable Objects are used for WebSocket connections and per-session coordination, not as the primary database.
 
 #### Create the D1 database
 
@@ -47,6 +61,20 @@ Remote (production):
 ```bash
 pnpm --filter @clawflare/harness db:migrations:apply:remote
 ```
+
+Current migrations create:
+
+- `sessions`
+- `session_events`
+- `session_counters`
+- `session_input_queue`
+- `session_runtime`
+- `stored_code`
+- `egress_handlers`
+
+#### Data migration policy
+
+Clawflare uses a greenfield D1 cutover: existing legacy Durable Object session data is not migrated automatically. New sessions, events, queues, stored code, and egress metadata are stored in D1.
 
 ### Setup
 
@@ -96,7 +124,7 @@ AI_MODEL=claude-3-5-sonnet-20241022
 
 ### E2E Testing
 
-The project includes comprehensive E2E tests that deploy a brand-new remote Cloudflare Worker test instance, tag the Worker version as `e2e`, run the API tests against its `workers.dev` URL, then tear down the Worker:
+The project includes comprehensive E2E tests that deploy a brand-new remote Cloudflare Worker test instance, create a temporary remote D1 database, apply migrations, tag the Worker version as `e2e`, run API tests against its `workers.dev` URL, then tear everything down:
 
 ```bash
 # Run all automated remote E2E tests (uses mock AI)
@@ -110,9 +138,12 @@ pnpm test -- --keep-alive
 # - Authentication (missing token, wrong token, valid token)
 # - Context management (get/create/fork)
 # - Workflow-backed chat/prompt functionality
+# - Session polling/listing
+# - WebSocket prompt flow
 # - Tool listing
 # - Stored code and Dynamic Worker execution
 # - Controlled egress
+# - Search over stored code and egress handlers
 # - 404 handling
 ```
 
@@ -133,13 +164,19 @@ pnpm dev
 
 # Build all packages
 pnpm build
+
+# Typecheck all packages
+pnpm typecheck
+
+# Run harness unit tests
+pnpm --filter @clawflare/harness test
 ```
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
-| `CF_API_TOKEN` | Cloudflare API token with Workers, D1, KV permissions |
+| `CF_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers Scripts:Edit, D1:Edit, and Account Settings:Read |
 | `CF_WORKER_NAME` | Worker name (default: clawflare-harness) |
 | `CF_ACCOUNT_ID` | Cloudflare account ID (optional, auto-detected) |
 | `AI_PROVIDER` | AI provider (default: amazon-bedrock) |
@@ -177,9 +214,11 @@ pnpm --filter @clawflare/harness build
 
 ### Chat Workflows
 
-`POST /v1/chat` starts a durable Cloudflare Workflow and returns immediately with an instance ID and `pollUrl`. Clients should poll `GET /v1/workflow/:instanceId` until the status is no longer `running`. The CLI does this automatically.
+`POST /v1/chat` starts or resumes a D1-backed session and returns immediately with a `sessionId` and event cursor. Clients poll `GET /v1/session/:sessionId` until the session status is `idle`, `error`, `closed`, or `expired`. Follow-up prompts reuse the same `sessionId`.
 
-The WebSocket endpoint `/ws` is backed by a Durable Object. It starts workflows for prompt messages and sends workflow status updates plus the final chat response over the socket.
+Session input is persisted in D1 and serialized through `ClawflareSessionCoordinator`, a per-session Durable Object. The persistent Cloudflare Workflow drains the queued input, appends events to D1, and updates session runtime state.
+
+The WebSocket endpoint `/ws` is backed by `ClawflareWebSocketSession`. It accepts prompt messages, starts/wakes the same D1-backed workflow path, and sends the final assistant message over the socket.
 
 ### Tools, Dynamic Code, Egress, and Skills
 
@@ -196,15 +235,23 @@ Skills are loaded by the CLI from generic Agent Skills locations (`~/.agents/ski
 
 ### Deploying
 
-To redeploy after code changes:
+Before deploying production, replace the placeholder D1 IDs in `packages/harness/wrangler.jsonc` or use an environment-specific Wrangler config with real D1 database IDs.
+
+Apply remote migrations first:
 
 ```bash
-cd packages/harness
-npx wrangler deploy src/index.ts --name clawflare-harness
+pnpm --filter @clawflare/harness db:migrations:apply:remote
 ```
 
-Or use the npm script:
+Then deploy:
 
 ```bash
 pnpm deploy:prod
+```
+
+For a dry run:
+
+```bash
+cd packages/harness
+pnpm exec wrangler deploy --dry-run
 ```
