@@ -8,7 +8,7 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "node --import=tsx src/index.ts",
-    "test:cloudflare": "node --import=tsx test/cloudflare-egress.test.ts",
+    "test:cloudflare": "vitest run test/cloudflare-egress.test.ts",
     "deploy": "cd ../harness && npx wrangler deploy",
     "deploy:test": "cd ../harness && npx wrangler deploy --config wrangler.test.jsonc",
     "dev:test": "cd ../harness && npx wrangler dev --config wrangler.test.jsonc",
@@ -20,6 +20,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
+    "vitest": "^3.0.0",
     "wrangler": "^3.95.0"
   }
 }

@@ -1,7 +1,6 @@
 // D1 Input Queue Repository Tests
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,83 +45,83 @@ async function createSession(db: D1Database, sessionId = "session-1"): Promise<v
   });
 }
 
-test("D1InputQueueRepository enqueues and dequeues in order", async () => {
-  const { db, dispose } = await createDb();
-  try {
-    await createSession(db);
-    const repo = new D1InputQueueRepository(db);
+describe("D1 Input Queue Repository", () => {
+  it("enqueues and dequeues in order", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new D1InputQueueRepository(db);
 
-    await repo.enqueue("session-1", { type: "prompt", content: "one" });
-    await repo.enqueue("session-1", { type: "prompt", content: "two" });
+      await repo.enqueue("session-1", { type: "prompt", content: "one" });
+      await repo.enqueue("session-1", { type: "prompt", content: "two" });
 
-    assert.equal((await repo.status("session-1")).pending, 2);
-    assert.deepEqual(await repo.dequeue("session-1"), {
-      event: { type: "prompt", content: "one" },
-      remaining: 1,
-    });
-    assert.deepEqual(await repo.dequeue("session-1"), {
-      event: { type: "prompt", content: "two" },
-      remaining: 0,
-    });
-    assert.deepEqual(await repo.dequeue("session-1"), {
-      event: null,
-      remaining: 0,
-    });
-  } finally {
-    await dispose();
-  }
-});
-
-test("D1InputQueueRepository concurrent enqueue reserves unique sequences", async () => {
-  const { db, dispose } = await createDb();
-  try {
-    await createSession(db);
-    const repo = new D1InputQueueRepository(db);
-
-    const events: SessionInputEvent[] = Array.from({ length: 50 }, (_, i) => ({
-      type: "prompt",
-      content: `prompt-${i}`,
-    }));
-
-    const results = await Promise.all(events.map((event) => repo.enqueue("session-1", event)));
-    assert.equal(results.every((result) => result.ok), true);
-
-    const rows = await db
-      .prepare(
-        `SELECT sequence FROM session_input_queue WHERE session_id = ? ORDER BY sequence ASC`
-      )
-      .bind("session-1")
-      .all<{ sequence: number }>();
-
-    assert.equal(rows.results.length, 50);
-    assert.deepEqual(rows.results.map((row) => row.sequence), Array.from({ length: 50 }, (_, i) => i + 1));
-  } finally {
-    await dispose();
-  }
-});
-
-test("D1InputQueueRepository concurrent dequeue never returns duplicate events", async () => {
-  const { db, dispose } = await createDb();
-  try {
-    await createSession(db);
-    const repo = new D1InputQueueRepository(db);
-
-    for (let i = 0; i < 50; i++) {
-      await repo.enqueue("session-1", { type: "prompt", content: `prompt-${i}` });
+      expect((await repo.status("session-1")).pending).toBe(2);
+      expect(await repo.dequeue("session-1")).toEqual({
+        event: { type: "prompt", content: "one" },
+        remaining: 1,
+      });
+      expect(await repo.dequeue("session-1")).toEqual({
+        event: { type: "prompt", content: "two" },
+        remaining: 0,
+      });
+      expect(await repo.dequeue("session-1")).toEqual({
+        event: null,
+        remaining: 0,
+      });
+    } finally {
+      await dispose();
     }
+  });
 
-    const results = await Promise.all(Array.from({ length: 50 }, () => repo.dequeue("session-1")));
-    const contents = results
-      .map((result) => result.event)
-      .filter((event): event is { type: "prompt"; content: string } => event?.type === "prompt")
-      .map((event) => event.content);
+  it("concurrent enqueue reserves unique sequences", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new D1InputQueueRepository(db);
 
-    assert.equal(contents.length, 50);
-    assert.equal(new Set(contents).size, 50);
-    assert.equal((await repo.status("session-1")).pending, 0);
-  } finally {
-    await dispose();
-  }
+      const events: SessionInputEvent[] = Array.from({ length: 50 }, (_, i) => ({
+        type: "prompt",
+        content: `prompt-${i}`,
+      }));
+
+      const results = await Promise.all(events.map((event) => repo.enqueue("session-1", event)));
+      expect(results.every((result) => result.ok)).toBe(true);
+
+      const rows = await db
+        .prepare(
+          `SELECT sequence FROM session_input_queue WHERE session_id = ? ORDER BY sequence ASC`
+        )
+        .bind("session-1")
+        .all<{ sequence: number }>();
+
+      expect(rows.results.length).toBe(50);
+      expect(rows.results.map((row) => row.sequence)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("concurrent dequeue never returns duplicate events", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new D1InputQueueRepository(db);
+
+      for (let i = 0; i < 50; i++) {
+        await repo.enqueue("session-1", { type: "prompt", content: `prompt-${i}` });
+      }
+
+      const results = await Promise.all(Array.from({ length: 50 }, () => repo.dequeue("session-1")));
+      const contents = results
+        .map((result) => result.event)
+        .filter((event): event is { type: "prompt"; content: string } => event?.type === "prompt")
+        .map((event) => event.content);
+
+      expect(contents.length).toBe(50);
+      expect(new Set(contents).size).toBe(50);
+      expect((await repo.status("session-1")).pending).toBe(0);
+    } finally {
+      await dispose();
+    }
+  });
 });
-
-export {};

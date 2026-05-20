@@ -1,7 +1,6 @@
 // D1 Session Events Repository Tests
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,55 +44,55 @@ async function createSession(db: D1Database, sessionId = "session-1"): Promise<v
   });
 }
 
-test("D1SessionEventRepository appends, lists, counts, and lists recent events", async () => {
-  const { db, dispose } = await createDb();
-  try {
-    await createSession(db);
-    const repo = new D1SessionEventRepository(db);
+describe("D1 Session Event Repository", () => {
+  it("appends, lists, counts, and lists recent events", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new D1SessionEventRepository(db);
 
-    assert.equal(await repo.latestCursor("session-1"), "0");
-    assert.equal(await repo.count("session-1"), 0);
+      expect(await repo.latestCursor("session-1")).toBe("0");
+      expect(await repo.count("session-1")).toBe(0);
 
-    const appendResult = await repo.append("session-1", [
-      { type: "message", timestamp: 1, value: "one" },
-      { type: "message", timestamp: 2, value: "two" },
-      { type: "message", timestamp: 3, value: "three" },
-    ]);
+      const appendResult = await repo.append("session-1", [
+        { type: "message", timestamp: 1, value: "one" },
+        { type: "message", timestamp: 2, value: "two" },
+        { type: "message", timestamp: 3, value: "three" },
+      ]);
 
-    assert.equal(appendResult.nextCursor, "3");
-    assert.equal(await repo.latestCursor("session-1"), "3");
-    assert.equal(await repo.count("session-1"), 3);
+      expect(appendResult.nextCursor).toBe("3");
+      expect(await repo.latestCursor("session-1")).toBe("3");
+      expect(await repo.count("session-1")).toBe(3);
 
-    const listed = await repo.listSince("session-1", "1", 10);
-    assert.equal(listed.nextCursor, "3");
-    assert.deepEqual(listed.events.map((event) => event.sequence), [2, 3]);
+      const listed = await repo.listSince("session-1", "1", 10);
+      expect(listed.nextCursor).toBe("3");
+      expect(listed.events.map((event) => event.sequence)).toEqual([2, 3]);
 
-    const recent = await repo.listRecent("session-1", 2);
-    assert.deepEqual(recent.map((event) => event.sequence), [2, 3]);
-  } finally {
-    await dispose();
-  }
+      const recent = await repo.listRecent("session-1", 2);
+      expect(recent.map((event) => event.sequence)).toEqual([2, 3]);
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("concurrent appends reserve unique contiguous sequences", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new D1SessionEventRepository(db);
+
+      await Promise.all(
+        Array.from({ length: 25 }, (_, i) =>
+          repo.append("session-1", [{ type: "message", timestamp: Date.now(), value: i }])
+        )
+      );
+
+      const all = await repo.listSince("session-1", "0", 100);
+      expect(all.events.length).toBe(25);
+      expect(all.events.map((event) => event.sequence)).toEqual(Array.from({ length: 25 }, (_, i) => i + 1));
+      expect(new Set(all.events.map((event) => event.sequence)).size).toBe(25);
+    } finally {
+      await dispose();
+    }
+  });
 });
-
-test("D1SessionEventRepository concurrent appends reserve unique contiguous sequences", async () => {
-  const { db, dispose } = await createDb();
-  try {
-    await createSession(db);
-    const repo = new D1SessionEventRepository(db);
-
-    await Promise.all(
-      Array.from({ length: 25 }, (_, i) =>
-        repo.append("session-1", [{ type: "message", timestamp: Date.now(), value: i }])
-      )
-    );
-
-    const all = await repo.listSince("session-1", "0", 100);
-    assert.equal(all.events.length, 25);
-    assert.deepEqual(all.events.map((event) => event.sequence), Array.from({ length: 25 }, (_, i) => i + 1));
-    assert.equal(new Set(all.events.map((event) => event.sequence)).size, 25);
-  } finally {
-    await dispose();
-  }
-});
-
-export {};

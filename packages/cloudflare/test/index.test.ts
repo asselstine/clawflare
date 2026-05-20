@@ -1,8 +1,7 @@
 /**
  * Unit tests for Cloudflare API egress handler
  */
-import { describe, it } from "node:test";
-import assert from "node:assert";
+import { describe, it, expect, vi } from "vitest";
 import { registerEgressHandlers } from "../src/index.js";
 import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
 
@@ -21,9 +20,9 @@ describe("cloudflare egress handler", () => {
       registerEgressHandlers(registry);
 
       const handler = registry.get("cloudflare");
-      assert.ok(handler);
-      assert.strictEqual(handler.name, "cloudflare");
-      assert.strictEqual(handler.description.startsWith("Cloudflare REST API access"), true);
+      expect(handler).toBeDefined();
+      expect(handler?.name).toBe("cloudflare");
+      expect(handler?.description?.startsWith("Cloudflare REST API access")).toBe(true);
     });
 
     it("should register with correct domains", () => {
@@ -31,8 +30,8 @@ describe("cloudflare egress handler", () => {
       registerEgressHandlers(registry);
 
       const handler = registry.get("cloudflare");
-      assert.ok(handler);
-      assert.deepStrictEqual(handler.domains, ["api.cloudflare.com"]);
+      expect(handler).toBeDefined();
+      expect(handler?.domains).toEqual(["api.cloudflare.com"]);
     });
   });
 
@@ -42,10 +41,9 @@ describe("cloudflare egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("cloudflare")!;
 
-      assert.strictEqual(
-        handler.handles(new Request("https://api.cloudflare.com/client/v4/zones"), createContext({ CLOUDFLARE_API_TOKEN: "test" })),
-        true
-      );
+      expect(
+        handler.handles(new Request("https://api.cloudflare.com/client/v4/zones"), createContext({ CLOUDFLARE_API_TOKEN: "test" }))
+      ).toBe(true);
     });
 
     it("should not handle other domains", () => {
@@ -53,18 +51,15 @@ describe("cloudflare egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("cloudflare")!;
 
-      assert.strictEqual(
-        handler.handles(new Request("https://example.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" })),
-        false
-      );
-      assert.strictEqual(
-        handler.handles(new Request("https://cloudflare.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" })),
-        false
-      );
-      assert.strictEqual(
-        handler.handles(new Request("https://dash.cloudflare.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" })),
-        false
-      );
+      expect(
+        handler.handles(new Request("https://example.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" }))
+      ).toBe(false);
+      expect(
+        handler.handles(new Request("https://cloudflare.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" }))
+      ).toBe(false);
+      expect(
+        handler.handles(new Request("https://dash.cloudflare.com"), createContext({ CLOUDFLARE_API_TOKEN: "test" }))
+      ).toBe(false);
     });
   });
 
@@ -80,9 +75,9 @@ describe("cloudflare egress handler", () => {
       const response = await handler.fetch!(request, context);
       const data = await response.json() as { ok: boolean; handler: string; url: string };
 
-      assert.strictEqual(data.ok, true);
-      assert.strictEqual(data.handler, "cloudflare");
-      assert.strictEqual(data.url, "https://api.cloudflare.com/client/v4/zones");
+      expect(data.ok).toBe(true);
+      expect(data.handler).toBe("cloudflare");
+      expect(data.url).toBe("https://api.cloudflare.com/client/v4/zones");
     });
 
     it("should add Authorization header with bearer token", async () => {
@@ -95,15 +90,15 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.ok(capturedRequest);
-        assert.strictEqual(capturedRequest!.headers.get("Authorization"), "Bearer cf_token_123");
+        expect(capturedRequest).toBeDefined();
+        expect(capturedRequest!.headers.get("Authorization")).toBe("Bearer cf_token_123");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -126,17 +121,17 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.strictEqual(capturedRequest!.method, "POST");
-        assert.strictEqual(capturedRequest!.headers.get("Content-Type"), "application/json");
-        assert.strictEqual(capturedRequest!.headers.get("X-Custom-Header"), "custom-value");
-        assert.strictEqual(capturedRequest!.headers.get("Authorization"), "Bearer test");
+        expect(capturedRequest!.method).toBe("POST");
+        expect(capturedRequest!.headers.get("Content-Type")).toBe("application/json");
+        expect(capturedRequest!.headers.get("X-Custom-Header")).toBe("custom-value");
+        expect(capturedRequest!.headers.get("Authorization")).toBe("Bearer test");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -157,15 +152,15 @@ describe("cloudflare egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
         // Handler sets its own Authorization header
-        assert.strictEqual(capturedRequest!.headers.get("Authorization"), "Bearer new_token");
+        expect(capturedRequest!.headers.get("Authorization")).toBe("Bearer new_token");
       } finally {
         globalThis.fetch = originalFetch;
       }

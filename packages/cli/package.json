@@ -14,7 +14,7 @@
     "dev": "tsc --watch",
     "start": "node --import=tsx src/index.ts",
     "clean": "rm -rf dist",
-    "test": "node --import=tsx --test $(find test -name '*.test.ts' | sort)"
+    "test": "vitest run"
   },
   "dependencies": {
     "@clawflare/harness": "workspace:*",
@@ -28,6 +28,7 @@
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   }
 }

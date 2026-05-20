@@ -1,8 +1,7 @@
 /**
  * Unit tests for diagnostics utilities
  */
-import { describe, it, beforeEach, afterEach } from "node:test";
-import assert from "node:assert";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   timingStart,
   isTimingDebugEnabled,
@@ -17,66 +16,60 @@ describe("diagnostics", () => {
       const start = timingStart();
       const after = Date.now();
 
-      assert.strictEqual(typeof start, "number");
-      assert(start >= before);
-      assert(start <= after);
+      expect(typeof start).toBe("number");
+      expect(start).toBeGreaterThanOrEqual(before);
+      expect(start).toBeLessThanOrEqual(after);
     });
   });
 
   describe("isTimingDebugEnabled", () => {
     it("should return false when CLAWFLARE_DEBUG_TIMING is undefined", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = {};
-      assert.strictEqual(isTimingDebugEnabled(env), false);
+      expect(isTimingDebugEnabled(env)).toBe(false);
     });
 
     it("should return false when CLAWFLARE_DEBUG_TIMING is empty", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = { CLAWFLARE_DEBUG_TIMING: "" };
-      assert.strictEqual(isTimingDebugEnabled(env), false);
+      expect(isTimingDebugEnabled(env)).toBe(false);
     });
 
     it("should return true when CLAWFLARE_DEBUG_TIMING is '1'", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = { CLAWFLARE_DEBUG_TIMING: "1" };
-      assert.strictEqual(isTimingDebugEnabled(env), true);
+      expect(isTimingDebugEnabled(env)).toBe(true);
     });
 
     it("should return true when CLAWFLARE_DEBUG_TIMING is 'true'", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = { CLAWFLARE_DEBUG_TIMING: "true" };
-      assert.strictEqual(isTimingDebugEnabled(env), true);
+      expect(isTimingDebugEnabled(env)).toBe(true);
     });
 
     it("should return true when CLAWFLARE_DEBUG_TIMING is 'yes'", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = { CLAWFLARE_DEBUG_TIMING: "yes" };
-      assert.strictEqual(isTimingDebugEnabled(env), true);
+      expect(isTimingDebugEnabled(env)).toBe(true);
     });
 
     it("should be case-insensitive", () => {
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "TRUE" }),
-        true
-      );
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "True" }),
-        true
-      );
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "YES" }),
-        true
-      );
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "TRUE" })
+      ).toBe(true);
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "True" })
+      ).toBe(true);
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "YES" })
+      ).toBe(true);
     });
 
     it("should return false for other values", () => {
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "false" }),
-        false
-      );
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "no" }),
-        false
-      );
-      assert.strictEqual(
-        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "enable" }),
-        false
-      );
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "false" })
+      ).toBe(false);
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "no" })
+      ).toBe(false);
+      expect(
+        isTimingDebugEnabled({ CLAWFLARE_DEBUG_TIMING: "enable" })
+      ).toBe(false);
     });
   });
 
@@ -86,9 +79,9 @@ describe("diagnostics", () => {
 
     beforeEach(() => {
       loggedMessages = [];
-      console.log = (...args: unknown[]) => {
+      console.log = vi.fn((...args: unknown[]) => {
         loggedMessages.push(args);
-      };
+      });
     });
 
     afterEach(() => {
@@ -98,20 +91,20 @@ describe("diagnostics", () => {
     it("should not log when debug is disabled", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = {};
       logTiming(env, "session-123", "test.phase");
-      assert.strictEqual(loggedMessages.length, 0);
+      expect(loggedMessages.length).toBe(0);
     });
 
     it("should log JSON formatted message when debug is enabled", () => {
       const env: Pick<Env, "CLAWFLARE_DEBUG_TIMING"> = { CLAWFLARE_DEBUG_TIMING: "true" };
       logTiming(env, "session-123", "test.phase");
 
-      assert.strictEqual(loggedMessages.length, 1);
+      expect(loggedMessages.length).toBe(1);
       const logged = JSON.parse(loggedMessages[0] as string);
-      assert.strictEqual(logged.source, "clawflare-timing");
-      assert.strictEqual(logged.sessionId, "session-123");
-      assert.strictEqual(logged.phase, "test.phase");
-      assert.strictEqual(typeof logged.at, "number");
-      assert.strictEqual(logged.elapsedMs, undefined);
+      expect(logged.source).toBe("clawflare-timing");
+      expect(logged.sessionId).toBe("session-123");
+      expect(logged.phase).toBe("test.phase");
+      expect(typeof logged.at).toBe("number");
+      expect(logged.elapsedMs).toBeUndefined();
     });
 
     it("should calculate elapsed time when startedAt is provided", () => {
@@ -121,8 +114,8 @@ describe("diagnostics", () => {
       logTiming(env, "session-123", "test.phase", start);
 
       const logged = JSON.parse(loggedMessages[0] as string);
-      assert.strictEqual(typeof logged.elapsedMs, "number");
-      assert(logged.elapsedMs >= 100);
+      expect(typeof logged.elapsedMs).toBe("number");
+      expect(logged.elapsedMs).toBeGreaterThanOrEqual(100);
     });
 
     it("should include additional details", () => {
@@ -133,8 +126,8 @@ describe("diagnostics", () => {
       });
 
       const logged = JSON.parse(loggedMessages[0] as string);
-      assert.strictEqual(logged.customField, "value");
-      assert.strictEqual(logged.count, 42);
+      expect(logged.customField).toBe("value");
+      expect(logged.count).toBe(42);
     });
 
     it("should handle undefined sessionId", () => {
@@ -142,7 +135,7 @@ describe("diagnostics", () => {
       logTiming(env, undefined, "test.phase");
 
       const logged = JSON.parse(loggedMessages[0] as string);
-      assert.strictEqual(logged.sessionId, undefined);
+      expect(logged.sessionId).toBeUndefined();
     });
 
     it("should combine elapsedMs with details", () => {
@@ -154,9 +147,9 @@ describe("diagnostics", () => {
       });
 
       const logged = JSON.parse(loggedMessages[0] as string);
-      assert.strictEqual(typeof logged.elapsedMs, "number");
-      assert.strictEqual(logged.operation, "db-write");
-      assert(logged.elapsedMs >= 50);
+      expect(typeof logged.elapsedMs).toBe("number");
+      expect(logged.operation).toBe("db-write");
+      expect(logged.elapsedMs).toBeGreaterThanOrEqual(50);
     });
   });
 });

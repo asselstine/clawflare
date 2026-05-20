@@ -1,8 +1,7 @@
 /**
  * Unit tests for egress-core package
  */
-import { describe, it } from "node:test";
-import assert from "node:assert";
+import { describe, it, expect } from "vitest";
 import { EgressRegistry, hostnameMatchesDomain, type EgressHandler, type EgressContext } from "../src/index.js";
 
 describe("egress-core", () => {
@@ -19,14 +18,14 @@ describe("egress-core", () => {
       registry.register(handler);
       const retrieved = registry.get("test-handler");
 
-      assert.strictEqual(retrieved, handler);
+      expect(retrieved).toBe(handler);
     });
 
     it("should return undefined for non-existent handler", () => {
       const registry = new EgressRegistry();
       const retrieved = registry.get("non-existent");
 
-      assert.strictEqual(retrieved, undefined);
+      expect(retrieved).toBeUndefined();
     });
 
     it("should list all registered handlers", () => {
@@ -48,9 +47,9 @@ describe("egress-core", () => {
       registry.register(handler2);
       const handlers = registry.list();
 
-      assert.strictEqual(handlers.length, 2);
-      assert(handlers.includes(handler1));
-      assert(handlers.includes(handler2));
+      expect(handlers.length).toBe(2);
+      expect(handlers).toContain(handler1);
+      expect(handlers).toContain(handler2);
     });
 
     it("should overwrite handler with same name", () => {
@@ -72,36 +71,36 @@ describe("egress-core", () => {
       registry.register(handler2);
       const retrieved = registry.get("same-name");
 
-      assert.strictEqual(retrieved, handler2);
-      assert.strictEqual(registry.list().length, 1);
+      expect(retrieved).toBe(handler2);
+      expect(registry.list().length).toBe(1);
     });
   });
 
   describe("hostnameMatchesDomain", () => {
     it("should match exact hostname", () => {
-      assert.strictEqual(hostnameMatchesDomain("api.github.com", "api.github.com"), true);
+      expect(hostnameMatchesDomain("api.github.com", "api.github.com")).toBe(true);
     });
 
     it("should match subdomain", () => {
-      assert.strictEqual(hostnameMatchesDomain("v1.api.github.com", "api.github.com"), true);
+      expect(hostnameMatchesDomain("v1.api.github.com", "api.github.com")).toBe(true);
     });
 
     it("should not match different domain", () => {
-      assert.strictEqual(hostnameMatchesDomain("github.com", "api.github.com"), false);
+      expect(hostnameMatchesDomain("github.com", "api.github.com")).toBe(false);
     });
 
     it("should not match suffix that is not a subdomain", () => {
-      assert.strictEqual(hostnameMatchesDomain("notgithub.com", "github.com"), false);
+      expect(hostnameMatchesDomain("notgithub.com", "github.com")).toBe(false);
     });
 
     it("should be case-insensitive", () => {
-      assert.strictEqual(hostnameMatchesDomain("API.GITHUB.COM", "api.github.com"), true);
-      assert.strictEqual(hostnameMatchesDomain("api.github.com", "API.GITHUB.COM"), true);
+      expect(hostnameMatchesDomain("API.GITHUB.COM", "api.github.com")).toBe(true);
+      expect(hostnameMatchesDomain("api.github.com", "API.GITHUB.COM")).toBe(true);
     });
 
     it("should handle complex subdomains", () => {
-      assert.strictEqual(hostnameMatchesDomain("raw.githubusercontent.com", "githubusercontent.com"), true);
-      assert.strictEqual(hostnameMatchesDomain("user.repo.github.com", "github.com"), true);
+      expect(hostnameMatchesDomain("raw.githubusercontent.com", "githubusercontent.com")).toBe(true);
+      expect(hostnameMatchesDomain("user.repo.github.com", "github.com")).toBe(true);
     });
   });
 
@@ -120,10 +119,10 @@ describe("egress-core", () => {
       const request = new Request("https://api.example.com/data");
       const context: EgressContext<{ TOKEN: string }> = { env: { TOKEN: "secret123" } };
 
-      assert.strictEqual(await handler.handles(request, context), true);
+      expect(await handler.handles(request, context)).toBe(true);
       const response = await handler.fetch!(request, context);
       const data = await response.json() as { token: string };
-      assert.strictEqual(data.token, "secret123");
+      expect(data.token).toBe("secret123");
     });
 
     it("should support optional connect method", () => {
@@ -137,7 +136,7 @@ describe("egress-core", () => {
         },
       };
 
-      assert.strictEqual(typeof handler.connect, "function");
+      expect(typeof handler.connect).toBe("function");
     });
 
     it("should work with minimal implementation (handles only)", async () => {
@@ -148,9 +147,9 @@ describe("egress-core", () => {
         handles: () => true,
       };
 
-      assert.strictEqual(typeof handler.fetch, "undefined");
-      assert.strictEqual(typeof handler.connect, "undefined");
-      assert.strictEqual(await handler.handles(new Request("https://example.com"), {} as EgressContext), true);
+      expect(typeof handler.fetch).toBe("undefined");
+      expect(typeof handler.connect).toBe("undefined");
+      expect(await handler.handles(new Request("https://example.com"), {} as EgressContext)).toBe(true);
     });
   });
 });

@@ -1,7 +1,6 @@
 // D1 Session Repository Tests
 
-import test from "node:test";
-import assert from "node:assert/strict";
+import { describe, it, expect } from "vitest";
 import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
 import type { SessionMetadataState } from "../../../src/data/interfaces.js";
 
@@ -10,8 +9,8 @@ class MockD1Database {
   private data = new Map<string, Record<string, unknown>>();
   private tables = new Map<string, Map<string, Record<string, unknown>>>();
 
-  prepare(sql: string): MockD1PreparedStatement {
-    return new MockD1PreparedStatement(this, sql);
+  prepare(_sql: string): MockD1PreparedStatement {
+    return new MockD1PreparedStatement(this, _sql);
   }
 
   batch(statements: MockD1PreparedStatement[]): Promise<unknown[]> {
@@ -64,28 +63,28 @@ class MockD1PreparedStatement {
   }
 }
 
-test("SessionRepository interface is defined", () => {
-  // Verify we can import and use the repository
-  assert.ok(D1SessionRepository, "D1SessionRepository should be defined");
-});
+describe("D1 Session Repository", () => {
+  it("SessionRepository interface is defined", () => {
+    // Verify we can import and use the repository
+    expect(D1SessionRepository).toBeDefined();
+  });
 
-test("SessionMetadataState type is valid", () => {
-  const session: SessionMetadataState = {
-    id: "test-session",
-    workflowId: "workflow-123",
-    status: "idle",
-    nextEventCursor: "0",
-    updatedAt: Date.now(),
-    errorMessage: undefined,
-    maxQueueSize: 100,
-    idleTimeout: "7 days",
-  };
+  it("SessionMetadataState type is valid", () => {
+    const session: SessionMetadataState = {
+      id: "test-session",
+      workflowId: "workflow-123",
+      status: "idle",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      errorMessage: undefined,
+      maxQueueSize: 100,
+      idleTimeout: "7 days",
+    };
 
-  assert.equal(session.id, "test-session");
-  assert.equal(session.status, "idle");
+    expect(session.id).toBe("test-session");
+    expect(session.status).toBe("idle");
+  });
 });
 
 // Note: Full integration tests require a real D1 database
 // These tests are placeholder unit tests
-
-export {};

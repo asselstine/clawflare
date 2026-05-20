@@ -1,11 +1,8 @@
 /**
  * Unit tests for skills loading and formatting
  */
-import { describe, it, mock } from "node:test";
-import assert from "node:assert";
+import { describe, it, expect, vi } from "vitest";
 import {
-  loadSkills,
-  loadSkillsFromDir,
   formatSkillsForPrompt,
   expandSkill,
   type AgentSkill,
@@ -15,7 +12,7 @@ describe("skills", () => {
   describe("formatSkillsForPrompt", () => {
     it("should return empty string for no skills", () => {
       const result = formatSkillsForPrompt([]);
-      assert.strictEqual(result, "");
+      expect(result).toBe("");
     });
 
     it("should return empty string for only disabled skills", () => {
@@ -30,7 +27,7 @@ describe("skills", () => {
         },
       ];
       const result = formatSkillsForPrompt(skills);
-      assert.strictEqual(result, "");
+      expect(result).toBe("");
     });
 
     it("should format single skill", () => {
@@ -46,10 +43,10 @@ describe("skills", () => {
       ];
       const result = formatSkillsForPrompt(skills);
       
-      assert(result.includes("<available_agent_skills>"));
-      assert(result.includes('name="test-skill"'));
-      assert(result.includes("A test skill"));
-      assert(result.includes("</available_agent_skills>"));
+      expect(result).toContain("<available_agent_skills>");
+      expect(result).toContain('name="test-skill"');
+      expect(result).toContain("A test skill");
+      expect(result).toContain("</available_agent_skills>");
     });
 
     it("should format multiple skills", () => {
@@ -73,10 +70,10 @@ describe("skills", () => {
       ];
       const result = formatSkillsForPrompt(skills);
       
-      assert(result.includes('name="skill-1"'));
-      assert(result.includes('name="skill-2"'));
-      assert(result.includes("First skill"));
-      assert(result.includes("Second skill"));
+      expect(result).toContain('name="skill-1"');
+      expect(result).toContain('name="skill-2"');
+      expect(result).toContain("First skill");
+      expect(result).toContain("Second skill");
     });
 
     it("should filter out disabled skills", () => {
@@ -100,8 +97,8 @@ describe("skills", () => {
       ];
       const result = formatSkillsForPrompt(skills);
       
-      assert(result.includes("visible"));
-      assert(!result.includes("hidden"));
+      expect(result).toContain("visible");
+      expect(result).not.toContain("hidden");
     });
 
     it("should escape XML special characters", () => {
@@ -117,9 +114,9 @@ describe("skills", () => {
       ];
       const result = formatSkillsForPrompt(skills);
       
-      assert(result.includes("&lt;tag&gt;"));
-      assert(result.includes("&amp;"));
-      assert(result.includes("&quot;quotes&quot;"));
+      expect(result).toContain("&lt;tag&gt;");
+      expect(result).toContain("&amp;");
+      expect(result).toContain("&quot;quotes&quot;");
     });
   });
 
@@ -136,9 +133,9 @@ describe("skills", () => {
       
       const result = expandSkill(skill, "");
       
-      assert(result.includes('name="test-skill"'));
-      assert(result.includes("Skill content here"));
-      assert(result.includes("Skill arguments: (none)"));
+      expect(result).toContain('name="test-skill"');
+      expect(result).toContain("Skill content here");
+      expect(result).toContain("Skill arguments: (none)");
     });
 
     it("should expand skill with arguments", () => {
@@ -153,7 +150,7 @@ describe("skills", () => {
       
       const result = expandSkill(skill, "arg1 arg2");
       
-      assert(result.includes("Skill arguments: arg1 arg2"));
+      expect(result).toContain("Skill arguments: arg1 arg2");
     });
 
     it("should escape XML in skill expansion", () => {
@@ -168,10 +165,10 @@ describe("skills", () => {
       
       const result = expandSkill(skill, "");
       
-      assert(result.includes('name="xml-skill"'));
-      assert(result.includes("&lt;path&gt;"));  // path is escaped
+      expect(result).toContain('name="xml-skill"');
+      expect(result).toContain("&lt;path&gt;");  // path is escaped
       // Note: content is NOT escaped - inserted raw
-      assert(result.includes("Content with <>&"));
+      expect(result).toContain("Content with <>&");
     });
 
     it("should include all skill content", () => {
@@ -186,9 +183,9 @@ describe("skills", () => {
       
       const result = expandSkill(skill, "");
       
-      assert(result.includes("Line 1"));
-      assert(result.includes("Line 2"));
-      assert(result.includes("Line 3"));
+      expect(result).toContain("Line 1");
+      expect(result).toContain("Line 2");
+      expect(result).toContain("Line 3");
     });
   });
 
@@ -197,14 +194,14 @@ describe("skills", () => {
       // This would be tested through parseSkill in an integration test
       // Here's a unit test of the expected behavior
       const derivedName = "expected-name";
-      assert.strictEqual(derivedName, "expected-name");
+      expect(derivedName).toBe("expected-name");
     });
 
     it("should derive name from directory", () => {
       const path = "/home/user/.agents/skills/my-skill/SKILL.md";
       const dir = path.substring(0, path.lastIndexOf("/"));
       const derived = dir.split(/[\\/]/).filter(Boolean).at(-1);
-      assert.strictEqual(derived, "my-skill");
+      expect(derived).toBe("my-skill");
     });
   });
 
@@ -212,25 +209,25 @@ describe("skills", () => {
     it("should parse boolean true", () => {
       const rawValue = "true";
       const parsed = rawValue === "true" ? true : rawValue;
-      assert.strictEqual(parsed, true);
+      expect(parsed).toBe(true);
     });
 
     it("should parse boolean false", () => {
       const rawValue: string = "false";
       const parsed = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
-      assert.strictEqual(parsed, false);
+      expect(parsed).toBe(false);
     });
 
     it("should keep string values", () => {
       const rawValue: string = "some string";
       const parsed = rawValue === "true" ? true : rawValue === "false" ? false : rawValue;
-      assert.strictEqual(parsed, "some string");
+      expect(parsed).toBe("some string");
     });
 
     it("should strip quotes from values", () => {
       const rawValue = '"quoted value"';
       const stripped = rawValue.replace(/^['"]|['"]$/g, "");
-      assert.strictEqual(stripped, "quoted value");
+      expect(stripped).toBe("quoted value");
     });
   });
 });

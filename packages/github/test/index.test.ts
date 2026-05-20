@@ -1,8 +1,7 @@
 /**
  * Unit tests for GitHub egress handler
  */
-import { describe, it } from "node:test";
-import assert from "node:assert";
+import { describe, it, expect, vi } from "vitest";
 import { registerEgressHandlers } from "../src/index.js";
 import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
 
@@ -21,9 +20,9 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
 
       const handler = registry.get("github");
-      assert.ok(handler);
-      assert.strictEqual(handler.name, "github");
-      assert.strictEqual(handler.description.startsWith("GitHub API and content access"), true);
+      expect(handler).toBeDefined();
+      expect(handler?.name).toBe("github");
+      expect(handler?.description?.startsWith("GitHub API and content access")).toBe(true);
     });
 
     it("should register with correct domains", () => {
@@ -31,8 +30,8 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
 
       const handler = registry.get("github");
-      assert.ok(handler);
-      assert.deepStrictEqual(handler.domains, [
+      expect(handler).toBeDefined();
+      expect(handler?.domains).toEqual([
         "api.github.com",
         "github.com",
         "raw.githubusercontent.com",
@@ -46,7 +45,7 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
-      assert.strictEqual(handler.handles(new Request("https://api.github.com/user"), createContext({})), true);
+      expect(handler.handles(new Request("https://api.github.com/user"), createContext({}))).toBe(true);
     });
 
     it("should handle github.com", () => {
@@ -54,7 +53,7 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
-      assert.strictEqual(handler.handles(new Request("https://github.com/octocat"), createContext({})), true);
+      expect(handler.handles(new Request("https://github.com/octocat"), createContext({}))).toBe(true);
     });
 
     it("should handle raw.githubusercontent.com", () => {
@@ -62,10 +61,9 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
-      assert.strictEqual(
-        handler.handles(new Request("https://raw.githubusercontent.com/user/repo/main/README.md"), createContext({})),
-        true
-      );
+      expect(
+        handler.handles(new Request("https://raw.githubusercontent.com/user/repo/main/README.md"), createContext({}))
+      ).toBe(true);
     });
 
     it("should not handle non-github domains", () => {
@@ -73,9 +71,9 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
-      assert.strictEqual(handler.handles(new Request("https://example.com"), createContext({})), false);
-      assert.strictEqual(handler.handles(new Request("https://gitlab.com"), createContext({})), false);
-      assert.strictEqual(handler.handles(new Request("https://bitbucket.org"), createContext({})), false);
+      expect(handler.handles(new Request("https://example.com"), createContext({}))).toBe(false);
+      expect(handler.handles(new Request("https://gitlab.com"), createContext({}))).toBe(false);
+      expect(handler.handles(new Request("https://bitbucket.org"), createContext({}))).toBe(false);
     });
 
     it("should handle subdomains of github.com", () => {
@@ -83,7 +81,7 @@ describe("github egress handler", () => {
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
-      assert.strictEqual(handler.handles(new Request("https://gist.github.com"), createContext({})), true);
+      expect(handler.handles(new Request("https://gist.github.com"), createContext({}))).toBe(true);
     });
   });
 
@@ -99,9 +97,9 @@ describe("github egress handler", () => {
       const response = await handler.fetch!(request, context);
       const data = await response.json() as { ok: boolean; handler: string; url: string };
 
-      assert.strictEqual(data.ok, true);
-      assert.strictEqual(data.handler, "github");
-      assert.strictEqual(data.url, "https://api.github.com/user");
+      expect(data.ok).toBe(true);
+      expect(data.handler).toBe("github");
+      expect(data.url).toBe("https://api.github.com/user");
     });
 
     it("should add Authorization header when GITHUB_TOKEN is set", async () => {
@@ -115,15 +113,15 @@ describe("github egress handler", () => {
       // Mock fetch by creating a custom response
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.ok(capturedRequest);
-        assert.strictEqual(capturedRequest!.headers.get("Authorization"), "Bearer ghp_secret123");
+        expect(capturedRequest).toBeDefined();
+        expect(capturedRequest!.headers.get("Authorization")).toBe("Bearer ghp_secret123");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -139,17 +137,16 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.strictEqual(
-          capturedRequest!.headers.get("Accept"),
-          "application/vnd.github+json"
-        );
+        expect(
+          capturedRequest!.headers.get("Accept")
+        ).toBe("application/vnd.github+json");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -165,14 +162,14 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.strictEqual(capturedRequest!.headers.get("X-GitHub-Api-Version"), "2022-11-28");
+        expect(capturedRequest!.headers.get("X-GitHub-Api-Version")).toBe("2022-11-28");
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -193,18 +190,17 @@ describe("github egress handler", () => {
 
       const originalFetch = globalThis.fetch;
       let capturedRequest: Request | undefined;
-      globalThis.fetch = (req: Parameters<typeof fetch>[0]) => {
+      globalThis.fetch = vi.fn((req: Parameters<typeof fetch>[0]) => {
         capturedRequest = req as Request;
         return Promise.resolve(new Response(JSON.stringify({ success: true })));
-      };
+      }) as typeof globalThis.fetch;
 
       try {
         await handler.fetch!(request, context);
-        assert.strictEqual(
-          capturedRequest!.headers.get("Accept"),
-          "application/vnd.github.v3+json"
-        );
-        assert.strictEqual(capturedRequest!.headers.get("X-Custom-Header"), "custom-value");
+        expect(
+          capturedRequest!.headers.get("Accept")
+        ).toBe("application/vnd.github.v3+json");
+        expect(capturedRequest!.headers.get("X-Custom-Header")).toBe("custom-value");
       } finally {
         globalThis.fetch = originalFetch;
       }
