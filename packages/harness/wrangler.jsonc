@@ -42,17 +42,13 @@
     }
   ],
 
-  // Durable Objects - Used for session coordination only
+  // Durable Objects - Used for WebSocket sessions only
   // All persistent state is now in D1
   "durable_objects": {
     "bindings": [
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
-      },
-      {
-        "name": "SESSION_COORDINATOR",
-        "class_name": "ClawflareSessionCoordinator"
       }
     ]
   },

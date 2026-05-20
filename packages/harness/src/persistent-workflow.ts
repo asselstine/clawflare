@@ -1,8 +1,7 @@
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Env } from "./internal-types/index.js";
-import { createDataLayer } from "./data/index.js";
-import { coordinatorDequeueSessionInput, coordinatorAppendSessionEvents } from "./session-coordinator.js";
+import { getDataLayer } from "./data/index.js";
 
 interface StoredWorkflowSession {
   messages: AgentMessage[];
@@ -63,7 +62,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
     // Mark session as active
     await step.do("mark-session-active", async () => {
-      const dataLayer = createDataLayer(this.env);
+      const dataLayer = getDataLayer(this.env);
       await dataLayer.runtime.setActive(sessionId, true);
     });
 
@@ -71,8 +70,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
     let shouldWaitForWake = false;
 
     while (shouldContinue) {
-      // On workflow startup, drain any already-queued input immediately. This
-      // avoids initial prompt latency and avoids depending on wake-event timing.
+      // On workflow startup, drain any already-queued input immediately.
       // Subsequent iterations wait for an explicit wake event.
       if (shouldWaitForWake) {
         await step.waitForEvent("session-input", {
@@ -87,7 +85,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
       
       while (!drained) {
         const { event: input, remaining } = await step.do("dequeue-input", async () => {
-          return coordinatorDequeueSessionInput(this.env, sessionId);
+          return getDataLayer(this.env).inputQueue.dequeue(sessionId);
         });
 
         if (!input) {
@@ -98,7 +96,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         // Process the input event
         if (input.type === "close") {
           await step.do("mark-session-closed", async () => {
-            const dataLayer = createDataLayer(this.env);
+            const dataLayer = getDataLayer(this.env);
             await dataLayer.sessions.markClosed(sessionId, "user");
             await dataLayer.runtime.setActive(sessionId, false);
           });
@@ -108,8 +106,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
         if (input.type === "prompt") {
           await step.do("process-prompt", async () => {
-            // Get the data layer
-            const dataLayer = createDataLayer(this.env);
+            const dataLayer = getDataLayer(this.env);
 
             // Mark session as processing
             await dataLayer.sessions.save({
@@ -131,9 +128,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
             };
             messages.push(userMessage);
 
-            // The full agent loop can be swapped in here; for now this consumes
-            // real queued input and persists deterministic assistant output in
-            // MOCK_AI-compatible form so polling clients receive messages.
+            // Create mock assistant response
             const assistantText = createMockAssistantResponse(messages, input.content);
             const assistantMessage = {
               role: "assistant",
@@ -162,7 +157,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
             await dataLayer.runtime.saveWorkflowSession(sessionId, { messages });
 
-            await coordinatorAppendSessionEvents(this.env, sessionId, [
+            await dataLayer.events.append(sessionId, [
               {
                 type: "message",
                 timestamp: userMessage.timestamp ?? Date.now(),
@@ -203,7 +198,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
     // Mark session inactive
     await step.do("mark-session-inactive", async () => {
-      const dataLayer = createDataLayer(this.env);
+      const dataLayer = getDataLayer(this.env);
       await dataLayer.runtime.setActive(sessionId, false);
     });
 

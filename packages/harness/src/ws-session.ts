@@ -5,12 +5,8 @@ import type {
   SessionMetadataState,
 } from "./internal-types/index.js";
 import type { ChatRequest } from "./types.js";
-import {
-  enqueueSessionInput,
-  loadSessionState,
-  saveSessionState,
-} from "./session-store.js";
-import { createDataLayer } from "./data/index.js";
+import type { SessionInputEvent } from "./data/index.js";
+import { getDataLayer } from "./data/index.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -94,7 +90,8 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
     const promptContent = data.content;
     const sessionId = data.sessionId || crypto.randomUUID();
     let workflowId: string;
-    const existingSession = data.sessionId ? await loadSessionState(this.env, data.sessionId) : null;
+    const dataLayer = getDataLayer(this.env);
+    const existingSession = data.sessionId ? await dataLayer.sessions.findById(data.sessionId) : null;
 
     if (existingSession) {
       if (existingSession.status === "closed" || existingSession.status === "expired") {
@@ -105,7 +102,7 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       workflowId = existingSession.workflowId;
       existingSession.status = "processing";
       existingSession.updatedAt = Date.now();
-      await saveSessionState(this.env, existingSession);
+      await dataLayer.sessions.save(existingSession);
     } else {
       workflowId = crypto.randomUUID();
       const initialState: SessionMetadataState = {
@@ -117,14 +114,14 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
         maxQueueSize: 100,
         idleTimeout: "7 days",
       };
-      await saveSessionState(this.env, initialState);
+      await dataLayer.sessions.save(initialState);
     }
 
-    const enqueueResult = await enqueueSessionInput(this.env, sessionId, {
+    const enqueueResult = await dataLayer.inputQueue.enqueue(sessionId, {
       type: "prompt",
       content: promptContent,
       maxTurns: data.maxTurns,
-    });
+    } as SessionInputEvent);
 
     if (!enqueueResult.ok) {
       ws.send(JSON.stringify({ type: "error", content: enqueueResult.error || "Queue full" }));
@@ -164,11 +161,11 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
   }
 
   private async waitForAssistantMessage(sessionId: string): Promise<AgentMessage | null> {
-    const dataLayer = createDataLayer(this.env);
+    const dataLayer = getDataLayer(this.env);
 
     for (let i = 0; i < 120; i++) {
       const [session, workflowSession] = await Promise.all([
-        loadSessionState(this.env, sessionId),
+        dataLayer.sessions.findById(sessionId),
         dataLayer.runtime.getWorkflowSession(sessionId) as Promise<{ messages?: AgentMessage[] } | null>,
       ]);
 

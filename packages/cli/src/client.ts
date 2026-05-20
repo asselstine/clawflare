@@ -86,6 +86,53 @@ export class AgentClient {
     };
   }
 
+  /**
+   * Make a JSON request and return the parsed response
+   */
+  private async requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const url = this.buildUrl(path);
+    const response = await fetch(url, {
+      ...init,
+      headers: {
+        ...this.getHeaders(),
+        ...(init.headers || {}),
+      },
+    });
+
+    return this.parseJsonResponse<T>(response);
+  }
+
+  /**
+   * Build a URL from a path
+   */
+  private buildUrl(path: string): string {
+    return `${this.url}${path}`;
+  }
+
+  /**
+   * Parse a response as JSON, handling errors
+   */
+  private async parseJsonResponse<T>(response: Response): Promise<T> {
+    if (!response.ok) {
+      const errorData = await this.parseApiError(response);
+      throw new Error(formatApiError(response.status, errorData));
+    }
+
+    return response.json() as Promise<T>;
+  }
+
+  /**
+   * Parse an API error response
+   */
+  private async parseApiError(response: Response): Promise<ApiError> {
+    const errorText = await response.text().catch(() => "Unknown error");
+    try {
+      return JSON.parse(errorText) as ApiError;
+    } catch {
+      return { error: errorText };
+    }
+  }
+
   // Submit a chat prompt and get a session handle for polling
   async submitChat(request: ChatRequest): Promise<ChatSubmittedResponse> {
     const requestWithContext: ChatRequest = {
@@ -93,76 +140,40 @@ export class AgentClient {
       sessionId: request.sessionId ?? this.currentContextId ?? undefined,
     };
 
-    const response = await fetch(`${this.url}/v1/chat`, {
+    const data = await this.requestJson<ChatSubmittedResponse>("/v1/chat", {
       method: "POST",
-      headers: this.getHeaders(),
       body: JSON.stringify(requestWithContext),
     });
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const errorData = JSON.parse(errorBody) as ApiError;
-      throw new Error(formatApiError(response.status, errorData));
-    }
-
-    const data = await response.json() as ChatSubmittedResponse;
     if (data.sessionId) this.currentContextId = data.sessionId;
     return data;
   }
 
   // Close an active session
   async closeSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string }> {
-    const response = await fetch(`${this.url}/v1/session/${sessionId}/close`, {
-      method: "POST",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const errorData = JSON.parse(errorBody) as ApiError;
-      throw new Error(formatApiError(response.status, errorData));
-    }
-
-    return response.json() as Promise<{ ok: boolean; sessionId: string; status: string }>;
+    return this.requestJson<{ ok: boolean; sessionId: string; status: string }>(
+      `/v1/session/${sessionId}/close`,
+      { method: "POST" }
+    );
   }
 
   // List sessions - optional status filter ("active", "idle", "closed", "expired", "error")
   async listSessions(options?: { status?: string; sessionId?: string }): Promise<SessionListResponse> {
-    const url = new URL(`${this.url}/v1/sessions`);
-    if (options?.status && options.status !== "all") url.searchParams.set("status", options.status);
-    if (options?.sessionId) url.searchParams.set("sessionId", options.sessionId);
+    const query = new URLSearchParams();
+    if (options?.status && options.status !== "all") query.set("status", options.status);
+    if (options?.sessionId) query.set("sessionId", options.sessionId);
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const errorData = JSON.parse(errorBody) as ApiError;
-      throw new Error(formatApiError(response.status, errorData));
-    }
-
-    return response.json() as Promise<SessionListResponse>;
+    const path = `/v1/sessions${query.toString() ? `?${query.toString()}` : ""}`;
+    return this.requestJson<SessionListResponse>(path);
   }
 
   // Get current session state (poll for updates)
   async getSession(sessionId: string, eventCursor?: string): Promise<SessionResponse> {
-    const url = new URL(`${this.url}/v1/session/${sessionId}`);
-    if (eventCursor) url.searchParams.set("since", eventCursor);
+    const query = new URLSearchParams();
+    if (eventCursor) query.set("since", eventCursor);
 
-    const response = await fetch(url, {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const errorData = JSON.parse(errorBody) as ApiError;
-      throw new Error(formatApiError(response.status, errorData));
-    }
-
-    return response.json() as Promise<SessionResponse>;
+    const path = `/v1/session/${sessionId}${query.toString() ? `?${query.toString()}` : ""}`;
+    return this.requestJson<SessionResponse>(path);
   }
 
   // Poll session until complete, yielding updates
@@ -195,33 +206,17 @@ export class AgentClient {
   }
 
   async getContext(): Promise<ContextInfo> {
-    const response = await fetch(`${this.url}/v1/context`, {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "Unknown error");
-      throw new Error(`Failed to get context: ${response.status} - ${errorText}`);
-    }
-
-    const data = await response.json() as ContextInfo;
+    const data = await this.requestJson<ContextInfo>("/v1/context");
     this.currentContextId = data.id;
     return data;
   }
 
   async createContext(parentId?: string): Promise<ContextInfo> {
-    const response = await fetch(`${this.url}/v1/context`, {
+    const data = await this.requestJson<ContextInfo>("/v1/context", {
       method: "POST",
-      headers: this.getHeaders(),
       body: JSON.stringify({ parentId }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to create context: ${response.status}`);
-    }
-
-    const data = await response.json() as ContextInfo;
     this.currentContextId = data.id;
     return data;
   }
@@ -231,17 +226,8 @@ export class AgentClient {
   }
 
   async listTools(): Promise<ToolInfo[]> {
-    const response = await fetch(`${this.url}/v1/tools`, {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to list tools: ${response.status}`);
-    }
-
-    const data = await response.json() as { tools: ToolInfo[] };
-    return data.tools || [];
+    const { tools } = await this.requestJson<{ tools: ToolInfo[] }>("/v1/tools");
+    return tools || [];
   }
 
   // WebSocket for streaming responses
@@ -265,35 +251,17 @@ export class AgentClient {
   }
 
   async getServerInfo(): Promise<ServerInfo> {
-    const response = await fetch(`${this.url}/v1/info`, {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to get server info: ${response.status}`);
-    }
-
-    return response.json() as Promise<ServerInfo>;
+    return this.requestJson<ServerInfo>("/v1/info");
   }
 
   // Debug endpoint - inspect DO storage
   async cfDebug(sessionId?: string, key?: string): Promise<unknown> {
-    const url = new URL(`${this.url}/v1/cf_debug`);
-    if (sessionId) url.searchParams.set("sessionId", sessionId);
-    if (key) url.searchParams.set("key", key);
+    const query = new URLSearchParams();
+    if (sessionId) query.set("sessionId", sessionId);
+    if (key) query.set("key", key);
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: this.getHeaders(),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => "Unknown error");
-      throw new Error(`Debug query failed: ${response.status} - ${errorText}`);
-    }
-
-    return response.json();
+    const path = `/v1/cf_debug${query.toString() ? `?${query.toString()}` : ""}`;
+    return this.requestJson<unknown>(path);
   }
 }
 

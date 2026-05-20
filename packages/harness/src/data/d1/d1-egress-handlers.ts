@@ -6,20 +6,22 @@ import type {
 } from "../interfaces.js";
 import type { EgressHandlerRow } from "./row-mappers.js";
 import { mapEgressHandlerRow } from "./row-mappers.js";
+import { metadata as githubMetadata } from "@clawflare/github";
+import { metadata as cloudflareMetadata } from "@clawflare/cloudflare";
 
 const BUILT_IN_EGRESS_HANDLERS: EgressHandlerMetadata[] = [
   {
-    name: "github",
-    description: "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers when GITHUB_TOKEN is configured",
-    domains: ["api.github.com", "github.com", "raw.githubusercontent.com"],
+    name: githubMetadata.name,
+    description: githubMetadata.description,
+    domains: githubMetadata.domains,
     enabled: true,
     config: {},
     updatedAt: 0,
   },
   {
-    name: "cloudflare",
-    description: "Cloudflare REST API access - automatically injects Authorization: Bearer token from CLOUDFLARE_API_TOKEN",
-    domains: ["api.cloudflare.com"],
+    name: cloudflareMetadata.name,
+    description: cloudflareMetadata.description,
+    domains: cloudflareMetadata.domains,
     enabled: true,
     config: {},
     updatedAt: 0,

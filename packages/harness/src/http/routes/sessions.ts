@@ -1,0 +1,177 @@
+// Sessions Route Handler - /v1/session/* and /v1/sessions
+// Handles session polling, closing, and listing
+
+import type { SessionInputEvent, SessionMetadataState } from "../../data/index.js";
+import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
+import { json, notFound, badRequest, serverError } from "../responses.js";
+import { timingStart, logTiming } from "../../diagnostics.js";
+import { getDataLayer } from "../../data/index.js";
+import type { Env } from "../../internal-types/index.js";
+
+const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Get session state - polls for messages and events
+ */
+export async function handleGetSession(
+  sessionId: string,
+  url: URL,
+  env: Env
+): Promise<Response> {
+  const pollStart = timingStart();
+  const data = getDataLayer(env);
+
+  try {
+    const sessionState = await data.sessions.findById(sessionId);
+
+    if (!sessionState) {
+      logTiming(env, sessionId, "session.poll.not_found", pollStart);
+      return notFound("Session");
+    }
+
+    // Check for stuck workflows (auto-recovery)
+    if (sessionState.status === "processing" &&
+        Date.now() - sessionState.updatedAt > PROCESSING_TIMEOUT_MS) {
+      console.warn(`[handleGetSession] Session ${sessionId} stuck in processing for ${Date.now() - sessionState.updatedAt}ms, marking as error`);
+      const updatedSession: SessionMetadataState = {
+        ...sessionState,
+        status: "error",
+        errorMessage: "Session timed out - processing took too long. Try closing this session and starting a new one.",
+        updatedAt: Date.now(),
+      };
+      await data.sessions.save(updatedSession);
+    }
+
+    const sinceCursor = url.searchParams.get("since");
+    const { events, nextCursor } = await data.events.listSince(
+      sessionId,
+      sinceCursor || undefined,
+      100
+    );
+
+    logTiming(env, sessionId, "session.poll", pollStart, {
+      status: sessionState.status,
+      messageCount: 0,
+      eventCount: events.length,
+      sinceCursor,
+    });
+
+    const workflowSession = await data.runtime.getWorkflowSession(sessionId) as
+      | { messages?: import("../../types.js").AgentMessage[] }
+      | null;
+
+    const response: SessionResponse = {
+      id: sessionState.id,
+      status: sessionState.status,
+      messages: workflowSession?.messages ?? [],
+      events,
+      nextEventCursor: nextCursor,
+      errorMessage: sessionState.errorMessage,
+    };
+
+    return json(response);
+  } catch (error) {
+    logTiming(env, sessionId, "session.poll.error", pollStart, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error("[handleGetSession] Error:", error);
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
+ * Close a session - sends close event to workflow
+ */
+export async function handleCloseSession(sessionId: string, env: Env): Promise<Response> {
+  const data = getDataLayer(env);
+
+  try {
+    const session = await data.sessions.findById(sessionId);
+    if (!session) {
+      return notFound("Session");
+    }
+
+    if (session.status === "closed" || session.status === "expired") {
+      return badRequest("Session already closed");
+    }
+
+    if (!session.workflowId) {
+      return serverError("Session has no associated workflow");
+    }
+
+    const inputEvent = { type: "close" } as SessionInputEvent;
+    await data.inputQueue.enqueue(sessionId, inputEvent);
+
+    // Get workflow instance and wake it to consume the queued close event
+    const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
+    await workflowInstance.sendEvent({
+      type: "session-input",
+      payload: { type: "wake" },
+    });
+
+    // Mark session as closed immediately for UI feedback
+    await data.sessions.markClosed(sessionId, "user");
+    await data.runtime.setActive(sessionId, false);
+
+    return json({ ok: true, sessionId, status: "closed" });
+  } catch (error) {
+    console.error("[handleCloseSession] Error:", error);
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
+ * List sessions - returns active and recent sessions using D1
+ */
+export async function handleListSessions(url: URL, env: Env): Promise<Response> {
+  const data = getDataLayer(env);
+
+  try {
+    // Parse query parameters
+    const statusFilter = url.searchParams.get("status") || "all";
+    const limit = Math.min(parseInt(url.searchParams.get("limit") || "50", 10), 100);
+    const offset = parseInt(url.searchParams.get("offset") || "0", 10);
+
+    // If specific session ID provided, return that one
+    const sessionId = url.searchParams.get("sessionId");
+    if (sessionId) {
+      const state = await data.sessions.findById(sessionId);
+      if (state) {
+        const [messageCount, isActive] = await Promise.all([
+          data.events.count(sessionId),
+          data.runtime.isActive(sessionId),
+        ]);
+        const summary: SessionSummary = {
+          id: state.id,
+          workflowId: state.workflowId,
+          status: state.status,
+          messageCount,
+          updatedAt: state.updatedAt,
+          isActive,
+        };
+
+        const response: SessionListResponse = { sessions: [summary], total: 1 };
+        return json(response);
+      }
+
+      return json({ sessions: [], total: 0 });
+    }
+
+    // List sessions from D1
+    const sessions = await data.sessions.list({
+      status: statusFilter as "all" | SessionStatus,
+      limit,
+      offset,
+    });
+
+    const total = await data.sessions.count({
+      status: statusFilter as "all" | SessionStatus,
+    });
+
+    const response: SessionListResponse = { sessions, total };
+    return json(response);
+  } catch (error) {
+    console.error("[handleListSessions] Error:", error);
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}

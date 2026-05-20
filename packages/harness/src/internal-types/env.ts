@@ -36,11 +36,6 @@ export interface Env {
   DB: D1Database;
 
   // Durable Objects
-  // SESSION_STORE is deprecated - kept only for migration compatibility.
-  // It is not bound in the active Worker config.
-  SESSION_STORE?: DurableObjectNamespace;
-  // SESSION_COORDINATOR handles per-session queue/event serialization
-  SESSION_COORDINATOR: DurableObjectNamespace;
   // WebSocket session Durable Object
   WEBSOCKET_SESSION: DurableObjectNamespace;
 

@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../internal-types/index.js";
-import { getDatastore } from "../datastore.js";
+import { getDataLayer } from "../data/index.js";
 import { createEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
 
@@ -10,8 +10,8 @@ export async function routeOutboundRequest(
   requestId?: string
 ): Promise<Response> {
   const registry = createEgressRegistry<Env>();
-  const datastore = getDatastore(env);
-  const metadata = await datastore.listEgressHandlers(true);
+  const data = getDataLayer(env);
+  const metadata = await data.egressHandlers.list(true);
 
   for (const item of metadata) {
     const handler = registry.get(item.name);

@@ -6,7 +6,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "./../internal-types/index.js";
 import type { ExecutionResult } from "./../internal-types/tools.js";
-import { getDatastore } from "../datastore";
+import { getDataLayer } from "../data/index.js";
 import { executeDynamicWorker } from "../runtime/dynamic-worker";
 
 // Tool parameter types
@@ -73,8 +73,8 @@ function createStoreCodeTool(env: Env): AgentTool {
 
       validateName(p.name);
 
-      const datastore = getDatastore(env);
-      await datastore.upsertStoredCode({
+      const data = getDataLayer(env);
+      await data.storedCode.upsert({
         name: p.name,
         description: p.description || "",
         code: p.code,
@@ -108,8 +108,8 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
 
       validateName(p.name);
 
-      const datastore = getDatastore(env);
-      const stored = await datastore.getStoredCode(p.name);
+      const data = getDataLayer(env);
+      const stored = await data.storedCode.get(p.name);
 
       if (!stored) {
         throw new Error(`Code "${p.name}" not found. Use store_code to save it first.`);
@@ -178,8 +178,23 @@ function createSearchTool(env: Env): AgentTool {
       const collection = p.collection || "all";
       const limit = Math.min(p.limit || 20, 20); // Cap at 20
 
-      const datastore = getDatastore(env);
-      const results = await datastore.search(collection, p.query ?? "*", limit);
+      const data = getDataLayer(env);
+
+      let results: { storedCode: import("../data/index.js").StoredCodeEntry[]; egressHandlers: import("../data/index.js").EgressHandlerMetadata[] };
+
+      if (collection === "stored_code") {
+        results = {
+          storedCode: await data.storedCode.search(p.query ?? "*", limit),
+          egressHandlers: [],
+        };
+      } else if (collection === "egress_handlers") {
+        results = {
+          storedCode: [],
+          egressHandlers: await data.egressHandlers.search(p.query ?? "*", limit),
+        };
+      } else {
+        results = await data.search(p.query ?? "*", limit);
+      }
 
       const lines: string[] = [];
 

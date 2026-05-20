@@ -2,16 +2,13 @@
 // This is used for E2E testing
 
 import { HttpGateway, routeOutboundRequest } from "./egress/gateway.js";
-import { ClawflareSessionStore } from "./session-do.js";
-import { ClawflareSessionCoordinator } from "./session-coordinator.js";
-import { ClawflareDatastore } from "./legacy-datastore-do.js";
 import { PersistentSessionWorkflow } from "./persistent-workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
 import type { Env } from "./internal-types/index.js";
-import { getDatastore } from "./datastore.js";
+import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./runtime/dynamic-worker.js";
 
-export { HttpGateway, ClawflareDatastore, ClawflareSessionCoordinator, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
+export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Test endpoints
 export default {
@@ -33,14 +30,13 @@ export default {
 
     if (path === "/__test/store-code" && request.method === "POST") {
       const body = await request.json<{ name: string; code: string; description?: string; tags?: string[] }>();
-      await getDatastore(env).upsertStoredCode(body);
+      await getDataLayer(env).storedCode.upsert(body);
       return Response.json({ ok: true });
     }
 
     if (path === "/__test/search" && request.method === "GET") {
-      const collection = url.searchParams.get("collection") || "all";
       const query = url.searchParams.get("q") || "*";
-      const results = await getDatastore(env).search(collection, query, 20);
+      const results = await getDataLayer(env).search(query, 20);
       return Response.json({
         ok: true,
         results: {
@@ -52,7 +48,7 @@ export default {
 
     if (path === "/__test/execute-stored-code" && request.method === "POST") {
       const body = await request.json<{ name: string; input?: unknown }>();
-      const entry = await getDatastore(env).getStoredCode(body.name);
+      const entry = await getDataLayer(env).storedCode.get(body.name);
       if (!entry) return Response.json({ ok: false, error: "Code not found" }, { status: 404 });
       return Response.json(await executeDynamicWorker(env, ctx, entry.code, body.input));
     }

@@ -35,10 +35,6 @@
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
-      },
-      {
-        "name": "SESSION_STORE",
-        "class_name": "ClawflareSessionStore"
       }
     ]
   },

@@ -10,6 +10,7 @@ export type {
   SessionMetadataState,
   SessionSummary,
   SessionListFilter,
+  SessionStatus,
 
   // Event types
   NewSessionEvent,
@@ -100,6 +101,29 @@ export {
 import type { Env } from "../internal-types/index.js";
 import type { DataLayer } from "./interfaces.js";
 import { createD1DataLayer } from "./d1/d1-data-layer.js";
+
+// =============================================================================
+// Cached Data Layer Accessor
+// =============================================================================
+
+/**
+ * Cached data layer per environment
+ * This is the canonical way to get the data layer in route handlers
+ */
+const dataLayerCache = new WeakMap<Env, DataLayer>();
+
+/**
+ * Get or create the data layer for the given environment
+ * Returns a cached instance if one exists
+ */
+export function getDataLayer(env: Env): DataLayer {
+  let layer = dataLayerCache.get(env);
+  if (!layer) {
+    layer = createDataLayer(env);
+    dataLayerCache.set(env, layer);
+  }
+  return layer;
+}
 
 /**
  * Create the appropriate data layer based on environment configuration

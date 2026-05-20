@@ -7,8 +7,8 @@
   "main": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./src/public-types.ts",
-      "default": "./src/public-types.ts"
+      "types": "./src/types.ts",
+      "default": "./src/types.ts"
     }
   },
   "scripts": {

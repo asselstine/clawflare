@@ -1,34 +1,28 @@
-import { hostnameMatchesDomain, type EgressContext, type EgressHandler, type EgressRegistry } from "@clawflare/egress-core";
+import { defineHttpEgressHandler, type HttpEgressHandlerContext } from "@clawflare/egress-core";
+
+export const domains = ["api.cloudflare.com"];
+
+export const metadata = {
+  name: "cloudflare",
+  description: "Cloudflare REST API access - automatically injects Authorization: Bearer token from CLOUDFLARE_API_TOKEN",
+  domains,
+} as const;
 
 interface CloudflareEnv {
   CLOUDFLARE_API_TOKEN: string;
   MOCK_AI?: string;
 }
 
-const domains = ["api.cloudflare.com"];
-
-const cloudflareHandler: EgressHandler<CloudflareEnv> = {
-  name: "cloudflare",
-  description: "Cloudflare REST API access - automatically injects Authorization: Bearer token from CLOUDFLARE_API_TOKEN",
+export const cloudflareHandler = defineHttpEgressHandler<CloudflareEnv>({
+  name: metadata.name,
+  description: metadata.description,
   domains,
 
-  handles(request: Request): boolean {
-    const hostname = new URL(request.url).hostname;
-    return domains.some((domain) => hostnameMatchesDomain(hostname, domain));
-  },
-
-  async fetch(request: Request, context: EgressContext<CloudflareEnv>): Promise<Response> {
-    if (context.env.MOCK_AI === "true") {
-      return Response.json({ ok: true, handler: "cloudflare", url: request.url });
-    }
-
-    const headers = new Headers(request.headers);
+  async decorateHeaders(headers, context: HttpEgressHandlerContext<CloudflareEnv>): Promise<void> {
     headers.set("Authorization", `Bearer ${context.env.CLOUDFLARE_API_TOKEN}`);
-
-    return fetch(new Request(request, { headers }));
   },
-};
+});
 
-export function registerEgressHandlers(registry: EgressRegistry<CloudflareEnv>): void {
+export function registerEgressHandlers(registry: { register: (handler: typeof cloudflareHandler) => void }): void {
   registry.register(cloudflareHandler);
 }
