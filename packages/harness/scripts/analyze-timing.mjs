@@ -1,0 +1,160 @@
+#!/usr/bin/env node
+
+import readline from "node:readline";
+
+const keyGaps = [
+  {
+    label: "Workflow scheduling/start",
+    from: "chat.workflow.create.returned",
+    to: "workflow.run.start",
+    note: "Large gap suggests delay before Workflow.run begins.",
+  },
+  {
+    label: "Workflow initialization",
+    from: "workflow.run.start",
+    to: "workflow.initialize.done",
+    note: "Large gap suggests Durable Object/component initialization delay.",
+  },
+  {
+    label: "Pre-provider agent setup",
+    from: "workflow.step_do.start",
+    to: "assistant.stream.created",
+    note: "Large gap suggests agent setup before provider stream creation.",
+  },
+  {
+    label: "Provider first event",
+    from: "assistant.stream.created",
+    to: "assistant.stream.first_event",
+    note: "Large gap suggests provider/model first-token latency.",
+  },
+  {
+    label: "Buffered assistant step",
+    from: "assistant.stream.first_event",
+    to: "workflow.execute_step.events_appended",
+    note: "Large gap suggests events are produced but not persisted until step completion.",
+  },
+  {
+    label: "Poll visibility",
+    from: "workflow.execute_step.events_appended",
+    to: "session.poll",
+    note: "Large gap suggests polling/storage visibility delay after events are appended.",
+  },
+];
+
+const args = process.argv.slice(2);
+const sessionFilter = getArgValue("--session");
+const showAll = args.includes("--all");
+const sessions = new Map();
+
+function getArgValue(name) {
+  const index = args.indexOf(name);
+  return index >= 0 ? args[index + 1] : undefined;
+}
+
+function parseTimingLog(line) {
+  const jsonStart = line.indexOf("{");
+  if (jsonStart === -1) return undefined;
+
+  try {
+    const parsed = JSON.parse(line.slice(jsonStart));
+    if (parsed?.source !== "clawflare-timing" || typeof parsed.phase !== "string") {
+      return undefined;
+    }
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function addEvent(event) {
+  const sessionId = event.sessionId || "unknown";
+  if (sessionFilter && sessionId !== sessionFilter) return;
+
+  const sessionEvents = sessions.get(sessionId) ?? [];
+  sessionEvents.push(event);
+  sessions.set(sessionId, sessionEvents);
+}
+
+function findGap(events, from, to) {
+  const fromEvent = events.find((event) => event.phase === from);
+  if (!fromEvent) return undefined;
+
+  const toEvent = events.find((event) => event.phase === to && event.at >= fromEvent.at);
+  if (!toEvent) return undefined;
+
+  return { fromEvent, toEvent, durationMs: toEvent.at - fromEvent.at };
+}
+
+function formatMs(ms) {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function printSession(sessionId, events) {
+  const sorted = events
+    .filter((event) => typeof event.at === "number")
+    .sort((a, b) => a.at - b.at);
+
+  if (sorted.length === 0) return;
+
+  const start = sorted[0].at;
+  const end = sorted.at(-1).at;
+
+  console.log(`\nSession ${sessionId}`);
+  console.log(`Total observed timing span: ${formatMs(end - start)} (${sorted.length} timing logs)`);
+
+  console.log("\nKey gaps:");
+  for (const gapDef of keyGaps) {
+    const gap = findGap(sorted, gapDef.from, gapDef.to);
+    if (!gap) {
+      console.log(`  - ${gapDef.label}: missing ${gapDef.from} -> ${gapDef.to}`);
+      continue;
+    }
+
+    const marker = gap.durationMs >= 10_000 ? " ⚠" : gap.durationMs >= 3_000 ? " ◔" : "";
+    console.log(`  - ${gapDef.label}: ${formatMs(gap.durationMs)}${marker}`);
+    if (gap.durationMs >= 3_000) {
+      console.log(`    ${gapDef.note}`);
+    }
+  }
+
+  const exceptions = sorted.filter((event) => event.phase.includes("exception"));
+  if (exceptions.length > 0) {
+    console.log("\nExceptions:");
+    for (const event of exceptions) {
+      console.log(`  - +${formatMs(event.at - start)} ${event.phase}: ${event.error ?? "unknown error"}`);
+    }
+  }
+
+  if (showAll) {
+    console.log("\nTimeline:");
+    for (const event of sorted) {
+      const elapsed = `+${formatMs(event.at - start)}`.padStart(9);
+      const ownElapsed = event.elapsedMs === undefined ? "" : ` elapsed=${formatMs(event.elapsedMs)}`;
+      console.log(`  ${elapsed} ${event.phase}${ownElapsed}`);
+    }
+  }
+}
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity,
+});
+
+rl.on("line", (line) => {
+  const event = parseTimingLog(line);
+  if (event) addEvent(event);
+});
+
+rl.on("close", () => {
+  if (sessions.size === 0) {
+    console.error("No clawflare timing logs found on stdin.");
+    console.error("Enable CLAWFLARE_DEBUG_TIMING=1 and pipe wrangler tail output into this script.");
+    process.exitCode = 1;
+    return;
+  }
+
+  for (const [sessionId, events] of sessions) {
+    printSession(sessionId, events);
+  }
+});

@@ -1,11 +1,12 @@
 // Clawflare Workflow Agent - durable, workflow-native agent execution.
-// The Workflow owns persistence; Agent decides what steps to run.
+//
+// Workflow is an INTERNAL implementation detail - clients use session-based API.
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
-import type { Env, ChatRequest, ChatResponse } from "./types";
+import type { Env, ChatRequest } from "./types";
+import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { createTools } from "./tools";
 import { createMockStream, shouldUseMockAI } from "./mock-ai";
 import { streamSimple } from "@earendil-works/pi-ai";
-import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import {
   resolveConfiguredModel,
   getApiKeyForProvider,
@@ -18,36 +19,18 @@ import {
   createEmptyAgentSession,
   type AgentSessionState,
   type NextStepInfo,
-  type RunStepResult,
 } from "./agent";
 import {
-  sessionKey,
-  workflowKey,
   loadSession,
   saveSession,
-  loadWorkflow,
-  saveWorkflow,
-  appendAgentEvents,
-  appendWorkflowProgress,
 } from "./workflow-state";
-
-export interface WorkflowProgressEvent {
-  timestamp: number;
-  sequence: number;
-  type: "workflow" | "agent" | "turn" | "message" | "tool" | "error";
-  summary: string;
-  event?: AgentEvent;
-}
-
-export interface DurableAgentWorkflow {
-  id: string;
-  sessionId: string;
-  status: "running" | "idle" | "error" | "awaiting_input";
-  turnCount: number;
-  maxTurns: number;
-  progress: WorkflowProgressEvent[];
-  errorMessage?: string;
-}
+import {
+  appendSessionEvents,
+  loadSessionState,
+  markSessionError,
+  saveSessionState,
+} from "./session-store";
+import { logTiming, timingStart } from "./diagnostics";
 
 interface WorkflowInput {
   sessionId: string;
@@ -55,42 +38,26 @@ interface WorkflowInput {
   maxTurns?: number;
 }
 
-export interface WorkflowStartedResponse {
-  type: "workflow_started";
-  id: string;
-  workflowId: string;
-  instanceId: string;
-  sessionId: string;
-  status: "running";
-  pollUrl: string;
-}
-
-export interface WorkflowStatusResponse {
-  status: "running" | "success" | "errored" | "paused";
-  state?: DurableAgentWorkflow;
-  session?: AgentSessionState;
-  currentStep?: string;
-  response?: ChatResponse;
-}
-
 interface InitializedState {
   session: AgentSessionState;
-  workflow: DurableAgentWorkflow;
   firstStep?: NextStepInfo;
 }
 
 interface StepExecutionResult {
-  session: AgentSessionState;
-  workflow: DurableAgentWorkflow;
-  nextStep?: NextStepInfo;
+  sessionId: string;
+  turnCount: number;
+  status?: "error" | "processing";
 }
 
 const DEFAULT_MAX_TURNS = 20;
 
+/**
+ * Start workflow internally. Session ID is exposed to client, workflow ID is not.
+ */
 export async function startAgentWorkflow(
   env: Env,
   request: ChatRequest,
-): Promise<WorkflowStartedResponse> {
+): Promise<{ sessionId: string }> {
   if (request.type !== "prompt" || !request.content) {
     throw new Error("Invalid request. type='prompt' and content required");
   }
@@ -98,28 +65,10 @@ export async function startAgentWorkflow(
   const sessionId = request.sessionId || crypto.randomUUID();
   const workflowId = crypto.randomUUID();
   const maxTurns = request.maxTurns ?? DEFAULT_MAX_TURNS;
+  const createStart = timingStart();
+  logTiming(env, sessionId, "workflow.create.start", undefined, { workflowId, maxTurns });
 
-  const placeholder: DurableAgentWorkflow = {
-    id: workflowId,
-    sessionId,
-    status: "running",
-    turnCount: 0,
-    maxTurns,
-    progress: [
-      {
-        timestamp: Date.now(),
-        sequence: 1,
-        type: "workflow",
-        summary: "Workflow queued",
-      },
-    ],
-  };
-
-  // Write a placeholder before create() returns so immediate polls don't race
-  // the Workflow's initialize step.
-  await saveWorkflow(env, placeholder);
-
-  const instance = await env.AGENT_WORKFLOW.create({
+  await env.AGENT_WORKFLOW.create({
     id: workflowId,
     params: {
       sessionId,
@@ -128,44 +77,59 @@ export async function startAgentWorkflow(
     },
   });
 
-  return {
-    type: "workflow_started",
-    id: instance.id,
-    workflowId: instance.id,
-    instanceId: instance.id,
-    sessionId,
-    status: "running",
-    pollUrl: `/v1/workflow/${instance.id}`,
-  };
+  logTiming(env, sessionId, "workflow.create.done", createStart, { workflowId });
+  return { sessionId };
 }
 
 export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
+    const { sessionId } = event.payload;
+
+    try {
+      return await this.runWorkflow(event, step);
+    } catch (error) {
+      logWorkflowException(this.env, sessionId, error);
+      await markSessionError(this.env, sessionId, error);
+      throw error;
+    }
+  }
+
+  private async runWorkflow(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
+    const workflowRunStart = timingStart();
     const { sessionId, prompt, maxTurns = DEFAULT_MAX_TURNS } = event.payload;
-    const workflowId = event.instanceId;
+    logTiming(this.env, sessionId, "workflow.run.start", undefined, {
+      promptLength: prompt.length,
+      maxTurns,
+    });
 
     // Initialize once
     const initResult = (await step.do(
       "initialize",
       async (): Promise<any> => {
-        return this.initializeWorkflow(sessionId, prompt, workflowId, maxTurns);
+        return this.initializeWorkflow(sessionId, prompt);
       },
     )) as InitializedState;
 
-    // Early exit if no work to do (shouldn't happen in practice)
+    logTiming(this.env, sessionId, "workflow.initialize.step_do.done", workflowRunStart, {
+      hasFirstStep: Boolean(initResult.firstStep),
+      messageCount: initResult.session.messages.length,
+    });
+
     if (!initResult.firstStep) {
-      return this.finalizeWorkflow(initResult.workflow, false);
+      return this.finalizeWorkflow(sessionId, initResult.session, maxTurns, false);
     }
 
-    // Main execution loop - Workflow knows NOTHING about step internals
     let currentStep: NextStepInfo | undefined = initResult.firstStep;
     let currentSession = initResult.session;
-    let currentWorkflow = initResult.workflow;
-    let stepCount = 0;
+    let turnCount = 0;
 
-    while (currentStep && currentWorkflow.turnCount < currentWorkflow.maxTurns) {
-      stepCount++;
-
+    while (currentStep && turnCount < maxTurns) {
+      logTiming(this.env, sessionId, "workflow.step_do.start", undefined, {
+        stepId: currentStep.stepId,
+        stepType: currentStep.type,
+        turnCount,
+      });
+      const stepDoStart = timingStart();
       const result = await step.do(
         currentStep.stepId,
         {
@@ -177,132 +141,216 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
           timeout: "2 minutes",
         },
         async (): Promise<any> => {
-          return this.executeStep(currentSession, currentWorkflow, currentStep!);
+          return this.executeStep(sessionId, currentStep!, turnCount);
         },
       );
 
       const stepResult = result as StepExecutionResult;
-      currentSession = stepResult.session;
-      currentWorkflow = stepResult.workflow;
-      currentStep = stepResult.nextStep;;
+      logTiming(this.env, sessionId, "workflow.step_do.done", stepDoStart, {
+        stepId: currentStep.stepId,
+        stepType: currentStep.type,
+        status: stepResult.status,
+      });
+      turnCount = stepResult.turnCount;
 
-      // Exit on error
-      if (currentWorkflow.status === "error") {
+      // Reload session for next iteration
+      currentSession = await loadSession(this.env, sessionId);
+
+      // Check session status for next step
+      const agent = createWorkflowAgent(await buildAgentComponents(this.env, this.ctx), this.env, sessionId);
+      currentStep = agent.determineNextStep(currentSession);
+
+      // Check for error status from session store
+      const sessionState = await loadSessionState(this.env, sessionId);
+      if (sessionState?.status === "error" || stepResult.status === "error") {
         break;
       }
     }
 
-    // Finalize
-    const finalWorkflow = await step.do("finalize", async (): Promise<DurableAgentWorkflow> => {
-      const loadedWorkflow = await loadWorkflow(this.env, currentWorkflow.id);
-      return this.finalizeWorkflow(
-        loadedWorkflow,
-        currentWorkflow.turnCount >= maxTurns && loadedWorkflow.status === "running",
-      );
+    const finalizeStart = timingStart();
+    await step.do("finalize", async (): Promise<{ sessionId: string; status: string }> => {
+      const loadedSession = await loadSession(this.env, sessionId);
+      return this.finalizeWorkflow(sessionId, loadedSession, maxTurns, turnCount >= maxTurns);
+    });
+    logTiming(this.env, sessionId, "workflow.finalize.step_do.done", finalizeStart, {
+      totalWorkflowElapsedMs: Date.now() - workflowRunStart,
     });
 
-    return finalWorkflow;
+    return { sessionId, status: "completed" };
   }
 
   private async initializeWorkflow(
     sessionId: string,
     prompt: string,
-    workflowId: string,
-    maxTurns: number,
   ): Promise<InitializedState> {
+    const initStart = timingStart();
+    logTiming(this.env, sessionId, "workflow.initialize.start", undefined, {
+      promptLength: prompt.length,
+    });
+
+    const componentsStart = timingStart();
     const components = await buildAgentComponents(this.env, this.ctx);
+    logTiming(this.env, sessionId, "workflow.initialize.components_built", componentsStart, {
+      provider: components.model.provider,
+      model: components.model.id,
+      toolCount: components.tools.length,
+    });
+
+    const loadSessionStart = timingStart();
     const existingSession = await loadOrCreateSession(
       this.env,
       sessionId,
       components.model,
       getSystemPrompt(),
     );
+    logTiming(this.env, sessionId, "workflow.initialize.session_loaded", loadSessionStart, {
+      existingMessageCount: existingSession.messages.length,
+    });
 
-    const workflow: DurableAgentWorkflow = {
-      id: workflowId,
-      sessionId,
-      status: "running",
-      turnCount: 0,
-      maxTurns,
-      progress: [
-        {
-          timestamp: Date.now(),
-          sequence: 1,
-          type: "workflow",
-          summary: "Workflow initialized",
-        },
-      ],
-    };
-
-    const agent = createWorkflowAgent(components);
+    const agent = createWorkflowAgent(components, this.env, sessionId);
     const initialized = agent.enqueuePrompt(existingSession, prompt);
-    const nextWorkflow = appendAgentEvents(workflow, initialized.events);
 
+    const saveSessionStart = timingStart();
     await saveSession(this.env, initialized.session);
-    await saveWorkflow(this.env, nextWorkflow);
+    logTiming(this.env, sessionId, "workflow.initialize.workflow_session_saved", saveSessionStart);
 
-    // Let the agent determine what step to run next
+    // Add timestamp to events and store in session
+    const appendEventsStart = timingStart();
+    const sessionEvents = initialized.events.map((e: AgentEvent) => ({ ...e, timestamp: Date.now() }));
+    if (sessionEvents.length > 0) {
+      await appendSessionEvents(this.env, sessionId, sessionEvents);
+    }
+    logTiming(this.env, sessionId, "workflow.initialize.events_appended", appendEventsStart, {
+      eventCount: sessionEvents.length,
+    });
+
+    // Update session status
+    const pollingStateStart = timingStart();
+    let sessionState = await loadSessionState(this.env, sessionId);
+    if (!sessionState) {
+      sessionState = {
+        id: sessionId,
+        status: "processing" as const,
+        messages: initialized.session.messages,
+        
+        nextEventCursor: "0",
+        updatedAt: Date.now(),
+      };
+    } else {
+      sessionState.status = "processing";
+      sessionState.messages = initialized.session.messages;
+      sessionState.updatedAt = Date.now();
+    }
+    await saveSessionState(this.env, sessionState);
+    logTiming(this.env, sessionId, "workflow.initialize.polling_state_saved", pollingStateStart, {
+      foundPollingState: true,
+    });
+
     const firstStep = agent.determineNextStep(initialized.session);
+    logTiming(this.env, sessionId, "workflow.initialize.done", initStart, {
+      firstStepId: firstStep?.stepId,
+      firstStepType: firstStep?.type,
+    });
 
-    return { session: initialized.session, workflow: nextWorkflow, firstStep };
+    return { session: initialized.session, firstStep };
   }
 
   private async executeStep(
-    session: AgentSessionState,
-    workflow: DurableAgentWorkflow,
+    sessionId: string,
     stepInfo: NextStepInfo,
+    currentTurn: number,
   ): Promise<StepExecutionResult> {
-    const components = await buildAgentComponents(this.env, this.ctx);
-    const agent = createWorkflowAgent(components);
+    const executeStart = timingStart();
+    logTiming(this.env, sessionId, "workflow.execute_step.start", undefined, {
+      stepId: stepInfo.stepId,
+      stepType: stepInfo.type,
+      currentTurn,
+    });
 
-    const [loadedSession, loadedWorkflow] = await Promise.all([
-      loadSession(this.env, session.id),
-      loadWorkflow(this.env, workflow.id),
-    ]);
+    try {
+      const componentsStart = timingStart();
+      const components = await buildAgentComponents(this.env, this.ctx);
+      logTiming(this.env, sessionId, "workflow.execute_step.components_built", componentsStart, {
+        provider: components.model.provider,
+        model: components.model.id,
+        toolCount: components.tools.length,
+      });
+      const agent = createWorkflowAgent(components, this.env, sessionId);
 
-    // Single call to Agent - it decides what happens
-    const stepResult = await agent.runSingleStep(loadedSession, stepInfo);
+      const loadStart = timingStart();
+      const loadedSession = await loadSession(this.env, sessionId);
+      logTiming(this.env, sessionId, "workflow.execute_step.session_loaded", loadStart, {
+        messageCount: loadedSession.messages.length,
+      });
 
-    // Apply agent events to workflow
-    let nextWorkflow = appendAgentEvents(loadedWorkflow, stepResult.events);
+      const runStepStart = timingStart();
+      const stepResult = await agent.runSingleStep(
+        loadedSession,
+        stepInfo,
+      );
+      logTiming(this.env, sessionId, "workflow.execute_step.agent_step_done", runStepStart, {
+        eventCount: stepResult.events.length,
+        nextStepId: stepResult.nextStep?.stepId,
+        nextStepType: stepResult.nextStep?.type,
+        sessionStatus: stepResult.session.status,
+      });
 
-    // Update workflow state based on step result
-    nextWorkflow = this.updateWorkflowAfterStep(nextWorkflow, stepResult);
-
-    await saveSession(this.env, stepResult.session);
-    await saveWorkflow(this.env, nextWorkflow);
-
-    return {
-      session: stepResult.session,
-      workflow: nextWorkflow,
-      nextStep: stepResult.nextStep,
-    };
-  }
-
-  private updateWorkflowAfterStep(
-    workflow: DurableAgentWorkflow,
-    result: RunStepResult,
-  ): DurableAgentWorkflow {
-    // Update turn count on complete steps
-    if (result.nextStep?.type === "assistant") {
-      // Check if this completed a turn and we're starting a new one
-      const currentTurn = workflow.turnCount;
-      const completedTurnIndex = this.extractTurnIndex(result.nextStep.stepId);
-      if (completedTurnIndex && completedTurnIndex > currentTurn) {
-        return { ...workflow, turnCount: completedTurnIndex };
+      // Add timestamp to events and store
+      const appendEventsStart = timingStart();
+      const sessionEvents = stepResult.events.map((e: AgentEvent) => ({ ...e, timestamp: Date.now() }));
+      if (sessionEvents.length > 0) {
+        await appendSessionEvents(this.env, sessionId, sessionEvents);
       }
-    }
+      logTiming(this.env, sessionId, "workflow.execute_step.events_appended", appendEventsStart, {
+        eventCount: sessionEvents.length,
+      });
 
-    // Handle error state
-    if (result.session.status === "error") {
+      // Calculate turn count from step ID
+      const turnCount = this.extractTurnIndex(stepResult.nextStep?.stepId || "") || currentTurn;
+
+      // Update session status based on result
+      const pollingStateStart = timingStart();
+      let sessionState = await loadSessionState(this.env, sessionId);
+      if (!sessionState) {
+        sessionState = {
+          id: sessionId,
+          status: stepResult.session.status === "error" ? "error" as const : "processing" as const,
+          messages: stepResult.session.messages,
+          
+          nextEventCursor: "0",
+          updatedAt: Date.now(),
+          errorMessage: stepResult.session.errorMessage,
+        };
+      } else {
+        sessionState.status = stepResult.session.status === "error" ? "error" : "processing";
+        sessionState.messages = stepResult.session.messages;
+        if (stepResult.session.errorMessage) {
+          sessionState.errorMessage = stepResult.session.errorMessage;
+        }
+        sessionState.updatedAt = Date.now();
+      }
+      await saveSessionState(this.env, sessionState);
+      logTiming(this.env, sessionId, "workflow.execute_step.polling_state_saved", pollingStateStart, {
+        foundPollingState: true,
+      });
+
+      const saveSessionStart = timingStart();
+      await saveSession(this.env, stepResult.session);
+      logTiming(this.env, sessionId, "workflow.execute_step.workflow_session_saved", saveSessionStart);
+
+      logTiming(this.env, sessionId, "workflow.execute_step.done", executeStart, {
+        status: stepResult.session.status === "error" ? "error" : "processing",
+      });
+
       return {
-        ...workflow,
-        status: "error",
-        errorMessage: result.session.errorMessage || "Agent error",
+        sessionId,
+        turnCount,
+        status: stepResult.session.status === "error" ? "error" : "processing",
       };
+    } catch (error) {
+      logWorkflowStepException(this.env, sessionId, stepInfo, executeStart, error);
+      throw error;
     }
-
-    return workflow;
   }
 
   private extractTurnIndex(stepId: string): number | undefined {
@@ -311,65 +359,160 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
   }
 
   private async finalizeWorkflow(
-    workflow: DurableAgentWorkflow,
+    sessionId: string,
+    session: AgentSessionState,
+    maxTurns: number,
     exceededMaxTurns: boolean,
-  ): Promise<DurableAgentWorkflow> {
-    let nextWorkflow = workflow;
-    let nextSession: AgentSessionState | undefined;
+  ): Promise<{ sessionId: string; status: string }> {
+    const finalizeStart = timingStart();
+    logTiming(this.env, sessionId, "workflow.finalize.start", undefined, {
+      maxTurns,
+      exceededMaxTurns,
+      sessionStatus: session.status,
+    });
+    let nextSession = session;
 
-    // Load session if we might need to update it
-    try {
-      nextSession = await loadSession(this.env, workflow.sessionId);
-    } catch {
-      // Session might not exist in edge cases
-    }
-
-    if (exceededMaxTurns && workflow.status === "running") {
-      const errorMessage = `Exceeded maximum turns (${workflow.maxTurns})`;
-      nextWorkflow = {
-        ...nextWorkflow,
+    if (exceededMaxTurns && session.status !== "error") {
+      const errorMessage = `Exceeded maximum turns (${maxTurns})`;
+      nextSession = {
+        ...session,
         status: "error",
         errorMessage,
+        updatedAt: Date.now(),
       };
-      nextWorkflow = appendWorkflowProgress(nextWorkflow, {
-        type: "error",
-        summary: errorMessage,
-      });
+      const saveErrorStart = timingStart();
+      await saveSession(this.env, nextSession);
+      logTiming(this.env, sessionId, "workflow.finalize.error_session_saved", saveErrorStart);
+    }
 
-      if (nextSession) {
-        nextSession = {
-          ...nextSession,
-          status: "error",
-          errorMessage,
-          updatedAt: Date.now(),
-        };
-        await saveSession(this.env, nextSession);
+    // Write final state to session store
+    const pollingStateStart = timingStart();
+    let sessionState = await loadSessionState(this.env, sessionId);
+    if (!sessionState) {
+      sessionState = {
+        id: sessionId,
+        status: nextSession.status === "error" ? "error" : "idle",
+        messages: nextSession.messages,
+        
+        nextEventCursor: "0",
+        updatedAt: Date.now(),
+        errorMessage: nextSession.errorMessage,
+      };
+    } else {
+      sessionState.status = nextSession.status === "error" ? "error" : "idle";
+      sessionState.messages = nextSession.messages;
+      if (nextSession.errorMessage) {
+        sessionState.errorMessage = nextSession.errorMessage;
       }
+      sessionState.updatedAt = Date.now();
     }
+    await saveSessionState(this.env, sessionState);
+    logTiming(this.env, sessionId, "workflow.finalize.polling_state_saved", pollingStateStart, {
+      foundPollingState: true,
+      finalStatus: nextSession.status,
+    });
+    logTiming(this.env, sessionId, "workflow.finalize.done", finalizeStart);
 
-    if (nextWorkflow.status === "running") {
-      nextWorkflow = appendWorkflowProgress(
-        { ...nextWorkflow, status: "idle" },
-        {
-          type: "workflow",
-          summary: "Workflow completed",
-        },
-      );
-    }
-
-    await saveWorkflow(this.env, nextWorkflow);
-    return nextWorkflow;
+    return { sessionId, status: nextSession.status };
   }
 }
 
-function createWorkflowAgent(components: BuildAgentComponentsResult): Agent {
+function logWorkflowException(env: Env, sessionId: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+
+  console.error("[Workflow.run] Uncaught exception", {
+    sessionId,
+    message,
+    stack,
+  });
+
+  logTiming(env, sessionId, "workflow.run.exception", undefined, {
+    error: message,
+    stack,
+  });
+}
+
+function logWorkflowStepException(
+  env: Env,
+  sessionId: string,
+  stepInfo: NextStepInfo,
+  startedAt: number,
+  error: unknown,
+): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : undefined;
+
+  console.error("[Workflow.executeStep] Step failed", {
+    sessionId,
+    stepId: stepInfo.stepId,
+    stepType: stepInfo.type,
+    message,
+    stack,
+  });
+
+  logTiming(env, sessionId, "workflow.execute_step.exception", startedAt, {
+    stepId: stepInfo.stepId,
+    stepType: stepInfo.type,
+    error: message,
+    stack,
+  });
+}
+
+function createWorkflowAgent(
+  components: BuildAgentComponentsResult,
+  env?: Env,
+  sessionId?: string,
+): Agent {
   return new Agent({
     model: components.model,
     tools: components.tools,
     streamFn: components.streamFn,
     getApiKey: components.getApiKey,
     systemPrompt: getSystemPrompt(),
+    debugTiming: env
+      ? (phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)
+      : undefined,
+    onEvent: env && sessionId
+      ? createThrottledSessionEventWriter(env, sessionId)
+      : undefined,
   });
+}
+
+function createThrottledSessionEventWriter(
+  env: Env,
+  sessionId: string,
+): (event: AgentEvent) => Promise<void> {
+  let lastMessageUpdateWrite = 0;
+
+  return async (event: AgentEvent): Promise<void> => {
+    if (!isAssistantStreamingEvent(event)) return;
+
+    const now = Date.now();
+    const shouldWrite = event.type !== "message_update" || now - lastMessageUpdateWrite >= 1000;
+    if (!shouldWrite) return;
+
+    if (event.type === "message_update") {
+      lastMessageUpdateWrite = now;
+    }
+
+    try {
+      await appendSessionEvents(env, sessionId, [{ ...event, timestamp: now }]);
+    } catch (error) {
+      console.error("[Workflow.liveEvents] Failed to append live event", {
+        sessionId,
+        eventType: event.type,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+    }
+  };
+}
+
+function isAssistantStreamingEvent(event: AgentEvent): boolean {
+  return event.type === "message_start" ||
+    event.type === "message_update" ||
+    event.type === "message_end";
 }
 
 async function buildAgentComponents(
@@ -404,8 +547,12 @@ async function loadOrCreateSession(
   model: BuildAgentComponentsResult["model"],
   systemPrompt: string,
 ): Promise<AgentSessionState> {
-  const existing = await env.AGENT_SESSION.get(sessionKey(sessionId));
-  if (existing) return normalizeSession(JSON.parse(existing), sessionId, model, systemPrompt);
+  try {
+    return normalizeSession(await loadSession(env, sessionId), sessionId, model, systemPrompt);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("404")) throw error;
+  }
 
   const session = createEmptyAgentSession({
     sessionId,
@@ -433,82 +580,6 @@ function normalizeSession(
     systemPrompt,
     messages: value.messages ?? [],
   });
-}
-
-export async function getWorkflowStatus(
-  env: Env,
-  workflowId: string,
-): Promise<WorkflowStatusResponse> {
-  const workflowRaw = await env.AGENT_SESSION.get(workflowKey(workflowId));
-
-  if (!workflowRaw) {
-    return {
-      status: "errored",
-      currentStep: "workflow_not_found",
-      response: {
-        type: "error",
-        content: `Workflow not found: ${workflowId}`,
-      },
-    };
-  }
-
-  const workflow = JSON.parse(workflowRaw) as DurableAgentWorkflow;
-  workflow.progress ||= [];
-
-  const sessionRaw = await env.AGENT_SESSION.get(sessionKey(workflow.sessionId));
-  const session = sessionRaw ? (JSON.parse(sessionRaw) as AgentSessionState) : undefined;
-
-  const status =
-    workflow.status === "running"
-      ? "running"
-      : workflow.status === "error"
-        ? "errored"
-        : "success";
-
-  return {
-    status,
-    state: workflow,
-    session,
-    currentStep: `turn-${workflow.turnCount + 1}`,
-    response: status === "running" ? undefined : extractWorkflowResponse(workflow, session, status),
-  };
-}
-
-function extractWorkflowResponse(
-  workflow: DurableAgentWorkflow,
-  session: AgentSessionState | undefined,
-  status: Exclude<WorkflowStatusResponse["status"], "running" | "paused">,
-): ChatResponse {
-  if (status === "errored") {
-    return {
-      type: "error",
-      content: workflow.errorMessage || session?.errorMessage || "Workflow failed",
-      sessionId: workflow.sessionId,
-    };
-  }
-
-  const lastAssistant = session?.messages
-    .slice()
-    .reverse()
-    .find((message): message is Extract<typeof message, { role: "assistant" }> =>
-      message.role === "assistant",
-    );
-
-  const content =
-    lastAssistant && Array.isArray(lastAssistant.content)
-      ? lastAssistant.content
-          .filter((item): item is { type: "text"; text: string } => item.type === "text")
-          .map((item) => item.text)
-          .join("")
-      : "";
-
-  return {
-    type: "message",
-    content: content || "(No response received)",
-    sessionId: workflow.sessionId,
-    messages: session?.messages,
-    usage: lastAssistant?.usage,
-  };
 }
 
 export type { AgentSessionState };

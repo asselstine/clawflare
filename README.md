@@ -59,7 +59,7 @@ AI_MODEL=claude-3-5-sonnet-20241022
 
 ### E2E Testing
 
-The project includes comprehensive E2E tests that deploy a brand-new remote Cloudflare Worker test instance, tag the Worker version as `e2e`, run the API tests against its `workers.dev` URL, then tear down the Worker and temporary KV namespace:
+The project includes comprehensive E2E tests that deploy a brand-new remote Cloudflare Worker test instance, tag the Worker version as `e2e`, run the API tests against its `workers.dev` URL, then tear down the Worker:
 
 ```bash
 # Run all automated remote E2E tests (uses mock AI)

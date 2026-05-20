@@ -56,6 +56,8 @@ export interface AgentConfig {
   streamFn?: StreamFn;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
+  debugTiming?: (phase: string, startedAt?: number, details?: Record<string, unknown>) => void;
+  onEvent?: (event: AgentEvent) => void | Promise<void>;
 }
 
 export interface AgentStepResult {
@@ -265,30 +267,57 @@ export class Agent {
       throw new Error(`Turn ${turn.id} is not awaiting an assistant response`);
     }
 
+    const assistantStepStart = now();
     let contextMessages = session.messages;
 
+    const convertStart = now();
     const llmContext: Context = {
       systemPrompt: session.systemPrompt,
       messages: await this.convertToLlm(contextMessages),
       tools: this.config.tools,
     };
+    this.config.debugTiming?.("assistant.context.prepared", convertStart, {
+      agentMessageCount: contextMessages.length,
+      llmMessageCount: llmContext.messages.length,
+      toolCount: this.config.tools.length,
+    });
 
+    const apiKeyStart = now();
     const apiKey = this.config.getApiKey
       ? await this.config.getApiKey(session.model.provider)
       : undefined;
+    this.config.debugTiming?.("assistant.api_key.resolved", apiKeyStart, {
+      provider: session.model.provider,
+      hasApiKey: Boolean(apiKey),
+    });
 
+    const streamCreateStart = now();
     const response = await this.streamFn(session.model, llmContext, {
       apiKey: apiKey ?? undefined,
       signal,
       reasoning: session.thinkingLevel === "off" ? undefined : session.thinkingLevel,
     });
+    this.config.debugTiming?.("assistant.stream.created", streamCreateStart, {
+      model: session.model.id,
+      provider: session.model.provider,
+    });
 
     const events: AgentEvent[] = [];
     let finalMessage: AssistantMessage | undefined;
+    let sawFirstStreamEvent = false;
 
     for await (const event of response) {
+      if (!sawFirstStreamEvent) {
+        sawFirstStreamEvent = true;
+        this.config.debugTiming?.("assistant.stream.first_event", streamCreateStart, {
+          eventType: event.type,
+          assistantStepElapsedMs: Date.now() - assistantStepStart,
+        });
+      }
       if (event.type === "start") {
-        events.push({ type: "message_start", message: { ...event.partial } });
+        const agentEvent: AgentEvent = { type: "message_start", message: { ...event.partial } };
+        events.push(agentEvent);
+        await this.config.onEvent?.(agentEvent);
         continue;
       }
 
@@ -297,15 +326,25 @@ export class Agent {
         break;
       }
 
-      events.push({
+      const agentEvent: AgentEvent = {
         type: "message_update",
         message: { ...event.partial },
         assistantMessageEvent: event,
-      });
+      };
+      events.push(agentEvent);
+      await this.config.onEvent?.(agentEvent);
     }
 
+    const resultStart = now();
     finalMessage ??= await response.result();
-    events.push({ type: "message_end", message: finalMessage });
+    this.config.debugTiming?.("assistant.stream.result", resultStart, {
+      totalAssistantStepElapsedMs: Date.now() - assistantStepStart,
+      stopReason: finalMessage.stopReason,
+      outputLength: JSON.stringify(finalMessage.content).length,
+    });
+    const messageEndEvent: AgentEvent = { type: "message_end", message: finalMessage };
+    events.push(messageEndEvent);
+    await this.config.onEvent?.(messageEndEvent);
 
     const toolCalls = extractToolCalls(finalMessage);
     const agentToolCalls: AgentToolCallState[] = toolCalls.map((toolCall) => ({

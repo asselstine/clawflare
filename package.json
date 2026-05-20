@@ -9,8 +9,10 @@
     "deploy": "cd packages/harness && pnpm run deploy",
     "deploy:prod": "pnpm deploy",
     "dev": "cd packages/harness && npx wrangler dev src/index.ts",
-    "test": "cd packages/e2e && node --import=tsx src/index.ts",
-    "test:ui": "cd packages/e2e && node --import=tsx src/index.ts --ui",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm -r --filter=!@clawflare/e2e test",
+    "test:e2e": "cd packages/e2e && node --import=tsx src/index.ts",
+    "test:e2e:ui": "cd packages/e2e && node --import=tsx src/index.ts --ui",
     "lint": "pnpm -r lint",
     "cli": "cd packages/cli && node --import=tsx src/index.ts",
     "typecheck": "pnpm -r typecheck"

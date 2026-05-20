@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
-import type { Env, ChatRequest } from "./types";
-import { getWorkflowStatus, startAgentWorkflow } from "./workflow";
+import type { Env, ChatRequest, SessionState } from "./types";
+import { startAgentWorkflow } from "./workflow";
+import { loadSessionState, getSessionEvents, getLatestEventCursor, saveSessionState } from "./session-store";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS = 300;
@@ -35,29 +36,93 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       if (data.type !== "prompt") {
         ws.send(JSON.stringify({
           type: "error",
-          content: "WebSocket workflow sessions currently support prompt messages only",
+          content: "WebSocket sessions currently support prompt messages only",
         }));
         return;
       }
 
-      const started = await startAgentWorkflow(this.env, data);
-      ws.send(JSON.stringify(started));
+      // Start the workflow (returns sessionId only)
+      const { sessionId } = await startAgentWorkflow(this.env, data);
+      
+      // Initialize session state for polling before workflow starts
+      const initialEventCursor = await getLatestEventCursor(this.env, sessionId);
+      const initialState: SessionState = {
+        id: sessionId,
+        status: "processing" as const,
+        messages: [],
+        nextEventCursor: initialEventCursor,
+        updatedAt: Date.now(),
+      };
+      await saveSessionState(this.env, initialState);
+      
+      // Send initial session started event
+      ws.send(JSON.stringify({
+        type: "session_started",
+        sessionId,
+        eventCursor: "0",
+      }));
 
+      let cursor = "0";
+      let sessionState: SessionState | null = null;
+      
       for (let poll = 0; poll < MAX_POLLS; poll++) {
         await sleep(POLL_INTERVAL_MS);
-        const status = await getWorkflowStatus(this.env, started.instanceId);
-        ws.send(JSON.stringify({ type: "workflow_status", ...status }));
+        
+        // Load session state (may not exist immediately)
+        sessionState = await loadSessionState(this.env, sessionId);
+        if (!sessionState) {
+          // Session state may not be created yet, keep polling
+          continue;
+        }
 
-        if (status.status !== "running") {
-          if (status.response) ws.send(JSON.stringify(status.response));
+        // Get new events
+        const { events, nextCursor } = await getSessionEvents(
+          this.env,
+          sessionId,
+          cursor,
+          100
+        );
+        
+        // Send events to client
+        for (const event of events) {
+          ws.send(JSON.stringify({ type: "agent_event", event }));
+        }
+        
+        cursor = nextCursor;
+
+        // Check if complete
+        if (sessionState.status === "idle" || sessionState.status === "error") {
+          // Get the last assistant message content
+          const lastMsg = sessionState.messages.at(-1);
+          let content = "";
+          if (lastMsg?.role === "assistant") {
+            const msgContent = lastMsg.content;
+            if (Array.isArray(msgContent)) {
+              // Extract text from TextContent blocks
+              content = msgContent
+                .filter((c): c is { type: "text"; text: string } => c.type === "text")
+                .map(c => c.text)
+                .join("");
+            } else if (typeof msgContent === "string") {
+              content = msgContent;
+            }
+          }
+          
+          // Send final message
+          ws.send(JSON.stringify({
+            type: "message",
+            content: sessionState.errorMessage || content,
+            sessionId,
+            status: sessionState.status,
+          }));
           return;
         }
       }
 
       ws.send(JSON.stringify({
         type: "error",
-        content: `Workflow ${started.instanceId} did not finish before WebSocket polling timed out`,
-        sessionId: started.sessionId,
+        content: `Session ${sessionId} did not finish before WebSocket polling timed out`,
+        sessionId,
       }));
     } catch (error) {
       ws.send(JSON.stringify({

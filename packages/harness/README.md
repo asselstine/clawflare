@@ -14,11 +14,11 @@ pnpm dev
 
 The harness uses:
 
-- `AGENT_SESSION` KV namespace for conversation state
+- `SESSION_STORE` Durable Object for strongly consistent conversation state and events
 - `DATASTORE` SQLite Durable Object for stored code and egress handler metadata
 - `LOADER` Worker Loader binding for Dynamic Worker execution
 
-`wrangler.jsonc` configures the Worker Loader and SQLite Durable Object migration.
+`wrangler.jsonc` configures the Worker Loader and Durable Object migrations.
 
 ## Secrets and Variables
 
@@ -56,7 +56,7 @@ The agent exposes exactly four model-visible tools:
 - `execute_stored_code` - run previously stored JavaScript by name
 - `search` - query stored code and egress handler metadata
 
-Dynamic code receives constrained capabilities only. It does not receive raw Cloudflare/GitHub tokens, raw KV namespaces, or the datastore binding.
+Dynamic code receives constrained capabilities only. It does not receive raw Cloudflare/GitHub tokens, session/store Durable Objects, or the datastore binding.
 
 ## Egress
 

@@ -1,14 +1,42 @@
 /**
  * Agent Client - Communicates with the Clawflare harness
+ * 
+ * Session-based API - no workflow concepts exposed
+ * - submitChat() returns sessionId for polling
+ * - getSession() polls for messages and events
+ * - Workflows are an internal implementation detail
  */
 
 import WebSocket from "ws";
+import type { 
+  AgentMessage,
+  SessionEvent,
+  SessionResponse,
+  ChatSubmittedResponse,
+  ChatRequest,
+} from "@clawflare/harness";
 
-export interface ChatRequest {
-  type: "prompt" | "steer" | "fork" | "new_context";
-  content?: string;
-  sessionId?: string;
-  maxTurns?: number;
+export type {
+  AgentMessage,
+  SessionEvent,
+  SessionResponse,
+  ChatSubmittedResponse,
+  ChatRequest,
+};
+
+export interface StorageQuotaErrorDetails {
+  requestedSize: number;
+  limit: number;
+  key: string;
+  messageSize: number;
+  messageCount: number;
+  suggestedAction: string;
+}
+
+export interface ApiError {
+  error: string;
+  details?: StorageQuotaErrorDetails;
+  hint?: string;
 }
 
 export interface ChatUsage {
@@ -17,58 +45,11 @@ export interface ChatUsage {
   totalTokens: number;
 }
 
-export interface ChatResponse {
-  type: "message" | "error" | "context_update";
-  content: string;
-  sessionId?: string;
-  usage?: ChatUsage;
-}
-
-export interface WorkflowStartedResponse {
-  type: "workflow_started";
-  id: string;
-  workflowId: string;
-  instanceId: string;
-  sessionId: string;
-  status: "running";
-  pollUrl: string;
-}
-
-export interface WorkflowProgressEvent {
-  timestamp: number;
-  sequence: number;
-  type: "workflow" | "agent" | "turn" | "tool" | "message" | "error";
-  summary: string;
-  event?: unknown;
-}
-
-export interface WorkflowStatusResponse {
-  status: "running" | "success" | "errored" | "paused";
-  currentStep?: string;
-  response?: ChatResponse;
-  state?: {
-    id: string;
-    sessionId: string;
-    turnCount: number;
-    maxTurns: number;
-    status: "running" | "idle" | "error" | "awaiting_input";
-    progress?: WorkflowProgressEvent[];
-    errorMessage?: string;
-  };
-  session?: unknown;
-}
-
 export interface ContextInfo {
   id: string;
   parentId?: string;
   messages: AgentMessage[];
   createdAt: number;
-}
-
-export interface AgentMessage {
-  role: "user" | "assistant" | "tool";
-  content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
-  timestamp: number;
 }
 
 export interface ToolInfo {
@@ -88,7 +69,6 @@ export class AgentClient {
   private token: string;
   private ws?: WebSocket;
   private currentContextId: string | null = null;
-  private defaultTimeout = 10000; // 10 second timeout
 
   constructor(url: string, token: string) {
     this.url = url;
@@ -102,105 +82,83 @@ export class AgentClient {
     };
   }
 
-  // Helper to add timeout to fetch - DEPRECATED: Use direct fetch instead
-  private async fetchWithTimeout(
-    input: string | URL,
-    init?: RequestInit,
-    _timeoutMs?: number
-  ): Promise<Response> {
-    return fetch(input, init);
-  }
-
-  // HTTP methods
-  async startChatWorkflow(request: ChatRequest, signal?: AbortSignal): Promise<WorkflowStartedResponse> {
+  // Submit a chat prompt and get a session handle for polling
+  async submitChat(request: ChatRequest): Promise<ChatSubmittedResponse> {
     const requestWithContext: ChatRequest = {
       ...request,
       sessionId: request.sessionId ?? this.currentContextId ?? undefined,
     };
 
-    const response = await fetch(
-      `${this.url}/v1/chat`,
-      {
-        method: "POST",
-        headers: this.getHeaders(),
-        body: JSON.stringify(requestWithContext),
-        signal,
-      }
-    );
+    const response = await fetch(`${this.url}/v1/chat`, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify(requestWithContext),
+    });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Chat failed: ${response.status} - ${error}`);
+      const errorBody = await response.text();
+      const errorData = JSON.parse(errorBody) as ApiError;
+      throw new Error(formatApiError(response.status, errorData));
     }
 
-    const data = await response.json() as WorkflowStartedResponse;
+    const data = await response.json() as ChatSubmittedResponse;
     if (data.sessionId) this.currentContextId = data.sessionId;
     return data;
   }
 
-  async getWorkflowStatus(workflowId: string, signal?: AbortSignal): Promise<WorkflowStatusResponse> {
-    const response = await fetch(`${this.url}/v1/workflow/${workflowId}`, {
+  // Get current session state (poll for updates)
+  async getSession(sessionId: string, eventCursor?: string): Promise<SessionResponse> {
+    const url = new URL(`${this.url}/v1/session/${sessionId}`);
+    if (eventCursor) url.searchParams.set("since", eventCursor);
+
+    const response = await fetch(url, {
       method: "GET",
       headers: this.getHeaders(),
-      signal,
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Workflow status failed: ${response.status} - ${error}`);
+      const errorBody = await response.text();
+      const errorData = JSON.parse(errorBody) as ApiError;
+      throw new Error(formatApiError(response.status, errorData));
     }
 
-    return response.json() as Promise<WorkflowStatusResponse>;
+    return response.json() as Promise<SessionResponse>;
   }
 
-  async waitForWorkflow(
-    workflow: WorkflowStartedResponse,
+  // Poll session until complete, yielding updates
+  async *streamSession(
+    sessionId: string,
     signal?: AbortSignal,
-    options: { pollIntervalMs?: number; maxPolls?: number; onStatus?: (status: WorkflowStatusResponse) => void } = {}
-  ): Promise<ChatResponse> {
-    const pollIntervalMs = options.pollIntervalMs ?? 1000;
+    options: { pollIntervalMs?: number; maxPolls?: number; initialCursor?: string } = {},
+  ): AsyncGenerator<{ session: SessionResponse; newEvents: SessionEvent[]; complete: boolean }> {
+    const pollIntervalMs = options.pollIntervalMs ?? 500;
     const maxPolls = options.maxPolls ?? 300;
+    let cursor: string | undefined = options.initialCursor;
 
     for (let poll = 0; poll < maxPolls; poll++) {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+      const session = await this.getSession(sessionId, cursor);
+      
+      const newEvents = session.events;
+      const complete = session.status === "idle" || session.status === "error";
+      
+      yield { session, newEvents, complete };
+      
+      if (complete) return;
+      
+      cursor = session.nextEventCursor;
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-
-      const status = await this.getWorkflowStatus(workflow.id, signal);
-      options.onStatus?.(status);
-      if (status.status === "running") continue;
-
-      if (status.response) {
-        if (status.response.sessionId) this.currentContextId = status.response.sessionId;
-        return status.response;
-      }
-
-      return {
-        type: "error",
-        content: `Workflow ${workflow.id} finished without a response`,
-        sessionId: workflow.sessionId,
-      };
     }
 
-    return {
-      type: "error",
-      content: `Workflow ${workflow.id} did not finish before polling timed out`,
-      sessionId: workflow.sessionId,
-    };
-  }
-
-  async chat(request: ChatRequest, signal?: AbortSignal): Promise<ChatResponse> {
-    const workflow = await this.startChatWorkflow(request, signal);
-    return this.waitForWorkflow(workflow, signal);
+    throw new Error(`Session ${sessionId} did not complete before polling timed out`);
   }
 
   async getContext(): Promise<ContextInfo> {
-    const response = await fetch(
-      `${this.url}/v1/context`,
-      {
-        method: "GET",
-        headers: this.getHeaders(),
-      }
-    );
+    const response = await fetch(`${this.url}/v1/context`, {
+      method: "GET",
+      headers: this.getHeaders(),
+    });
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "Unknown error");
@@ -213,14 +171,11 @@ export class AgentClient {
   }
 
   async createContext(parentId?: string): Promise<ContextInfo> {
-    const response = await fetch(
-      `${this.url}/v1/context`,
-      {
-        method: "POST",
-        headers: this.getHeaders(),
-        body: JSON.stringify({ parentId }),
-      }
-    );
+    const response = await fetch(`${this.url}/v1/context`, {
+      method: "POST",
+      headers: this.getHeaders(),
+      body: JSON.stringify({ parentId }),
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to create context: ${response.status}`);
@@ -235,18 +190,11 @@ export class AgentClient {
     return this.createContext(this.currentContextId || undefined);
   }
 
-  async steer(_message: string): Promise<void> {
-    throw new Error("Steering is not supported for workflow-backed chat");
-  }
-
   async listTools(): Promise<ToolInfo[]> {
-    const response = await fetch(
-      `${this.url}/v1/tools`,
-      {
-        method: "GET",
-        headers: this.getHeaders(),
-      }
-    );
+    const response = await fetch(`${this.url}/v1/tools`, {
+      method: "GET",
+      headers: this.getHeaders(),
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to list tools: ${response.status}`);
@@ -276,21 +224,57 @@ export class AgentClient {
     return this.url;
   }
 
-  // Get server info (provider, model, context window)
   async getServerInfo(): Promise<ServerInfo> {
-    const response = await fetch(
-      `${this.url}/v1/info`,
-      {
-        method: "GET",
-        headers: this.getHeaders(),
-      }
-    );
+    const response = await fetch(`${this.url}/v1/info`, {
+      method: "GET",
+      headers: this.getHeaders(),
+    });
 
     if (!response.ok) {
       throw new Error(`Failed to get server info: ${response.status}`);
     }
 
-    const data = await response.json() as ServerInfo;
-    return data;
+    return response.json() as Promise<ServerInfo>;
   }
+
+  // Debug endpoint - inspect DO storage
+  async cfDebug(sessionId?: string, key?: string): Promise<unknown> {
+    const url = new URL(`${this.url}/v1/cf_debug`);
+    if (sessionId) url.searchParams.set("sessionId", sessionId);
+    if (key) url.searchParams.set("key", key);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: this.getHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => "Unknown error");
+      throw new Error(`Debug query failed: ${response.status} - ${errorText}`);
+    }
+
+    return response.json();
+  }
+}
+
+// Format API errors with rich context for display
+function formatApiError(status: number, errorData: ApiError): string {
+  const baseMessage = errorData.error || "Unknown error";
+  
+  // 413 Payload Too Large - storage quota exceeded
+  if (status === 413 && errorData.details) {
+    const d = errorData.details;
+    return `Session storage limit exceeded:
+  Session size: ${formatBytes(d.requestedSize)} (max ${formatBytes(d.limit)})
+  Messages: ${d.messageCount} (${formatBytes(d.messageSize)})
+  ${errorData.hint || d.suggestedAction}`;
+  }
+  
+  return baseMessage;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

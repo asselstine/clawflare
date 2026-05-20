@@ -18,7 +18,7 @@ import {
   type EditorTheme,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, ChatResponse, ContextInfo, ToolInfo, ServerInfo, WorkflowStatusResponse } from "./client.js";
+import type { AgentClient, AgentMessage, ContextInfo, ToolInfo, ServerInfo, SessionResponse, SessionEvent } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -78,12 +78,51 @@ const slashCommands = [
   { name: "clear", description: "Clear the chat history" },
   { name: "help", description: "Show help" },
   { name: "exit", description: "Exit the CLI" },
+  { name: "cf_debug", description: "Debug DO storage for current session [key]" },
 ];
+
+// Helper to get display message from SessionEvent
+function getEventDisplayMessage(event: SessionEvent): string {
+  switch (event.type) {
+    case "tool_execution_start":
+      return `Running ${event.toolName}`;
+    case "tool_execution_end":
+      return `${event.toolName} ${event.isError ? "failed" : "completed"}`;
+    case "tool_execution_update":
+      return `${event.toolName} updating...`;
+    case "agent_start":
+      return "Agent started";
+    case "agent_end":
+      return "Complete";
+    case "turn_start":
+      return "Turn started";
+    case "turn_end":
+      return "Turn completed";
+    case "message_start":
+      return "Generating response...";
+    case "message_update":
+    case "message_end":
+      return "Response updated";
+    default:
+      return "Processing...";
+  }
+}
 
 // Helper to create Text with 0 padding
 function createText(content: string): Text {
   return new Text(content, 0, 0);
 }
+
+type DisplayMessageRole = "user" | "assistant" | "toolResult" | "error";
+
+type DisplayMessage = {
+  role: DisplayMessageRole;
+  content: string;
+  usage?: { totalTokens: number; input: number; output: number };
+  expanded?: boolean;
+  toolName?: string;
+  isError?: boolean;
+};
 
 // Helper to create user message block with full-width background and padding
 function createUserBlock(content: string): Text {
@@ -106,7 +145,7 @@ export class ClawflareTUIApp {
   private loader?: Loader;
 
   // State
-  private messages: Array<{ role: "user" | "assistant" | "error"; content: string; usage?: { totalTokens: number; input: number; output: number }; expanded?: boolean }> = [];
+  private messages: DisplayMessage[] = [];
   private sessionId: string = "";
   private sessionName: string = "new";
   private isLoading = false;
@@ -115,7 +154,7 @@ export class ClawflareTUIApp {
   private serverInfo: { url: string; provider?: string; model?: string; contextTotal?: number } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
-  private workflowProgress: string[] = [];
+  private agentEvents: SessionEvent[] = [];
   private skills: AgentSkill[] = [];
   private skillsPrompt = "";
 
@@ -127,20 +166,17 @@ export class ClawflareTUIApp {
   // Calculate context usage like Pi does:
   // Take last known usage + estimate tokens for messages after that
   private getContextUsage(): { tokens: number; contextWindow: number; percent: number } {
-    const contextWindow = this.serverInfo.contextTotal || 128000; // Default to 128k if unknown
+    const contextWindow = this.serverInfo.contextTotal || 128000;
     
     if (!this.lastUsage) {
-      // No usage yet - estimate all messages
       const tokens = this.messages.reduce((sum, msg) => 
         sum + this.estimateTokens(msg.content), 0);
       const percent = (tokens / contextWindow) * 100;
       return { tokens, contextWindow, percent };
     }
     
-    // Start with last known usage
     let tokens = this.lastUsage.totalTokens;
     
-    // Add estimates for messages after the last usage point
     for (let i = this.lastUsage.messageIndex + 1; i < this.messages.length; i++) {
       tokens += this.estimateTokens(this.messages[i].content);
     }
@@ -149,7 +185,6 @@ export class ClawflareTUIApp {
     return { tokens, contextWindow, percent };
   }
   
-  // Render interval for async updates
   private renderInterval?: NodeJS.Timeout;
 
   constructor(client: AgentClient) {
@@ -172,7 +207,7 @@ export class ClawflareTUIApp {
     // Spacer to push editor to bottom
     this.tui.addChild(createText(""));
 
-    // Editor for input - single line mode (multiline=false by default)
+    // Editor for input
     this.editor = new Editor(this.tui, editorTheme, {
       paddingX: 1,
     });
@@ -226,13 +261,11 @@ export class ClawflareTUIApp {
       this.skills = loadSkills();
       this.skillsPrompt = formatSkillsForPrompt(this.skills);
 
-      // Fetch server info (provider, model, context window)
       const serverInfo = await this.client.getServerInfo();
       this.serverInfo.provider = serverInfo.provider;
       this.serverInfo.model = serverInfo.model;
       this.serverInfo.contextTotal = serverInfo.contextWindow;
       
-      // Create a new context instead of loading existing one
       const ctx = await this.client.createContext();
       this.sessionId = ctx.id;
       this.messages = [];
@@ -246,17 +279,69 @@ export class ClawflareTUIApp {
   }
 
   // Extract text content from message (handles both string and array formats)
-  private extractContent(content: string | Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private extractContent(content: string | Array<any>): string {
     if (typeof content === "string") {
       return content;
     }
     if (Array.isArray(content)) {
       return content
-        .filter((c): c is { type: "text"; text: string } => c.type === "text")
-        .map(c => c.text)
+        .filter((c) => c.type === "text")
+        .map((c) => c.text)
         .join("");
     }
     return String(content);
+  }
+
+  // Check if message contains tool calls
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private hasToolCalls(content: string | Array<any>): boolean {
+    if (!Array.isArray(content)) return false;
+    return content.some((c) => c.type === "toolCall");
+  }
+
+  // Get tool call names from message content
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private getToolCallNames(content: string | Array<any>): string[] {
+    if (!Array.isArray(content)) return [];
+    return content
+      .filter((c) => c.type === "toolCall")
+      .map((c) => c.name || "tool")
+      .filter((name, index, arr) => arr.indexOf(name) === index); // dedupe
+  }
+
+  private toDisplayRole(role: string): DisplayMessageRole {
+    if (role === "user" || role === "assistant" || role === "toolResult") return role;
+    return "error";
+  }
+
+  private formatMessageForDisplay(message: AgentMessage): DisplayMessage {
+    const role = this.toDisplayRole(message.role);
+    const content = this.extractContent(message.content);
+
+    if (role === "assistant" && this.hasToolCalls(message.content)) {
+      const toolNames = this.getToolCallNames(message.content);
+      // If there's text content, show it; otherwise show that tools are being called
+      const displayContent = content || `Calling ${toolNames.join(", ")}...`;
+      return { role, content: displayContent };
+    }
+
+    if (role !== "toolResult") {
+      return { role, content };
+    }
+
+    const toolMessage = message as AgentMessage & {
+      toolName?: string;
+      isError?: boolean;
+    };
+    const toolName = toolMessage.toolName || "tool";
+
+    return {
+      role: "toolResult",
+      toolName,
+      isError: Boolean(toolMessage.isError),
+      content: `${toolName}: ${content}`,
+    };
   }
 
   private updateHeader(): void {
@@ -281,9 +366,16 @@ export class ClawflareTUIApp {
     for (let i = 0; i < this.messages.length; i++) {
       const msg = this.messages[i]!;
       const isSelected = i === this.selectedMessageIndex;
-      const prefix = msg.role === "user" ? "❱ " : msg.role === "assistant" ? "🤖 " : "⚠ ";
+      const prefix =
+        msg.role === "user" ? "❱ " :
+        msg.role === "assistant" ? "🤖 " :
+        msg.role === "toolResult" ? (msg.isError ? "❌ " : "🔧 ") :
+        "⚠ ";
       const colorFn =
-        msg.role === "user" ? theme.user : msg.role === "assistant" ? theme.assistant : theme.error;
+        msg.role === "user" ? theme.user :
+        msg.role === "assistant" ? theme.assistant :
+        msg.role === "toolResult" ? (msg.isError ? theme.error : theme.dim) :
+        theme.error;
 
       // Show full content if selected+expanded, otherwise truncate
       let displayContent = msg.content;
@@ -309,10 +401,8 @@ export class ClawflareTUIApp {
     // Show loading if needed
     if (this.isLoading) {
       this.messageContainer.addChild(createText(""));
-      const lines = this.workflowProgress.length > 0
-        ? ["Workflow progress:", ...this.workflowProgress.slice(-8).map((line) => `  • ${line}`)]
-        : ["Workflow running... waiting for first update"];
-      this.messageContainer.addChild(createText(theme.dim(lines.join("\n"))));
+      const eventLines = this.getProcessingLines();
+      this.messageContainer.addChild(createText(theme.dim(eventLines.join("\n"))));
     }
 
     // Show error if any
@@ -324,6 +414,41 @@ export class ClawflareTUIApp {
     this.messageContainer.invalidate();
   }
 
+  private formatEventLine(event: SessionEvent): string {
+    const icon = event.type === "tool_execution_start" ? "🔧" :
+      event.type === "tool_execution_end" ? (event.isError ? "❌" : "✓") :
+      event.type === "agent_end" ? "✓" :
+      "○";
+    return `  ${icon} ${getEventDisplayMessage(event)}`;
+  }
+
+  private getProcessingLines(): string[] {
+    if (this.agentEvents.length === 0) {
+      return ["Processing... waiting for updates"];
+    }
+
+    const recent = this.agentEvents.slice(-20);
+    const messageEventCount = recent.filter((event) => this.isAssistantMessageEvent(event)).length;
+    const nonMessageEvents = recent.filter((event) => !this.isAssistantMessageEvent(event));
+    const lines = ["Processing:"];
+
+    for (const event of nonMessageEvents.slice(-6)) {
+      lines.push(this.formatEventLine(event));
+    }
+
+    if (messageEventCount > 0) {
+      lines.push(`  ○ Generating response... ${messageEventCount} update${messageEventCount === 1 ? "" : "s"}`);
+    }
+
+    return lines;
+  }
+
+  private isAssistantMessageEvent(event: SessionEvent): boolean {
+    return event.type === "message_start" ||
+      event.type === "message_update" ||
+      event.type === "message_end";
+  }
+
   private setStatus(statusText: string, color: "green" | "yellow" | "red" | "gray" | "blue" = "gray"): void {
     const colorFn = {
       green: chalk.green,
@@ -333,49 +458,38 @@ export class ClawflareTUIApp {
       blue: chalk.blue,
     }[color];
 
-    // Get context usage
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { contextWindow, percent } = this.getContextUsage();
     const contextDisplay = `${percent.toFixed(1)}%/${Math.round(contextWindow / 1000)}k`;
     
-    // Right side content: provider ● model
     const providerModel = this.serverInfo.provider && this.serverInfo.model 
       ? `${this.serverInfo.provider} ● ${this.serverInfo.model}` 
       : "";
     
-    // Terminal width
     const width = this.terminal.columns;
     const bigDot = "●";
     
-    // Build 2 lines of the status bar
     // Line 1: session name ● endpoint  [right]  provider ● model
-    // Line 2: status ● context% (status is colored, rest is dim gray)
+    // Line 2: status ● context%
     
-    // Line 1: all dim gray
     const left1 = chalk.gray(`${this.sessionName} ${bigDot} ${this.serverInfo.url || "unknown"}`);
     const right1 = providerModel ? chalk.gray(providerModel) : "";
     const line1 = this.formatStatusLine(left1, right1, width);
     
-    // Line 2: status is colored, context% is dim gray
     const left2 = `${colorFn(statusText)} ${chalk.gray(bigDot)} ${chalk.gray(contextDisplay)}`;
     const right2 = "";
     const line2 = this.formatStatusLine(left2, right2, width);
     
-    // Combine both lines with newlines, applying the theme
     const fullStatus = `${line1}\n${line2}`;
     this.statusBar.setText(theme.statusBar(fullStatus));
   }
 
   // Format a line with left and right content, filling the middle with spaces
-  // width: total terminal width (the theme.statusBar adds its own padding, so we account for that)
   private formatStatusLine(left: string, right: string, width: number): string {
-    // theme.statusBar adds " " on each side, so we have width-2 of actual content
     const contentWidth = Math.max(1, width - 2);
     const leftVisible = this.visibleWidthAnsi(left);
     const rightVisible = this.visibleWidthAnsi(right);
     
     if (rightVisible === 0) {
-      // No right content, just left
       return left;
     }
     
@@ -393,12 +507,9 @@ export class ClawflareTUIApp {
     const trimmed = value.trim();
     if (!trimmed) return;
 
-    // Add to history (only if the user actually submitted something - this
-    // allows up/down arrows to navigate through sent messages when the
-    // editor is empty or when the user edits something new)
     (this.editor as unknown as { addToHistory(text: string): void }).addToHistory(trimmed);
 
-    // Handle slash commands (fire and forget)
+    // Handle slash commands
     if (trimmed.startsWith("/")) {
       const parts = trimmed.slice(1).split(" ");
       const command = parts[0];
@@ -410,12 +521,15 @@ export class ClawflareTUIApp {
     this.sendPrompt(trimmed, this.withSkillsSummary(trimmed));
   }
 
-  private updateWorkflowProgress(status: WorkflowStatusResponse): void {
-    const progress = status.state?.progress || [];
-    this.workflowProgress = progress.map((event) => `#${event.sequence} ${event.summary}`);
-    const last = this.workflowProgress.at(-1) || status.currentStep || status.status;
+  private updateAgentEvents(events: SessionEvent[]): void {
+    this.agentEvents = [...this.agentEvents, ...events];
     this.renderMessages();
-    this.setStatus(`Workflow: ${last}`, status.status === "errored" ? "red" : "yellow");
+    
+    const lastEvent = events.at(-1);
+    if (lastEvent) {
+      const statusText = getEventDisplayMessage(lastEvent);
+      this.setStatus(statusText, "yellow");
+    }
   }
 
   private sendPrompt(displayContent: string, actualContent: string): void {
@@ -425,68 +539,66 @@ export class ClawflareTUIApp {
     // Clear editor
     this.editor.setText("");
 
-    // Add user message. For expanded skills, displayContent intentionally hides full SKILL.md content.
+    // Add user message
     this.messages.push({ role: "user", content: displayContent });
     this.isLoading = true;
     this.error = null;
-    this.workflowProgress = [];
+    this.agentEvents = [];
     this.renderMessages();
-    this.setStatus("Starting workflow... (Esc to abort)", "yellow");
+    this.setStatus("Submitting... (Esc to abort)", "yellow");
 
-    // Create abort controller for this request
+    // Create abort controller
     this.abortController = new AbortController();
     const requestAbortController = this.abortController;
 
-    // Fire off the workflow-backed chat request with abort support.
-    this.client.startChatWorkflow(
-      { type: "prompt", content: actualContent, sessionId: this.sessionId },
-      requestAbortController.signal
-    ).then((workflow) => {
-      this.workflowProgress = [`Workflow ${workflow.instanceId.slice(0, 8)} started`];
-      this.renderMessages();
-      this.setStatus(`Workflow ${workflow.instanceId.slice(0, 8)} running... (Esc to abort)`, "yellow");
-      return this.client.waitForWorkflow(workflow, requestAbortController.signal, {
-        onStatus: (status) => this.updateWorkflowProgress(status),
-      });
-    }).then((response) => {
-      // Track usage for context calculation
-      const assistantMessageIndex = this.messages.length;
-      if (response.type === "error") {
-        this.messages.push({ role: "error", content: response.content });
-      } else {
-        this.messages.push({ role: "assistant", content: response.content });
-        if (response.sessionId) {
-          this.sessionId = response.sessionId;
-          this.updateHeader();
-        }
-      }
-      // Mark this as the last known usage point (estimate for now)
-      const totalContent = this.messages.map(m => m.content).join("");
-      this.lastUsage = {
-        totalTokens: this.estimateTokens(totalContent),
-        messageIndex: assistantMessageIndex
-      };
+    // Fire off the session-based chat request
+    this.client.submitChat({
+      type: "prompt",
+      content: actualContent,
+      sessionId: this.sessionId,
+    }).then((submitted) => {
+      this.sessionId = submitted.sessionId;
+      this.updateHeader();
+      this.setStatus(`Session ${submitted.sessionId.slice(0, 8)}: processing...`, "yellow");
+      
+      // Start polling for events/messages
+      return this.pollSession(submitted.sessionId, requestAbortController.signal, submitted.eventCursor);
+    }).then(() => {
+      this.setStatus("Complete", "green");
     }).catch((e) => {
       if (e instanceof Error && e.name === "AbortError" && requestAbortController.signal.aborted) {
-        // Request was aborted by the user - already handled in abortCurrentOperation.
         return;
       }
       this.error = e instanceof Error ? e.message : "Unknown error";
       this.messages.push({ role: "error", content: this.error });
+      this.setStatus("Error", "red");
     }).finally(() => {
       this.isLoading = false;
       this.abortController = null;
-      this.workflowProgress = [];
+      this.agentEvents = [];
       this.renderMessages();
-      // Only show Ready if there was no error and the user did not abort.
-      if (this.error) {
-        this.setStatus("Error", "red");
-      } else if (requestAbortController.signal.aborted) {
-        this.setStatus("Aborted", "yellow");
-      } else {
-        this.setStatus("Ready", "green");
-      }
     });
+  }
+
+  private async pollSession(sessionId: string, signal?: AbortSignal, initialCursor?: string): Promise<void> {
+    for await (const update of this.client.streamSession(sessionId, signal, { initialCursor })) {
+      // Update messages (conversation history)
+      this.messages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
+      
+      // Update events for progress display
+      if (update.newEvents.length > 0) {
+        this.updateAgentEvents(update.newEvents);
+      }
+      
+      // Check if complete
+      if (update.complete) {
+        if (update.session.status === "error") {
+          this.error = update.session.errorMessage || "Processing failed";
+          this.messages.push({ role: "error", content: this.error });
+        }
+        break;
+      }
+    }
   }
 
   private withSkillsSummary(prompt: string): string {
@@ -500,19 +612,16 @@ export class ClawflareTUIApp {
       this.messages.push({ role: "assistant", content: "⚠ Operation aborted by user" });
       this.isLoading = false;
       this.abortController = null;
-      this.workflowProgress = [];
+      this.agentEvents = [];
       this.renderMessages();
       this.setStatus("Aborted", "yellow");
     }
   }
 
   private toggleExpandSelectedMessage(): void {
-    // If no message selected, select the last one
     if (this.selectedMessageIndex < 0 && this.messages.length > 0) {
       this.selectedMessageIndex = this.messages.length - 1;
-      // Don't expand - just select so user can see what's selected
     } else if (this.selectedMessageIndex >= 0 && this.selectedMessageIndex < this.messages.length) {
-      // Toggle expansion
       const msg = this.messages[this.selectedMessageIndex]!;
       msg.expanded = !msg.expanded;
     }
@@ -535,7 +644,6 @@ export class ClawflareTUIApp {
     // Clear the editor after slash command
     this.editor.setText("");
 
-    // Fire and forget - use void to suppress unhandled promise warning
     void (async () => {
       if (command.startsWith("skill:")) {
         const skillName = command.slice("skill:".length);
@@ -573,10 +681,7 @@ export class ClawflareTUIApp {
           try {
             const ctx = await this.client.forkContext();
             this.sessionId = ctx.id;
-            this.messages = ctx.messages.map((m) => ({
-              role: m.role as "user" | "assistant" | "error",
-              content: this.extractContent(m.content),
-            }));
+            this.messages = ctx.messages.map((m) => this.formatMessageForDisplay(m));
             this.updateHeader();
             this.renderMessages();
             this.setStatus("Context forked", "green");
@@ -636,6 +741,7 @@ export class ClawflareTUIApp {
 /name <name> - Name the current session
 /tools - List available tools
 /skill:<name> [args] - Invoke a local Agent Skill
+/cf_debug [key] - Debug DO storage for current session
 /clear - Clear chat history
 /exit - Exit the CLI
 /help - Show this help message
@@ -647,6 +753,29 @@ Esc - Abort current operation
 Ctrl+O - Expand/collapse selected message`,
           });
           this.renderMessages();
+          break;
+
+        case "cf_debug":
+          this.setStatus("Fetching debug info...", "yellow");
+          try {
+            // args contains optional key
+            const keyArg = args.trim() || undefined;
+            const debugData = await this.client.cfDebug(this.sessionId, keyArg);
+            this.messages.push({
+              role: "assistant",
+              content: `Debug info for session ${this.sessionId.slice(0, 8)}:\n\`\`\`json\n${JSON.stringify(debugData, null, 2).slice(0, 8000)}\n\`\`\``,
+            });
+            this.renderMessages();
+            this.setStatus("Debug info loaded", "green");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Debug query failed";
+            this.messages.push({
+              role: "error",
+              content: this.error,
+            });
+            this.renderMessages();
+            this.setStatus("Debug failed", "red");
+          }
           break;
 
         case "exit":
@@ -665,7 +794,7 @@ Ctrl+O - Expand/collapse selected message`,
     // Start periodic render to catch async state changes
     this.renderInterval = setInterval(() => {
       this.tui.requestRender();
-    }, 100); // 100ms refresh
+    }, 100);
     this.tui.start();
   }
 

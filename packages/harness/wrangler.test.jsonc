@@ -35,6 +35,10 @@
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
+      },
+      {
+        "name": "SESSION_STORE",
+        "class_name": "ClawflareSessionStore"
       }
     ]
   },
@@ -47,6 +51,10 @@
     {
       "tag": "v2",
       "new_classes": ["ClawflareWebSocketSession"]
+    },
+    {
+      "tag": "v3",
+      "new_classes": ["ClawflareSessionStore"]
     }
   ],
 
@@ -56,13 +64,6 @@
       "name": "clawflare-agent-workflow-test",
       "binding": "AGENT_WORKFLOW",
       "class_name": "Workflow"
-    }
-  ],
-
-  "kv_namespaces": [
-    {
-      "binding": "AGENT_SESSION",
-      "id": "fd296c5aa01d4d1ba4a5613438466bee"
     }
   ],
 

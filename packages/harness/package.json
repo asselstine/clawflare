@@ -5,12 +5,20 @@
   "description": "Clawflare Agent harness - runs in Cloudflare Workers with pi-agent-core",
   "type": "module",
   "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/public-types.ts",
+      "default": "./src/public-types.ts"
+    }
+  },
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:raw": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
+    "timing:analyze": "node scripts/analyze-timing.mjs",
     "build": "tsc --build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import=tsx **/*.test.ts"
   },
   "dependencies": {
     "@clawflare/cloudflare": "workspace:*",
@@ -22,6 +30,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "wrangler": "^4.90.1"
   }

@@ -3,14 +3,29 @@
 
 import { ClawflareDatastore } from "./datastore";
 import { HttpGateway } from "./egress/gateway";
-import { Workflow, getWorkflowStatus, startAgentWorkflow } from "./workflow";
+import { ClawflareSessionStore } from "./session-do";
+import { Workflow, startAgentWorkflow } from "./workflow";
 import { ClawflareWebSocketSession } from "./ws-session";
 import { createTools } from "./tools";
 import { normalizeBedrockBearerToken } from "./agent-config";
-import type { Env, ChatRequest, AgentSession } from "./types";
+import { logTiming, timingStart } from "./diagnostics";
+import { getLatestEventCursor, loadSessionState, saveSessionState, getSessionEvents } from "./session-store";
+import type { Env, AgentSession, ChatSubmittedResponse, SessionResponse, SessionState } from "./types";
+import type { ChatRequest } from "./public-types";
 
 // Export the Datastore Durable Object class and Workflow
-export { ClawflareDatastore, HttpGateway, Workflow, ClawflareWebSocketSession };
+export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, Workflow, ClawflareWebSocketSession };
+
+// Export types for clients (from public-types.ts to avoid Workers types)
+export type { 
+  AgentMessage,
+  SessionEvent,
+  SessionState,
+  SessionResponse,
+  ChatSubmittedResponse,
+  ChatRequest,
+  AgentSession,
+} from "./public-types";
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -38,9 +53,9 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/$/, ""); // Normalize trailing slash
-    const isWorkflowPoll = request.method === "GET" && path.startsWith("/v1/workflow/");
+    const isSessionPoll = request.method === "GET" && path.startsWith("/v1/session/");
 
-    if (!isWorkflowPoll) {
+    if (!isSessionPoll) {
       console.log(`[REQUEST] ${request.method} ${request.url}`);
     }
     
@@ -64,19 +79,24 @@ export default {
     const authError = authenticate(request, env);
     if (authError) return authError;
 
-    // WebSocket upgrade for interactive workflow sessions. A Durable Object owns
-    // the socket so status polling survives beyond the initial Worker request.
+    // WebSocket upgrade for interactive workflow sessions
     if (path === "/ws") {
       const id = env.WEBSOCKET_SESSION.idFromName(crypto.randomUUID());
       return env.WEBSOCKET_SESSION.get(id).fetch(request);
     }
 
-    // REST API endpoints. Chat is workflow-backed and returns immediately with
-    // a workflow instance that clients can poll via /v1/workflow/:id.
+    // Session-based chat endpoint - returns immediately with session handle
     if (path === "/v1/chat" && request.method === "POST") {
-      return handleWorkflowChat(request, env);
+      return handleSessionChat(request, env);
     }
 
+    // Session polling endpoint
+    if (path.startsWith("/v1/session/") && request.method === "GET") {
+      const sessionId = path.replace("/v1/session/", "");
+      return handleGetSession(sessionId, url, env);
+    }
+
+    // Context endpoints
     if (path === "/v1/context" && request.method === "GET") {
       return handleGetContext(env);
     }
@@ -89,19 +109,14 @@ export default {
       return handleListTools(env, ctx);
     }
 
-    // Server info endpoint (provides provider/model configuration)
+    // Server info endpoint
     if (path === "/v1/info" && request.method === "GET") {
       return handleGetInfo(env);
     }
 
-    // Workflow endpoints for durable agent execution
-    if (path === "/v1/workflow/chat" && request.method === "POST") {
-      return handleWorkflowChat(request, env);
-    }
-
-    if (path.startsWith("/v1/workflow/") && request.method === "GET") {
-      const instanceId = path.replace("/v1/workflow/", "");
-      return handleGetWorkflowStatus(instanceId, env);
+    // Debug endpoint - inspect DO storage details
+    if (path === "/v1/cf_debug" && request.method === "GET") {
+      return handleCfDebug(env, url);
     }
 
     return new Response(JSON.stringify({ error: "Not found" }), {
@@ -111,18 +126,143 @@ export default {
   },
 };
 
-// Handle get context - read from KV directly
+// Handle session-based chat - returns session handle immediately
+async function handleSessionChat(request: Request, env: Env): Promise<Response> {
+  const requestStart = timingStart();
+  let sessionId: string | undefined;
+
+  try {
+    logTiming(env, sessionId, "chat.request.start");
+    const body = (await request.json()) as ChatRequest;
+    
+    if (body.type !== "prompt" || !body.content) {
+      return new Response(
+        JSON.stringify({ error: "Invalid request. type='prompt' and content required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    sessionId = body.sessionId || crypto.randomUUID();
+    logTiming(env, sessionId, "chat.request.parsed", requestStart, {
+      hasExistingSession: Boolean(body.sessionId),
+      promptLength: body.content.length,
+      maxTurns: body.maxTurns,
+    });
+    
+    const initialEventCursor = await getLatestEventCursor(env, sessionId);
+
+    // Initialize session state for polling
+    const initialState: SessionState = {
+      id: sessionId,
+      status: "processing",
+      messages: [],
+      nextEventCursor: initialEventCursor,
+      updatedAt: Date.now(),
+    };
+    const saveStateStart = timingStart();
+    await saveSessionState(env, initialState);
+    logTiming(env, sessionId, "chat.session_state.saved", saveStateStart);
+
+    // Start the workflow (implementation detail, not exposed to client)
+    const workflowCreateStart = timingStart();
+    await startAgentWorkflow(env, { ...body, sessionId });
+    logTiming(env, sessionId, "chat.workflow.create.returned", workflowCreateStart, {
+      totalRequestElapsedMs: Date.now() - requestStart,
+    });
+
+    const response: ChatSubmittedResponse = {
+      sessionId,
+      eventCursor: initialState.nextEventCursor,
+    };
+
+    logTiming(env, sessionId, "chat.response.returning", requestStart);
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    logTiming(env, sessionId, "chat.request.error", requestStart, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error("[handleSessionChat] Error:", error);
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return new Response(
+      JSON.stringify({ error: message }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Get session state - polls for messages and events
+async function handleGetSession(
+  sessionId: string,
+  url: URL,
+  env: Env,
+): Promise<Response> {
+  const pollStart = timingStart();
+
+  try {
+    // Load session state
+    const loadStateStart = timingStart();
+    const sessionState = await loadSessionState(env, sessionId);
+    if (!sessionState) {
+      logTiming(env, sessionId, "session.poll.not_found", pollStart);
+      return new Response(
+        JSON.stringify({ error: "Session not found" }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Get events since cursor
+    const sinceCursor = url.searchParams.get("since");
+    const eventsStart = timingStart();
+    const { events, nextCursor } = await getSessionEvents(
+      env,
+      sessionId,
+      sinceCursor || undefined,
+      100
+    );
+
+    logTiming(env, sessionId, "session.poll", pollStart, {
+      status: sessionState.status,
+      messageCount: sessionState.messages.length,
+      eventCount: events.length,
+      sinceCursor,
+      loadStateMs: eventsStart - loadStateStart,
+      getEventsMs: Date.now() - eventsStart,
+    });
+
+    const response: SessionResponse = {
+      id: sessionState.id,
+      status: sessionState.status,
+      messages: sessionState.messages,
+      events,
+      nextEventCursor: nextCursor,
+      errorMessage: sessionState.errorMessage,
+    };
+
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    logTiming(env, sessionId, "session.poll.error", pollStart, {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    console.error("[handleGetSession] Error:", error);
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Handle get context - read from the strongly consistent session Durable Object.
 async function handleGetContext(env: Env): Promise<Response> {
   try {
-    const sessionId = "main"; // Default context
-    const stateJson = await env.AGENT_SESSION.get(sessionId);
-    const state = stateJson ? JSON.parse(stateJson) : { messages: [] };
-    
-    const context: AgentSession = {
-      id: sessionId,
-      messages: state.messages || [],
-      createdAt: state.createdAt || Date.now(),
-    };
+    const context = await loadContext(env, "main") || {
+      id: "main",
+      messages: [],
+      createdAt: Date.now(),
+    } satisfies AgentSession;
     
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
@@ -136,15 +276,12 @@ async function handleGetContext(env: Env): Promise<Response> {
   }
 }
 
-// Handle new context creation - create in KV directly
+// Handle new context creation - create in the strongly consistent session Durable Object.
 async function handleNewContext(request: Request, env: Env): Promise<Response> {
   try {
     const body = (await request.json()) as { parentId?: string; };
     const sessionId = crypto.randomUUID();
-    
-    // Load parent context if provided
-    const parentJson = body.parentId ? await env.AGENT_SESSION.get(body.parentId) : null;
-    const parent = parentJson ? JSON.parse(parentJson) as AgentSession : null;
+    const parent = body.parentId ? await loadContext(env, body.parentId) : null;
     
     const context: AgentSession = {
       id: sessionId,
@@ -153,8 +290,7 @@ async function handleNewContext(request: Request, env: Env): Promise<Response> {
       createdAt: Date.now(),
     };
 
-    // Store in KV
-    await env.AGENT_SESSION.put(sessionId, JSON.stringify(context));
+    await saveContext(env, context);
     
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
@@ -199,7 +335,7 @@ async function handleGetInfo(env: Env): Promise<Response> {
         configured: normalizedBedrockToken.length > 0,
         rawLength: rawBedrockToken.length,
         normalizedLength: normalizedBedrockToken.length,
-        hadBearerPrefix: /^\s*Bearer\s+/i.test(rawBedrockToken),
+        hadBearerPrefix: /\s*Bearer\s+/i.test(rawBedrockToken),
         fingerprint: normalizedBedrockToken ? await sha256Prefix(normalizedBedrockToken) : undefined,
       },
     }), {
@@ -213,40 +349,33 @@ async function handleGetInfo(env: Env): Promise<Response> {
   }
 }
 
-async function sha256Prefix(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash))
-    .slice(0, 8)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-// Handle durable workflow-based chat
-async function handleWorkflowChat(request: Request, env: Env): Promise<Response> {
+// Handle cf_debug - inspect DO storage details
+async function handleCfDebug(env: Env, url: URL): Promise<Response> {
   try {
-    const body = (await request.json()) as ChatRequest;
+    const sessionId = url.searchParams.get("sessionId");
+    const key = url.searchParams.get("key");
     
-    const response = await startAgentWorkflow(env, body);
-    return new Response(JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch (error) {
-    console.error("[handleWorkflowChat] Error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
-    const status = message.startsWith("Invalid request.") ? 400 : 500;
-    return new Response(
-      JSON.stringify({ error: message }),
-      { status, headers: { "Content-Type": "application/json" } }
-    );
-  }
-}
+    if (!sessionId) {
+      return new Response(
+        JSON.stringify({ error: "sessionId query param required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
 
-// Handle get workflow status
-async function handleGetWorkflowStatus(instanceId: string, env: Env): Promise<Response> {
-  try {
-    const status = await getWorkflowStatus(env, instanceId);
-    return new Response(JSON.stringify(status), {
+    const response = await getSessionStore(env, sessionId).fetch(
+      `https://session-store.local/cf_debug${key ? `?key=${key}` : ""}`
+    );
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      return new Response(
+        JSON.stringify({ error: `Debug fetch failed: ${response.status} - ${errorText}` }),
+        { status: response.status, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    
+    const data = await response.json();
+    return new Response(JSON.stringify(data, null, 2), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
@@ -255,4 +384,37 @@ async function handleGetWorkflowStatus(instanceId: string, env: Env): Promise<Re
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
+}
+
+function getSessionStore(env: Env, sessionId: string): DurableObjectStub {
+  const id = env.SESSION_STORE.idFromName(sessionId);
+  return env.SESSION_STORE.get(id);
+}
+
+async function loadContext(env: Env, sessionId: string): Promise<AgentSession | null> {
+  const response = await getSessionStore(env, sessionId).fetch("https://session-store.local/context");
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error(`Context fetch failed: ${response.status} ${await response.text()}`);
+  }
+  return response.json() as Promise<AgentSession>;
+}
+
+async function saveContext(env: Env, context: AgentSession): Promise<void> {
+  const response = await getSessionStore(env, context.id).fetch("https://session-store.local/context", {
+    method: "PUT",
+    body: JSON.stringify(context),
+  });
+  if (!response.ok) {
+    throw new Error(`Context save failed: ${response.status} ${await response.text()}`);
+  }
+}
+
+async function sha256Prefix(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const hash = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(hash))
+    .slice(0, 8)
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }

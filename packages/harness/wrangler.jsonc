@@ -39,6 +39,10 @@
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
+      },
+      {
+        "name": "SESSION_STORE",
+        "class_name": "ClawflareSessionStore"
       }
     ]
   },
@@ -52,6 +56,10 @@
     {
       "tag": "v2",
       "new_classes": ["ClawflareWebSocketSession"]
+    },
+    {
+      "tag": "v3",
+      "new_classes": ["ClawflareSessionStore"]
     }
   ],
 
@@ -61,15 +69,6 @@
       "name": "clawflare-agent-workflow",
       "binding": "AGENT_WORKFLOW",
       "class_name": "Workflow"
-    }
-  ],
-
-  // Local dev KV namespaces - these are auto-created in wrangler dev
-  // For production, create real namespaces and update the IDs
-  "kv_namespaces": [
-    {
-      "binding": "AGENT_SESSION",
-      "id": "fd296c5aa01d4d1ba4a5613438466bee"
     }
   ],
 

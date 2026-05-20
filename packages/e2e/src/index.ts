@@ -2,7 +2,7 @@
  * Remote E2E Tests for Clawflare.
  *
  * The suite deploys a brand-new Cloudflare Worker test instance, runs API tests
- * against the workers.dev URL, then deletes the Worker and temporary KV namespace.
+ * against the workers.dev URL, then deletes the Worker.
  */
 
 import { spawn } from "node:child_process";
@@ -19,7 +19,6 @@ interface RemoteDeployment {
   workerName: string;
   url: string;
   configPath: string;
-  kvNamespaceId: string;
 }
 
 interface TestResult {
@@ -112,16 +111,6 @@ function runWrangler(args: string[], options: { capture?: boolean } = {}): Promi
   });
 }
 
-function extractKvNamespaceId(output: string): string {
-  const jsonMatch = output.match(/\{[\s\S]*?"id"\s*:\s*"([^"]+)"[\s\S]*?\}/);
-  if (jsonMatch?.[1]) return jsonMatch[1];
-
-  const idMatch = output.match(/"id"\s*=\s*"([^"]+)"|id\s*=\s*"([^"]+)"|([a-f0-9]{32})/i);
-  const id = idMatch?.[1] || idMatch?.[2] || idMatch?.[3];
-  if (!id) throw new Error(`Could not find KV namespace id in wrangler output: ${output}`);
-  return id;
-}
-
 function extractWorkerUrl(output: string, workerName: string): string {
   const urls = output.match(/https:\/\/[^\s]+\.workers\.dev/g) || [];
   const preferred = urls.find((url) => url.includes(workerName));
@@ -130,7 +119,7 @@ function extractWorkerUrl(output: string, workerName: string): string {
   return url.replace(/\/+$/, "");
 }
 
-async function writeTestConfig(workerName: string, workflowName: string, kvNamespaceId: string): Promise<string> {
+async function writeTestConfig(workerName: string, workflowName: string): Promise<string> {
   const configPath = pathResolve(HARNESS_DIR, `wrangler.e2e.${workerName}.jsonc`);
   const config = {
     $schema: "./node_modules/wrangler/config-schema.json",
@@ -149,14 +138,15 @@ async function writeTestConfig(workerName: string, workflowName: string, kvNames
       bindings: [
         { name: "DATASTORE", class_name: "ClawflareDatastore" },
         { name: "WEBSOCKET_SESSION", class_name: "ClawflareWebSocketSession" },
+        { name: "SESSION_STORE", class_name: "ClawflareSessionStore" },
       ],
     },
     migrations: [
       { tag: "v1", new_sqlite_classes: ["ClawflareDatastore"] },
       { tag: "v2", new_classes: ["ClawflareWebSocketSession"] },
+      { tag: "v3", new_classes: ["ClawflareSessionStore"] },
     ],
     workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "Workflow" }],
-    kv_namespaces: [{ binding: "AGENT_SESSION", id: kvNamespaceId }],
     vars: {
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
@@ -175,19 +165,14 @@ async function deployRemote(): Promise<RemoteDeployment> {
   const runId = randomUUID().slice(0, 8);
   const workerName = `clawflare-harness-e2e-${runId}`;
   const workflowName = `clawflare-agent-workflow-e2e-${runId}`;
-  const kvTitle = `${workerName}-agent-state`;
-  let kvNamespaceId = "";
   let configPath = "";
 
   console.log("🚀 Creating remote E2E deployment...");
   console.log(`   Worker: ${workerName}`);
   console.log(`   Workflow: ${workflowName}`);
-  console.log(`   KV: ${kvTitle}`);
 
   try {
-    const kvOutput = await runWrangler(["kv", "namespace", "create", kvTitle], { capture: true });
-    kvNamespaceId = extractKvNamespaceId(kvOutput);
-    configPath = await writeTestConfig(workerName, workflowName, kvNamespaceId);
+    configPath = await writeTestConfig(workerName, workflowName);
 
     const deployOutput = await runWrangler(
       [
@@ -204,12 +189,9 @@ async function deployRemote(): Promise<RemoteDeployment> {
     const url = extractWorkerUrl(deployOutput, workerName);
 
     console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
-    return { workerName, url, configPath, kvNamespaceId };
+    return { workerName, url, configPath };
   } catch (error) {
     await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
-    if (kvNamespaceId) {
-      await runWrangler(["kv", "namespace", "delete", "--namespace-id", kvNamespaceId, "--skip-confirmation"]).catch(() => undefined);
-    }
     if (configPath) {
       await rm(configPath, { force: true }).catch(() => undefined);
     }
@@ -298,18 +280,47 @@ async function runTests(url: string, token: string): Promise<void> {
   });
 
   await runner.runTest("Simple prompt", async () => {
-    const response = await client.chat({ type: "prompt", content: "Say 'hello'" });
-    if (response.type !== "message") throw new Error(`Expected message, got ${response.type}`);
+    const submitted = await client.submitChat({ type: "prompt", content: "Say 'hello'" });
+    // Poll until complete
+    for await (const update of client.streamSession(submitted.sessionId)) {
+      if (update.complete) {
+        if (update.session.status === "error") {
+          throw new Error(`Session failed: ${update.session.errorMessage}`);
+        }
+        const lastMsg = update.session.messages.at(-1);
+        if (!lastMsg || lastMsg.role !== "assistant") {
+          throw new Error("Expected assistant response");
+        }
+        return;
+      }
+    }
+    throw new Error("Session did not complete");
   });
 
   await runner.runTest("Session history preserved", async () => {
-    await client.chat({ type: "prompt", content: `Remember this: test-${Date.now()}` });
-    const response = await client.chat({ type: "prompt", content: "HISTORY_TEST: What messages have I sent?" });
-    if (!response.content?.includes("HISTORY_TEST_MODE")) {
-      throw new Error(`Expected HISTORY_TEST_MODE in response, got: ${response.content}`);
+    const submitted1 = await client.submitChat({ type: "prompt", content: `Remember this: test-${Date.now()}` });
+    // Wait for first message to complete
+    for await (const update of client.streamSession(submitted1.sessionId)) {
+      if (update.complete) break;
     }
-    const count = Number(response.content.match(/Found (\d+) user messages?/)?.[1] || 0);
-    if (count < 2) throw new Error(`Expected at least 2 user messages, got ${count}: ${response.content}`);
+    
+    const submitted2 = await client.submitChat({ type: "prompt", content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
+    let responseContent = "";
+    for await (const update of client.streamSession(submitted2.sessionId)) {
+      if (update.complete) {
+        const lastMsg = update.session.messages.at(-1);
+        if (lastMsg?.role === "assistant") {
+          responseContent = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
+        }
+        break;
+      }
+    }
+    
+    if (!responseContent?.includes("HISTORY_TEST_MODE")) {
+      throw new Error(`Expected HISTORY_TEST_MODE in response, got: ${responseContent}`);
+    }
+    const count = Number(responseContent.match(/Found (\d+) user messages?/)?.[1] || 0);
+    if (count < 2) throw new Error(`Expected at least 2 user messages, got ${count}: ${responseContent}`);
   });
 
   await runner.runTest("Fork context", async () => {
@@ -320,7 +331,7 @@ async function runTests(url: string, token: string): Promise<void> {
     if (newContext.id === originalId) throw new Error("Fork returned same context ID");
   });
 
-  await runner.runTest("Workflow chat rejects steer messages", async () => {
+  await runner.runTest("Chat rejects steer messages", async () => {
     const response = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -435,27 +446,27 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
-  await runner.runTest("/v1/chat starts workflow that can be polled by instance ID", async () => {
+  await runner.runTest("Session API: submit and poll for completion", async () => {
     const startResponse = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", content: "workflow smoke test" }),
+      body: JSON.stringify({ type: "prompt", content: "session smoke test" }),
     });
-    const started = await startResponse.json() as { instanceId?: string; pollUrl?: string };
-    if (!started.instanceId || !started.pollUrl) throw new Error(`Workflow did not start: ${JSON.stringify(started)}`);
+    const submitted = await startResponse.json() as { sessionId?: string; eventCursor?: string };
+    if (!submitted.sessionId || !submitted.eventCursor) throw new Error(`Session did not start: ${JSON.stringify(submitted)}`);
 
     let lastStatus = "";
     for (let i = 0; i < 30; i++) {
-      const statusResponse = await fetch(`${url}${started.pollUrl}`, {
+      const sessionResponse = await fetch(`${url}/v1/session/${submitted.sessionId}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      const status = await statusResponse.json() as { status?: string; currentStep?: string };
-      lastStatus = JSON.stringify(status);
-      if (status.status === "success") return;
-      if (status.status === "errored") throw new Error(`Workflow errored: ${lastStatus}`);
+      const session = await sessionResponse.json() as { status?: string; errorMessage?: string };
+      lastStatus = JSON.stringify(session);
+      if (session.status === "idle") return;
+      if (session.status === "error") throw new Error(`Session errored: ${lastStatus}`);
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    throw new Error(`Workflow did not complete: ${lastStatus}`);
+    throw new Error(`Session did not complete: ${lastStatus}`);
   });
 
   await runner.runTest("WebSocket starts workflow and streams final response", async () => {
@@ -533,11 +544,10 @@ Environment variables:
   CLOUDFLARE_API_TOKEN or CF_API_TOKEN  Wrangler authentication token
 
 The test suite will:
-  1. Create a temporary remote KV namespace
-  2. Deploy a unique remote Worker named clawflare-harness-e2e-<id>
-  3. Tag the Worker version as e2e
-  4. Run API tests against the workers.dev URL
-  5. Delete the Worker, KV namespace, and temp config unless --keep-alive is used
+  1. Deploy a unique remote Worker named clawflare-harness-e2e-<id>
+  2. Tag the Worker version as e2e
+  3. Run API tests against the workers.dev URL
+  4. Delete the Worker and temp config unless --keep-alive is used
 `);
 }
 
@@ -548,7 +558,6 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
     console.log("\n⏳ Keep-alive mode - remote test resources were not deleted");
     console.log(`   Worker: ${deployment.workerName}`);
     console.log(`   URL: ${deployment.url}`);
-    console.log(`   KV namespace id: ${deployment.kvNamespaceId}`);
     console.log(`   Config: ${deployment.configPath}`);
     return;
   }
@@ -559,12 +568,6 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
     await runWrangler(["delete", deployment.workerName, "--force"]);
   } catch (error) {
     console.error(`   Failed to delete Worker ${deployment.workerName}:`, error instanceof Error ? error.message : String(error));
-  }
-
-  try {
-    await runWrangler(["kv", "namespace", "delete", "--namespace-id", deployment.kvNamespaceId, "--skip-confirmation"]);
-  } catch (error) {
-    console.error(`   Failed to delete KV namespace ${deployment.kvNamespaceId}:`, error instanceof Error ? error.message : String(error));
   }
 
   try {
