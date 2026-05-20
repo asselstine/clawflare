@@ -14,6 +14,8 @@ import type {
   SessionResponse,
   ChatSubmittedResponse,
   ChatRequest,
+  SessionListResponse,
+  SessionSummary,
 } from "@clawflare/harness";
 
 export type {
@@ -22,6 +24,8 @@ export type {
   SessionResponse,
   ChatSubmittedResponse,
   ChatRequest,
+  SessionListResponse,
+  SessionSummary,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -104,6 +108,42 @@ export class AgentClient {
     const data = await response.json() as ChatSubmittedResponse;
     if (data.sessionId) this.currentContextId = data.sessionId;
     return data;
+  }
+
+  // Close an active session
+  async closeSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string }> {
+    const response = await fetch(`${this.url}/v1/session/${sessionId}/close`, {
+      method: "POST",
+      headers: this.getHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      const errorData = JSON.parse(errorBody) as ApiError;
+      throw new Error(formatApiError(response.status, errorData));
+    }
+
+    return response.json() as Promise<{ ok: boolean; sessionId: string; status: string }>;
+  }
+
+  // List sessions - optional status filter ("active", "idle", "closed", "expired", "error")
+  async listSessions(options?: { status?: string; sessionId?: string }): Promise<SessionListResponse> {
+    const url = new URL(`${this.url}/v1/sessions`);
+    if (options?.status && options.status !== "all") url.searchParams.set("status", options.status);
+    if (options?.sessionId) url.searchParams.set("sessionId", options.sessionId);
+
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: this.getHeaders(),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      const errorData = JSON.parse(errorBody) as ApiError;
+      throw new Error(formatApiError(response.status, errorData));
+    }
+
+    return response.json() as Promise<SessionListResponse>;
   }
 
   // Get current session state (poll for updates)

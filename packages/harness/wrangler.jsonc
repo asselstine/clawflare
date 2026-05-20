@@ -63,12 +63,12 @@
     }
   ],
 
-  // Workflow for durable agent execution
+  // Workflow for durable agent execution - PERSISTENT per-session workflow
   "workflows": [
     {
       "name": "clawflare-agent-workflow",
       "binding": "AGENT_WORKFLOW",
-      "class_name": "Workflow"
+      "class_name": "PersistentSessionWorkflow"
     }
   ],
 

@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, ChatRequest, SessionState } from "./types";
-import { startAgentWorkflow } from "./workflow";
-import { loadSessionState, getSessionEvents, getLatestEventCursor, saveSessionState } from "./session-store";
+// WebSocket session handler directly manages PersistentSessionWorkflow
+import { loadSessionState, getSessionEvents, getLatestEventCursor, saveSessionState, enqueueSessionInput } from "./session-store";
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_POLLS = 300;
@@ -33,7 +33,7 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
     try {
       const data = JSON.parse(raw) as ChatRequest;
 
-      if (data.type !== "prompt") {
+      if (data.type !== "prompt" || !data.content) {
         ws.send(JSON.stringify({
           type: "error",
           content: "WebSocket sessions currently support prompt messages only",
@@ -41,19 +41,40 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
         return;
       }
 
-      // Start the workflow (returns sessionId only)
-      const { sessionId } = await startAgentWorkflow(this.env, data);
+      // Create workflow ID for persistent session
+      const sessionId = data.sessionId || crypto.randomUUID();
+      const workflowId = crypto.randomUUID();
       
-      // Initialize session state for polling before workflow starts
+      // Initialize session state before starting workflow
       const initialEventCursor = await getLatestEventCursor(this.env, sessionId);
       const initialState: SessionState = {
         id: sessionId,
+        workflowId,
         status: "processing" as const,
         messages: [],
         nextEventCursor: initialEventCursor,
         updatedAt: Date.now(),
       };
       await saveSessionState(this.env, initialState);
+      
+      // Create persistent workflow with initial params
+      await this.env.AGENT_WORKFLOW.create({
+        id: workflowId,
+        params: { sessionId },
+      });
+      
+      // Queue the event first for ordering
+      await enqueueSessionInput(this.env, sessionId, {
+        type: "prompt",
+        content: data.content,
+      });
+      
+      // Get workflow instance and wake it to consume the queued prompt.
+      const workflowInstance = await this.env.AGENT_WORKFLOW.get(workflowId);
+      await workflowInstance.sendEvent({
+        type: "session-input",
+        payload: { type: "wake" },
+      });
       
       // Send initial session started event
       ws.send(JSON.stringify({

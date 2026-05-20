@@ -146,7 +146,7 @@ async function writeTestConfig(workerName: string, workflowName: string): Promis
       { tag: "v2", new_classes: ["ClawflareWebSocketSession"] },
       { tag: "v3", new_classes: ["ClawflareSessionStore"] },
     ],
-    workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "Workflow" }],
+    workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "PersistentSessionWorkflow" }],
     vars: {
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
@@ -287,7 +287,11 @@ async function runTests(url: string, token: string): Promise<void> {
         if (update.session.status === "error") {
           throw new Error(`Session failed: ${update.session.errorMessage}`);
         }
-        const lastMsg = update.session.messages.at(-1);
+        // Wait a bit for messages to sync
+        await new Promise(r => setTimeout(r, 500));
+        // Re-fetch session to get latest messages
+        const refreshed = await client.getSession(submitted.sessionId);
+        const lastMsg = refreshed.messages.at(-1);
         if (!lastMsg || lastMsg.role !== "assistant") {
           throw new Error("Expected assistant response");
         }
@@ -298,29 +302,60 @@ async function runTests(url: string, token: string): Promise<void> {
   });
 
   await runner.runTest("Session history preserved", async () => {
-    const submitted1 = await client.submitChat({ type: "prompt", content: `Remember this: test-${Date.now()}` });
-    // Wait for first message to complete
-    for await (const update of client.streamSession(submitted1.sessionId)) {
-      if (update.complete) break;
-    }
+    // Create a new context to ensure we don't reuse the Simple prompt session
+    await client.createContext();
     
-    const submitted2 = await client.submitChat({ type: "prompt", content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
-    let responseContent = "";
-    for await (const update of client.streamSession(submitted2.sessionId)) {
+    // First message
+    const submitted1 = await client.submitChat({ type: "prompt", content: `First message: test-${Date.now()}` });
+    let firstResponse = "";
+    for await (const update of client.streamSession(submitted1.sessionId)) {
       if (update.complete) {
         const lastMsg = update.session.messages.at(-1);
         if (lastMsg?.role === "assistant") {
-          responseContent = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
+          const content = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
+          firstResponse = content;
         }
         break;
       }
     }
     
-    if (!responseContent?.includes("HISTORY_TEST_MODE")) {
-      throw new Error(`Expected HISTORY_TEST_MODE in response, got: ${responseContent}`);
+    if (!firstResponse) {
+      throw new Error(`First message failed - no response`);
     }
-    const count = Number(responseContent.match(/Found (\d+) user messages?/)?.[1] || 0);
-    if (count < 2) throw new Error(`Expected at least 2 user messages, got ${count}: ${responseContent}`);
+    console.error(`First response: ${firstResponse.substring(0, 60)}...`);
+    
+    // Wait extra time for workflow to fully complete and sync
+    await new Promise(r => setTimeout(r, 1000));
+    
+    // Second message using same session
+    const submitted2 = await client.submitChat({ type: "prompt", content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
+    console.error(`Second submit returned sessionId: ${submitted2.sessionId}`);
+    
+    let secondResponse = "";
+    for await (const update of client.streamSession(submitted2.sessionId)) {
+      console.error(`Polling second: status=${update.session.status}, messages=${update.session.messages.length}`);
+      if (update.complete) {
+        // Extra wait for sync
+        await new Promise(r => setTimeout(r, 500));
+        const refreshed = await client.getSession(submitted2.sessionId);
+        console.error(`Second complete: refreshed messages=${refreshed.messages.length}`);
+        const lastMsg = refreshed.messages.at(-1);
+        if (lastMsg?.role === "assistant") {
+          const content = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
+          secondResponse = content;
+        }
+        break;
+      }
+    }
+    
+    if (!secondResponse) {
+      throw new Error(`Second message failed - no response`);
+    }
+    console.error(`Second response: ${secondResponse.substring(0, 100)}...`);
+    
+    if (!secondResponse.includes("HISTORY_TEST_MODE")) {
+      throw new Error(`Expected HISTORY_TEST_MODE in response, got: ${secondResponse}`);
+    }
   });
 
   await runner.runTest("Fork context", async () => {

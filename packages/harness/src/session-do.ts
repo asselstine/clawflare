@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import type { AgentSessionState } from "./agent";
-import type { AgentSession, Env, SessionEvent, SessionState } from "./types";
+import type { AgentSession, Env, SessionEvent, SessionState, SessionInputEvent } from "./types";
 
 const MAX_EVENTS_PER_SESSION = 1000;
 const EVENT_TRIM_BATCH = 100;
@@ -12,7 +12,13 @@ const EVENT_PREFIX = "evt/";
 const WORKFLOW_SESSION_KEY = "workflowSession";
 const CONTEXT_KEY = "context";
 
+// NEW: Keys for persistent workflow pattern
+const WORKFLOW_ID_KEY = "workflowId";
+const INPUT_QUEUE_KEY = "inputQueue";
+const SESSION_ACTIVE_KEY = "sessionActive";
+
 const MAX_STORAGE_SIZE = 130000;
+const MAX_QUEUE_SIZE = 100;
 
 type NewSessionEvent = AgentEvent & { timestamp: number };
 
@@ -85,6 +91,16 @@ export class ClawflareSessionStore extends DurableObject<Env> {
       if (path === "/workflow-session" && request.method === "PUT") return this.putWorkflowSession(request);
       if (path === "/context" && request.method === "GET") return this.getContext();
       if (path === "/context" && request.method === "PUT") return this.putContext(request);
+      
+      // NEW: Persistent workflow endpoints
+      if (path === "/workflow-id" && request.method === "GET") return this.getWorkflowId();
+      if (path === "/workflow-id" && request.method === "PUT") return this.putWorkflowId(request);
+      if (path === "/input-queue" && request.method === "GET") return this.getInputQueue();
+      if (path === "/input-queue" && request.method === "POST") return this.enqueueInput(request);
+      if (path === "/input-queue" && request.method === "DELETE") return this.dequeueInput();
+      if (path === "/session-active" && request.method === "GET") return this.getSessionActive();
+      if (path === "/session-active" && request.method === "PUT") return this.putSessionActive(request);
+      
       if (path === "/cf_debug" && request.method === "GET") return this.getDebugInfo(url);
 
       return json({ error: "Not found" }, 404);
@@ -291,6 +307,74 @@ export class ClawflareSessionStore extends DurableObject<Env> {
     return json({ ok: true });
   }
 
+  // ==========================================
+  // NEW: Persistent Workflow Session Methods
+  // ==========================================
+
+  /** Get the persistent workflow ID for this session */
+  private async getWorkflowId(): Promise<Response> {
+    const workflowId = await this.ctx.storage.get<string>(WORKFLOW_ID_KEY);
+    return workflowId ? json({ workflowId }) : json({ error: "Workflow ID not set" }, 404);
+  }
+
+  /** Store the persistent workflow ID for this session */
+  private async putWorkflowId(request: Request): Promise<Response> {
+    const body = await request.json<{ workflowId: string }>();
+    if (!body.workflowId) {
+      return json({ error: "workflowId required" }, 400);
+    }
+    await this.ctx.storage.put(WORKFLOW_ID_KEY, body.workflowId);
+    return json({ ok: true });
+  }
+
+  /** Get the input event queue status */
+  private async getInputQueue(): Promise<Response> {
+    const queue = await this.ctx.storage.get<SessionInputEvent[]>(INPUT_QUEUE_KEY) ?? [];
+    return json({ pending: queue.length, max: MAX_QUEUE_SIZE, events: queue });
+  }
+
+  /** Add an input event to the queue - called by HTTP handler before sendEvent */
+  private async enqueueInput(request: Request): Promise<Response> {
+    const event = await request.json<SessionInputEvent>();
+    const queue = await this.ctx.storage.get<SessionInputEvent[]>(INPUT_QUEUE_KEY) ?? [];
+    
+    if (queue.length >= MAX_QUEUE_SIZE) {
+      return json({ error: "Queue full", current: queue.length, max: MAX_QUEUE_SIZE }, 429);
+    }
+    
+    queue.push(event);
+    await this.ctx.storage.put(INPUT_QUEUE_KEY, queue);
+    
+    return json({ ok: true, queued: queue.length });
+  }
+
+  /** Remove and return next input event - called by workflow via waitForEvent */
+  private async dequeueInput(): Promise<Response> {
+    const queue = await this.ctx.storage.get<SessionInputEvent[]>(INPUT_QUEUE_KEY) ?? [];
+    
+    if (queue.length === 0) {
+      return json({ event: null, remaining: 0 });
+    }
+    
+    const event = queue.shift()!;
+    await this.ctx.storage.put(INPUT_QUEUE_KEY, queue);
+    
+    return json({ event, remaining: queue.length });
+  }
+
+  /** Check if session is active (workflow running) */
+  private async getSessionActive(): Promise<Response> {
+    const active = await this.ctx.storage.get<boolean>(SESSION_ACTIVE_KEY) ?? false;
+    return json({ active });
+  }
+
+  /** Mark session active/inactive - set by workflow on start/end */
+  private async putSessionActive(request: Request): Promise<Response> {
+    const body = await request.json<{ active: boolean }>();
+    await this.ctx.storage.put(SESSION_ACTIVE_KEY, body.active ?? false);
+    return json({ ok: true, active: body.active });
+  }
+
   // Debug endpoint - shows decomposed storage stats
   private async getDebugInfo(url: URL): Promise<Response> {
     const key = url.searchParams.get("key");
@@ -305,6 +389,7 @@ export class ClawflareSessionStore extends DurableObject<Env> {
     // Get stats for known keys and sample event keys
     const keyStats: Array<{ key: string; exists: boolean; sizeBytes?: number; sizeHuman: string; error?: string }> = [];
     const allKeys = [STATE_KEY, EVENT_META_KEY, WORKFLOW_SESSION_KEY, CONTEXT_KEY, 
+      WORKFLOW_ID_KEY, INPUT_QUEUE_KEY, SESSION_ACTIVE_KEY,
       ...storedKeys.filter(k => k.startsWith(EVENT_PREFIX)).slice(0, 10)];
     
     for (const k of allKeys) {

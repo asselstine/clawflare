@@ -17,7 +17,8 @@ export type SessionEvent = AgentEvent & { timestamp: number; sequence: number };
  */
 export interface SessionState {
   id: string;
-  status: "idle" | "processing" | "awaiting_input" | "error";
+  workflowId: string;
+  status: "idle" | "processing" | "awaiting_input" | "error" | "closed" | "expired";
   messages: AgentMessage[];
   nextEventCursor: string;
   updatedAt: number;
@@ -30,6 +31,7 @@ export interface SessionState {
 export interface ChatSubmittedResponse {
   sessionId: string;
   eventCursor: string;
+  isNewSession: boolean;
 }
 
 // API Request/Response types
@@ -45,11 +47,31 @@ export interface ChatRequest {
  */
 export interface SessionResponse {
   id: string;
-  status: "idle" | "processing" | "awaiting_input" | "error";
+  status: "idle" | "processing" | "awaiting_input" | "error" | "closed" | "expired";
   messages: AgentMessage[];
   events: SessionEvent[];
   nextEventCursor: string;
   errorMessage?: string;
+}
+
+/**
+ * SessionSummary - Summary of a session for list views
+ */
+export interface SessionSummary {
+  id: string;
+  workflowId: string;
+  status: SessionState["status"];
+  messageCount: number;
+  updatedAt: number;
+  isActive: boolean;
+}
+
+/**
+ * SessionListResponse - Response from GET /v1/sessions
+ */
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+  total: number;
 }
 
 // Context for agent

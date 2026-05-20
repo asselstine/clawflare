@@ -1,6 +1,6 @@
 // Session state management - backed by a per-session Durable Object.
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import type { SessionEvent, SessionState } from "./types";
+import type { SessionEvent, SessionState, SessionInputEvent } from "./types";
 import type { Env } from "./types";
 
 type NewSessionEvent = AgentEvent & { timestamp: number };
@@ -96,4 +96,123 @@ export async function appendSessionEvents(
     method: "POST",
     body: JSON.stringify({ events: newEvents }),
   });
+}
+
+// ==========================================
+// NEW: Persistent Workflow Session Functions
+// ==========================================
+
+/**
+ * Get the workflow ID associated with a session.
+ */
+export async function getSessionWorkflowId(
+  env: Env,
+  sessionId: string,
+): Promise<string | null> {
+  try {
+    const response = await jsonFetch<{ workflowId: string }>(getSessionStore(env, sessionId), "/workflow-id");
+    return response.workflowId;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save the workflow ID for a session.
+ */
+export async function saveSessionWorkflowId(
+  env: Env,
+  sessionId: string,
+  workflowId: string,
+): Promise<void> {
+  await jsonFetch(getSessionStore(env, sessionId), "/workflow-id", {
+    method: "PUT",
+    body: JSON.stringify({ workflowId }),
+  });
+}
+
+/**
+ * Get the current input queue status for a session.
+ */
+export async function getSessionInputQueue(
+  env: Env,
+  sessionId: string,
+): Promise<{ pending: number; max: number; events: SessionInputEvent[] }> {
+  return jsonFetch(getSessionStore(env, sessionId), "/input-queue");
+}
+
+/**
+ * Enqueue an input event for the session workflow.
+ * Returns 429 if queue is full.
+ */
+export async function enqueueSessionInput(
+  env: Env,
+  sessionId: string,
+  event: SessionInputEvent,
+): Promise<{ ok: boolean; queued: number; error?: string }> {
+  const stub = getSessionStore(env, sessionId);
+  const response = await stub.fetch("https://session-store.local/input-queue", {
+    method: "POST",
+    body: JSON.stringify(event),
+  });
+  if (!response.ok) {
+    const error = await response.json() as { error: string; current: number; max: number };
+    return { ok: false, queued: error.current, error: error.error };
+  }
+  const result = await response.json() as { ok: boolean; queued: number };
+  return result;
+}
+
+/**
+ * Dequeue the next input event - called by workflow to get pending input.
+ */
+export async function dequeueSessionInput(
+  env: Env,
+  sessionId: string,
+): Promise<{ event: SessionInputEvent | null; remaining: number }> {
+  return jsonFetch(getSessionStore(env, sessionId), "/input-queue", {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Check if a session is currently active (workflow running).
+ */
+export async function isSessionActive(
+  env: Env,
+  sessionId: string,
+): Promise<boolean> {
+  const response = await jsonFetch<{ active: boolean }>(getSessionStore(env, sessionId), "/session-active");
+  return response.active;
+}
+
+/**
+ * Set session active status - called by workflow on start/end.
+ */
+export async function setSessionActive(
+  env: Env,
+  sessionId: string,
+  active: boolean,
+): Promise<void> {
+  await jsonFetch(getSessionStore(env, sessionId), "/session-active", {
+    method: "PUT",
+    body: JSON.stringify({ active }),
+  });
+}
+
+/**
+ * Mark session as closed.
+ */
+export async function markSessionClosed(
+  env: Env,
+  sessionId: string,
+  reason: "user" | "timeout" | "error",
+): Promise<void> {
+  const state = await loadSessionState(env, sessionId);
+  if (state) {
+    state.status = reason === "timeout" ? "expired" : "closed";
+    state.updatedAt = Date.now();
+    await saveSessionState(env, state);
+  }
+  await setSessionActive(env, sessionId, false);
 }

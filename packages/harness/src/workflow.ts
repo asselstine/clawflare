@@ -230,6 +230,7 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
     if (!sessionState) {
       sessionState = {
         id: sessionId,
+        workflowId: "legacy",
         status: "processing" as const,
         messages: initialized.session.messages,
         
@@ -314,6 +315,7 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
       if (!sessionState) {
         sessionState = {
           id: sessionId,
+        workflowId: "legacy",
           status: stepResult.session.status === "error" ? "error" as const : "processing" as const,
           messages: stepResult.session.messages,
           
@@ -391,6 +393,7 @@ export class Workflow extends WorkflowEntrypoint<Env, WorkflowInput> {
     if (!sessionState) {
       sessionState = {
         id: sessionId,
+        workflowId: "legacy",
         status: nextSession.status === "error" ? "error" : "idle",
         messages: nextSession.messages,
         

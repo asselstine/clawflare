@@ -14,11 +14,15 @@ export type SessionEvent = AgentEvent & { timestamp: number; sequence: number };
  */
 export interface SessionState {
   id: string;
-  status: "idle" | "processing" | "awaiting_input" | "error";
+  workflowId: string;           // Persistent workflow ID for this session
+  status: "idle" | "processing" | "awaiting_input" | "error" | "closed" | "expired";
   messages: AgentMessage[];
   nextEventCursor: string;
   updatedAt: number;
   errorMessage?: string;
+  // Session config (stored with defaults)
+  maxQueueSize?: number;        // default 100
+  idleTimeout?: string;         // default "7 days"
 }
 
 /**
@@ -27,6 +31,41 @@ export interface SessionState {
 export interface ChatSubmittedResponse {
   sessionId: string;
   eventCursor: string;
+  isNewSession: boolean;      // NEW: indicates if this created a new session
+}
+
+/**
+ * SessionEventQueue - Input events queued for a persistent session workflow
+ */
+export interface SessionEventQueue {
+  pending: SessionInputEvent[];
+  maxSize: number;
+}
+
+/**
+ * SessionInputEvent - Events that can be sent to a running session workflow
+ */
+export type SessionInputEvent =
+  | { type: "prompt"; content: string; maxTurns?: number }
+  | { type: "steer"; content: string }
+  | { type: "fork"; parentId: string }
+  | { type: "close" };
+
+/**
+ * SessionListResponse - Response from GET /v1/sessions
+ */
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+  total: number;
+}
+
+export interface SessionSummary {
+  id: string;
+  workflowId: string;
+  status: SessionState["status"];
+  messageCount: number;
+  updatedAt: number;
+  isActive: boolean;            // workflow is running and waiting
 }
 
 export interface Env {
@@ -114,7 +153,7 @@ export interface ChatResponse {
  */
 export interface SessionResponse {
   id: string;
-  status: "idle" | "processing" | "awaiting_input" | "error";
+  status: "idle" | "processing" | "awaiting_input" | "error" | "closed" | "expired";
   messages: AgentMessage[];
   events: AgentEvent[];
   nextEventCursor: string;

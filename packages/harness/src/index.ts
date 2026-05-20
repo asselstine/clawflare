@@ -4,17 +4,24 @@
 import { ClawflareDatastore } from "./datastore";
 import { HttpGateway } from "./egress/gateway";
 import { ClawflareSessionStore } from "./session-do";
-import { Workflow, startAgentWorkflow } from "./workflow";
+import { PersistentSessionWorkflow } from "./persistent-workflow";
 import { ClawflareWebSocketSession } from "./ws-session";
 import { createTools } from "./tools";
 import { normalizeBedrockBearerToken } from "./agent-config";
 import { logTiming, timingStart } from "./diagnostics";
-import { getLatestEventCursor, loadSessionState, saveSessionState, getSessionEvents } from "./session-store";
+import {
+  getLatestEventCursor,
+  loadSessionState,
+  saveSessionState,
+  getSessionEvents,
+  enqueueSessionInput,
+  markSessionClosed,
+} from "./session-store";
 import type { Env, AgentSession, ChatSubmittedResponse, SessionResponse, SessionState } from "./types";
-import type { ChatRequest } from "./public-types";
+import type { ChatRequest, SessionListResponse, SessionSummary } from "./public-types";
 
 // Export the Datastore Durable Object class and Workflow
-export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, Workflow, ClawflareWebSocketSession };
+export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
 
 // Export types for clients (from public-types.ts to avoid Workers types)
 export type { 
@@ -25,6 +32,8 @@ export type {
   ChatSubmittedResponse,
   ChatRequest,
   AgentSession,
+  SessionListResponse,
+  SessionSummary,
 } from "./public-types";
 
 // Parse authorization header
@@ -96,6 +105,17 @@ export default {
       return handleGetSession(sessionId, url, env);
     }
 
+    // Session close endpoint - close an active session
+    if (path.startsWith("/v1/session/") && path.endsWith("/close") && request.method === "POST") {
+      const sessionId = path.replace("/v1/session/", "").replace("/close", "");
+      return handleCloseSession(sessionId, env);
+    }
+
+    // Sessions list endpoint - list all sessions
+    if (path === "/v1/sessions" && request.method === "GET") {
+      return handleListSessions(url, env);
+    }
+
     // Context endpoints
     if (path === "/v1/context" && request.method === "GET") {
       return handleGetContext(env);
@@ -127,12 +147,12 @@ export default {
 };
 
 // Handle session-based chat - returns session handle immediately
+// Uses persistent workflow: one workflow per session, stays alive until closed
 async function handleSessionChat(request: Request, env: Env): Promise<Response> {
   const requestStart = timingStart();
   let sessionId: string | undefined;
 
   try {
-    logTiming(env, sessionId, "chat.request.start");
     const body = (await request.json()) as ChatRequest;
     
     if (body.type !== "prompt" || !body.content) {
@@ -146,39 +166,119 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
     logTiming(env, sessionId, "chat.request.parsed", requestStart, {
       hasExistingSession: Boolean(body.sessionId),
       promptLength: body.content.length,
-      maxTurns: body.maxTurns,
-    });
-    
-    const initialEventCursor = await getLatestEventCursor(env, sessionId);
-
-    // Initialize session state for polling
-    const initialState: SessionState = {
-      id: sessionId,
-      status: "processing",
-      messages: [],
-      nextEventCursor: initialEventCursor,
-      updatedAt: Date.now(),
-    };
-    const saveStateStart = timingStart();
-    await saveSessionState(env, initialState);
-    logTiming(env, sessionId, "chat.session_state.saved", saveStateStart);
-
-    // Start the workflow (implementation detail, not exposed to client)
-    const workflowCreateStart = timingStart();
-    await startAgentWorkflow(env, { ...body, sessionId });
-    logTiming(env, sessionId, "chat.workflow.create.returned", workflowCreateStart, {
-      totalRequestElapsedMs: Date.now() - requestStart,
+      action: body.sessionId ? "sendEvent" : "createWorkflow",
     });
 
-    const response: ChatSubmittedResponse = {
-      sessionId,
-      eventCursor: initialState.nextEventCursor,
-    };
+    const existingSession = body.sessionId ? await loadSessionState(env, body.sessionId) : null;
 
-    logTiming(env, sessionId, "chat.response.returning", requestStart);
-    return new Response(JSON.stringify(response), {
-      headers: { "Content-Type": "application/json" },
-    });
+    if (existingSession) {
+      // EXISTING SESSION: Send event to running workflow
+      logTiming(env, sessionId, "chat.sendEvent.start", requestStart);
+
+      if (existingSession.status === "closed" || existingSession.status === "expired") {
+        return new Response(
+          JSON.stringify({ error: "Session closed. Create a new session to continue." }),
+          { status: 410, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Get workflow ID
+      const workflowId = existingSession.workflowId;
+      if (!workflowId) {
+        return new Response(
+          JSON.stringify({ error: "Session has no associated workflow" }),
+          { status: 500, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Queue the event first (for ordering guarantees)
+      const enqueueResult = await enqueueSessionInput(env, sessionId, {
+        type: "prompt",
+        content: body.content,
+        maxTurns: body.maxTurns,
+      });
+
+      if (!enqueueResult.ok) {
+        return new Response(
+          JSON.stringify({ error: enqueueResult.error, queued: enqueueResult.queued }),
+          { status: 429, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      // Send a wake event to trigger the workflow to consume the durable queue.
+      const eventStart = timingStart();
+      const workflowInstance = await env.AGENT_WORKFLOW.get(workflowId);
+      await workflowInstance.sendEvent({
+        type: "session-input",
+        payload: { type: "wake" },
+      });
+      logTiming(env, sessionId, "chat.sendEvent.done", eventStart);
+
+      const response: ChatSubmittedResponse = {
+        sessionId,
+        eventCursor: existingSession.nextEventCursor,
+        isNewSession: false,
+      };
+
+      logTiming(env, sessionId, "chat.response.returning", requestStart);
+      return new Response(JSON.stringify(response), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } else {
+      // NEW SESSION: Create persistent workflow
+      logTiming(env, sessionId, "chat.workflow.create.start", requestStart);
+
+      const initialEventCursor = await getLatestEventCursor(env, sessionId);
+      const workflowId = crypto.randomUUID();
+
+      // Initialize session state
+      const initialState: SessionState = {
+        id: sessionId,
+        workflowId,
+        status: "processing",  // Start as processing, workflow will set to idle when done
+        messages: [],
+        nextEventCursor: initialEventCursor,
+        updatedAt: Date.now(),
+        maxQueueSize: 100,
+        idleTimeout: "7 days",
+      };
+      await saveSessionState(env, initialState);
+      logTiming(env, sessionId, "chat.session_state.saved", requestStart);
+
+      // Create persistent workflow
+      await env.AGENT_WORKFLOW.create({
+        id: workflowId,
+        params: { sessionId },
+      });
+      logTiming(env, sessionId, "chat.workflow.create.done", requestStart);
+
+      // Queue the event before waking the workflow so the workflow has a
+      // durable source of truth even if the wake event arrives while it is not
+      // yet waiting for input.
+      await enqueueSessionInput(env, sessionId, {
+        type: "prompt",
+        content: body.content,
+        maxTurns: body.maxTurns,
+      });
+
+      // Get workflow instance and wake it to consume the queued prompt.
+      const workflowInstance = await env.AGENT_WORKFLOW.get(workflowId);
+      await workflowInstance.sendEvent({
+        type: "session-input",
+        payload: { type: "wake" },
+      });
+
+      const response: ChatSubmittedResponse = {
+        sessionId,
+        eventCursor: initialState.nextEventCursor,
+        isNewSession: true,
+      };
+
+      logTiming(env, sessionId, "chat.response.returning", requestStart);
+      return new Response(JSON.stringify(response), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   } catch (error) {
     logTiming(env, sessionId, "chat.request.error", requestStart, {
       error: error instanceof Error ? error.message : String(error),
@@ -248,6 +348,107 @@ async function handleGetSession(
       error: error instanceof Error ? error.message : String(error),
     });
     console.error("[handleGetSession] Error:", error);
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// Close a session - sends close event to workflow
+async function handleCloseSession(sessionId: string, env: Env): Promise<Response> {
+  try {
+    const session = await loadSessionState(env, sessionId);
+    if (!session) {
+      return new Response(
+        JSON.stringify({ error: "Session not found" }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (session.status === "closed" || session.status === "expired") {
+      return new Response(
+        JSON.stringify({ error: "Session already closed" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!session.workflowId) {
+      return new Response(
+        JSON.stringify({ error: "Session has no associated workflow" }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    await enqueueSessionInput(env, sessionId, { type: "close" });
+
+    // Get workflow instance and wake it to consume the queued close event.
+    const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
+    await workflowInstance.sendEvent({
+      type: "session-input",
+      payload: { type: "wake" },
+    });
+
+    // Mark session as closed immediately (workflow will also set this, but we set it here for immediate UI feedback)
+    await markSessionClosed(env, sessionId, "user");
+
+    return new Response(JSON.stringify({ ok: true, sessionId, status: "closed" }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    console.error("[handleCloseSession] Error:", error);
+    return new Response(
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
+  }
+}
+
+// List sessions - returns active and recent sessions
+async function handleListSessions(url: URL, env: Env): Promise<Response> {
+  try {
+    // Read optional status filter
+    const statusFilter = url.searchParams.get("status"); // "active", "idle", "closed", "expired", "error", or null for all
+    
+    // NOTE: Listing all sessions requires scanning DOs which is expensive.
+    // In production, you'd want to maintain an index (e.g., in KV or separate DO).
+    // For now, this is a scaffold that returns a note about implementation.
+    
+    // Placeholder: In a production implementation, you'd:
+    // 1. Have a SessionsIndex DO that tracks all sessions
+    // 2. Query that by status
+    // 3. Return paginated results
+    
+    const response: SessionListResponse = {
+      sessions: [], // Would be populated from sessions index
+      total: 0,
+    };
+    
+    // If specific session ID provided, return that one
+    const sessionId = url.searchParams.get("sessionId");
+    if (sessionId) {
+      const state = await loadSessionState(env, sessionId);
+      if (state) {
+        const summary: SessionSummary = {
+          id: state.id,
+          workflowId: state.workflowId,
+          status: state.status,
+          messageCount: state.messages.length,
+          updatedAt: state.updatedAt,
+          isActive: state.status === "idle" || state.status === "processing",
+        };
+        if (!statusFilter || statusFilter === "all" || state.status === statusFilter) {
+          response.sessions.push(summary);
+          response.total = 1;
+        }
+      }
+    }
+
+    return new Response(JSON.stringify(response), {
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (error) {
+    console.error("[handleListSessions] Error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { "Content-Type": "application/json" } }
