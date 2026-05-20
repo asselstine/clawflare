@@ -1,321 +1,184 @@
-// Clawflare Datastore - SQLite-backed Durable Object
-// Stores code, egress handlers, and other indexed data
-
 import { DurableObject } from "cloudflare:workers";
-import type { Env } from "./types";
+import type { Env, StoredCodeEntry, EgressHandlerMetadata, Datastore } from "./internal-types/index.js";
 
-export interface StoredCode {
-  name: string;
-  description: string;
-  code: string;
-  createdAt: number;
-  updatedAt: number;
-}
+const CODE_PREFIX = "code:";
+const EGRESS_PREFIX = "egress:";
 
-export interface EgressHandlerMetadata {
-  name: string;
-  packageName: string;
-  description: string;
-  enabled: boolean;
-  domains: string[];
-  config?: unknown;
-  createdAt: number;
-  updatedAt: number;
+/**
+ * Get a datastore client for the given environment
+ */
+export function getDatastore(env: Env): Datastore {
+  const id = env.DATASTORE.idFromName("default");
+  const stub = env.DATASTORE.get(id);
+  return new DatastoreClient(stub);
 }
 
 export class ClawflareDatastore extends DurableObject<Env> {
-  private sql: SqlStorage;
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const path = url.pathname.replace(/^\//, "");
 
-  constructor(ctx: DurableObjectState<Env>, env: Env) {
-    super(ctx, env);
-    this.sql = ctx.storage.sql;
-    this.initSchema();
-    this.seedDefaultEgressHandlers();
-  }
-
-  private initSchema(): void {
-    // Stored code table
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS stored_code (
-        name TEXT PRIMARY KEY,
-        description TEXT,
-        code TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `);
-
-    // Egress handlers table
-    this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS egress_handlers (
-        name TEXT PRIMARY KEY,
-        package_name TEXT NOT NULL,
-        description TEXT,
-        enabled INTEGER NOT NULL DEFAULT 1,
-        domains_json TEXT NOT NULL,
-        config_json TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `);
-  }
-
-  private seedDefaultEgressHandlers(): void {
-    const now = Date.now();
-    const defaults = [
-      {
-        name: "github",
-        packageName: "@clawflare/github",
-        description: "GitHub API and content access",
-        domains: ["api.github.com", "github.com", "raw.githubusercontent.com"],
-      },
-      {
-        name: "cloudflare",
-        packageName: "@clawflare/cloudflare",
-        description: "Cloudflare REST API access",
-        domains: ["api.cloudflare.com"],
-      },
-    ];
-
-    for (const handler of defaults) {
-      const existing = firstRow(this.sql.exec(
-        "SELECT name FROM egress_handlers WHERE name = ?",
-        handler.name
-      ));
-      if (existing) continue;
-
-      this.sql.exec(
-        `INSERT INTO egress_handlers
-         (name, package_name, description, enabled, domains_json, config_json, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, NULL, ?, ?)`,
-        handler.name,
-        handler.packageName,
-        handler.description,
-        JSON.stringify(handler.domains),
-        now,
-        now
-      );
+    if (request.method === "POST" && path === "store-code") {
+      return this.storeCode(request);
     }
-  }
-
-  // Stored Code Operations
-  async upsertStoredCode(code: Omit<StoredCode, "createdAt" | "updatedAt">): Promise<StoredCode> {
-    const now = Date.now();
-    const existing = firstRow(this.sql.exec(
-      "SELECT created_at FROM stored_code WHERE name = ?",
-      code.name
-    ));
-
-    const createdAt = existing ? Number(existing.created_at) : now;
-
-    this.sql.exec(
-      `INSERT OR REPLACE INTO stored_code (name, description, code, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?)`,
-      code.name,
-      code.description || "",
-      code.code,
-      createdAt,
-      now
-    );
-
-    return {
-      ...code,
-      createdAt,
-      updatedAt: now,
-    };
-  }
-
-  async getStoredCode(name: string): Promise<StoredCode | null> {
-    const row = firstRow(this.sql.exec(
-      "SELECT name, description, code, created_at, updated_at FROM stored_code WHERE name = ?",
-      name
-    ));
-
-    if (!row) return null;
-
-    return {
-      name: String(row.name),
-      description: String(row.description),
-      code: String(row.code),
-      createdAt: Number(row.created_at),
-      updatedAt: Number(row.updated_at),
-    };
-  }
-
-  async searchStoredCode(query?: string, limit = 20): Promise<Array<Omit<StoredCode, "code">>> {
-    let rows;
-
-    if (query) {
-      const pattern = `%${query}%`;
-      rows = this.sql.exec(
-        `SELECT name, description, created_at, updated_at 
-         FROM stored_code 
-         WHERE name LIKE ? OR description LIKE ?
-         ORDER BY updated_at DESC
-         LIMIT ?`,
-        pattern,
-        pattern,
-        limit
-      );
-    } else {
-      rows = this.sql.exec(
-        `SELECT name, description, created_at, updated_at 
-         FROM stored_code 
-         ORDER BY updated_at DESC
-         LIMIT ?`,
-        limit
-      );
+    if (request.method === "GET" && path === "get-code") {
+      const name = url.searchParams.get("name");
+      if (!name) return new Response(JSON.stringify({ error: "name required" }), { status: 400 });
+      return this.getCode(name);
+    }
+    if (request.method === "GET" && path === "list-code") {
+      return this.listCode();
+    }
+    if (request.method === "POST" && path === "store-egress") {
+      return this.storeEgress(request);
+    }
+    if (request.method === "GET" && path === "get-egress") {
+      const name = url.searchParams.get("name");
+      if (!name) return new Response(JSON.stringify({ error: "name required" }), { status: 400 });
+      return this.getEgress(name);
+    }
+    if (request.method === "GET" && path === "list-egress") {
+      return this.listEgress();
+    }
+    if (request.method === "GET" && path === "search") {
+      const query = url.searchParams.get("q") || "";
+      return this.search(query);
     }
 
-    return Array.from(rows).map((row: unknown) => ({
-      name: String((row as { name: unknown }).name),
-      description: String((row as { description: unknown }).description),
-      code: "", // Not returned in search to save tokens
-      createdAt: Number((row as { created_at: unknown }).created_at),
-      updatedAt: Number((row as { updated_at: unknown }).updated_at),
+    return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+  }
+
+  private async storeCode(request: Request): Promise<Response> {
+    const body = await request.json<{ name: string; code: string; description?: string; tags?: string[] }>();
+    const entry: StoredCodeEntry = {
+      name: body.name,
+      code: body.code,
+      description: body.description,
+      tags: body.tags,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await this.ctx.storage.put(`${CODE_PREFIX}${body.name}`, entry);
+    return new Response(JSON.stringify({ ok: true }));
+  }
+
+  private async getCode(name: string): Promise<Response> {
+    const entry = await this.ctx.storage.get<StoredCodeEntry>(`${CODE_PREFIX}${name}`);
+    if (!entry) {
+      return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+    }
+    return new Response(JSON.stringify(entry));
+  }
+
+  private async listCode(): Promise<Response> {
+    const list = await this.ctx.storage.list<StoredCodeEntry>({ prefix: CODE_PREFIX });
+    const entries = Array.from(list.values());
+    return new Response(JSON.stringify({ entries }));
+  }
+
+  private async storeEgress(request: Request): Promise<Response> {
+    const body = await request.json<EgressHandlerMetadata>();
+    await this.ctx.storage.put(`${EGRESS_PREFIX}${body.name}`, body);
+    return new Response(JSON.stringify({ ok: true }));
+  }
+
+  private async getEgress(name: string): Promise<Response> {
+    const entry = await this.ctx.storage.get<EgressHandlerMetadata>(`${EGRESS_PREFIX}${name}`);
+    if (!entry) {
+      return new Response(JSON.stringify({ error: "Not found" }), { status: 404 });
+    }
+    return new Response(JSON.stringify(entry));
+  }
+
+  private async listEgress(): Promise<Response> {
+    const list = await this.ctx.storage.list<EgressHandlerMetadata>({ prefix: EGRESS_PREFIX });
+    const entries = Array.from(list.values());
+    return new Response(JSON.stringify({ entries }));
+  }
+
+  private async search(query: string): Promise<Response> {
+    const codeList = await this.ctx.storage.list<StoredCodeEntry>({ prefix: CODE_PREFIX });
+    const egressList = await this.ctx.storage.list<EgressHandlerMetadata>({ prefix: EGRESS_PREFIX });
+
+    const q = query.toLowerCase();
+    const results: unknown[] = [];
+
+    for (const [_key, entry] of codeList) {
+      if (entry.name.toLowerCase().includes(q) ||
+          entry.description?.toLowerCase().includes(q) ||
+          entry.tags?.some(t => t.toLowerCase().includes(q))) {
+        results.push({ type: "code", ...entry });
+      }
+    }
+
+    for (const [_key, entry] of egressList) {
+      if (entry.name.toLowerCase().includes(q) ||
+          entry.description.toLowerCase().includes(q) ||
+          entry.domains.some(d => d.toLowerCase().includes(q))) {
+        results.push({ type: "egress", ...entry });
+      }
+    }
+
+    return new Response(JSON.stringify({ results }));
+  }
+}
+
+/**
+ * Client for datastore operations
+ */
+class DatastoreClient implements Datastore {
+  constructor(private stub: DurableObjectStub) {}
+
+  async upsertStoredCode(entry: { name: string; code: string; description?: string; tags?: string[] }): Promise<void> {
+    await this.stub.fetch("https://datastore/store-code", {
+      method: "POST",
+      body: JSON.stringify(entry),
+    });
+  }
+
+  async getStoredCode(name: string): Promise<{ name: string; code: string; description?: string; tags?: string[]; createdAt: number; updatedAt: number } | null> {
+    const response = await this.stub.fetch(`https://datastore/get-code?name=${encodeURIComponent(name)}`);
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Failed to get code: ${response.status}`);
+    return response.json();
+  }
+
+  async listEgressHandlers(enabledOnly: boolean): Promise<{ name: string; description: string; domains: string[]; enabled: boolean; config: unknown }[]> {
+    const response = await this.stub.fetch("https://datastore/list-egress");
+    if (!response.ok) throw new Error(`Failed to list egress handlers: ${response.status}`);
+    const data = await response.json() as { entries: { name: string; description: string; domains: string[]; enabled?: boolean; config?: unknown }[] };
+    return data.entries.map(e => ({
+      name: e.name,
+      description: e.description,
+      domains: e.domains,
+      enabled: enabledOnly ? (e.enabled ?? true) : (e.enabled ?? true),
+      config: e.config ?? {},
     }));
   }
 
-  // Egress Handler Operations
-  async upsertEgressHandler(handler: Omit<EgressHandlerMetadata, "createdAt" | "updatedAt">): Promise<EgressHandlerMetadata> {
-    const now = Date.now();
-    const existing = firstRow(this.sql.exec(
-      "SELECT created_at FROM egress_handlers WHERE name = ?",
-      handler.name
-    ));
-
-    const createdAt = existing ? Number(existing.created_at) : now;
-
-    this.sql.exec(
-      `INSERT OR REPLACE INTO egress_handlers 
-       (name, package_name, description, enabled, domains_json, config_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      handler.name,
-      handler.packageName,
-      handler.description || "",
-      handler.enabled ? 1 : 0,
-      JSON.stringify(handler.domains),
-      handler.config ? JSON.stringify(handler.config) : null,
-      createdAt,
-      now
-    );
-
-    return {
-      ...handler,
-      createdAt,
-      updatedAt: now,
-    };
-  }
-
-  async getEgressHandler(name: string): Promise<EgressHandlerMetadata | null> {
-    const row = firstRow(this.sql.exec(
-      "SELECT * FROM egress_handlers WHERE name = ?",
-      name
-    ));
-
-    if (!row) return null;
-
-    return {
-      name: String(row.name),
-      packageName: String(row.package_name),
-      description: String(row.description),
-      enabled: Number(row.enabled) === 1,
-      domains: JSON.parse(String(row.domains_json)) as string[],
-      config: row.config_json ? JSON.parse(String(row.config_json)) : undefined,
-      createdAt: Number(row.created_at),
-      updatedAt: Number(row.updated_at),
-    };
-  }
-
-  async listEgressHandlers(enabledOnly = false): Promise<EgressHandlerMetadata[]> {
-    let query = "SELECT * FROM egress_handlers";
-    if (enabledOnly) {
-      query += " WHERE enabled = 1";
-    }
-    query += " ORDER BY name";
-
-    const rows = this.sql.exec(query);
-
-    return Array.from(rows).map((row: unknown) => ({
-      name: String((row as { name: unknown }).name),
-      packageName: String((row as { package_name: unknown }).package_name),
-      description: String((row as { description: unknown }).description),
-      enabled: Number((row as { enabled: unknown }).enabled) === 1,
-      domains: JSON.parse(String((row as { domains_json: unknown }).domains_json)) as string[],
-      config: (row as { config_json: unknown }).config_json ? JSON.parse(String((row as { config_json: unknown }).config_json)) : undefined,
-      createdAt: Number((row as { created_at: unknown }).created_at),
-      updatedAt: Number((row as { updated_at: unknown }).updated_at),
-    }));
-  }
-
-  async searchEgressHandlers(query?: string, limit = 20): Promise<EgressHandlerMetadata[]> {
-    let rows;
-
-    if (query) {
-      const pattern = `%${query}%`;
-      rows = this.sql.exec(
-        `SELECT * FROM egress_handlers 
-         WHERE name LIKE ? OR description LIKE ? OR domains_json LIKE ?
-         ORDER BY name
-         LIMIT ?`,
-        pattern,
-        pattern,
-        pattern,
-        limit
-      );
-    } else {
-      rows = this.sql.exec(
-        `SELECT * FROM egress_handlers ORDER BY name LIMIT ?`,
-        limit
-      );
-    }
-
-    return Array.from(rows).map((row: unknown) => ({
-      name: String((row as { name: unknown }).name),
-      packageName: String((row as { package_name: unknown }).package_name),
-      description: String((row as { description: unknown }).description),
-      enabled: Number((row as { enabled: unknown }).enabled) === 1,
-      domains: JSON.parse(String((row as { domains_json: unknown }).domains_json)) as string[],
-      config: (row as { config_json: unknown }).config_json ? JSON.parse(String((row as { config_json: unknown }).config_json)) : undefined,
-      createdAt: Number((row as { created_at: unknown }).created_at),
-      updatedAt: Number((row as { updated_at: unknown }).updated_at),
-    }));
-  }
-
-  // Generic search across collections
-  async search(
-    collection: "stored_code" | "egress_handlers" | "all",
-    query?: string,
-    limit = 20
-  ): Promise<{
-    storedCode: Array<Omit<StoredCode, "code">>;
-    egressHandlers: EgressHandlerMetadata[];
+  async search(collection: string, query: string, limit: number): Promise<{
+    storedCode: { name: string; code: string; description?: string; tags?: string[]; createdAt: number; updatedAt: number }[];
+    egressHandlers: { name: string; description: string; domains: string[]; enabled: boolean; config: unknown }[];
   }> {
-    const result = {
-      storedCode: [] as Array<Omit<StoredCode, "code">>,
-      egressHandlers: [] as EgressHandlerMetadata[],
-    };
-
-    if (collection === "stored_code" || collection === "all") {
-      result.storedCode = await this.searchStoredCode(query, limit);
+    const response = await this.stub.fetch(`https://datastore/search?q=${encodeURIComponent(query)}&collection=${encodeURIComponent(collection)}&limit=${limit}`);
+    if (!response.ok) throw new Error(`Failed to search: ${response.status}`);
+    const data = await response.json() as { results: unknown[] };
+    const storedCode: { name: string; code: string; description?: string; tags?: string[]; createdAt: number; updatedAt: number }[] = [];
+    const egressHandlers: { name: string; description: string; domains: string[]; enabled: boolean; config: unknown }[] = [];
+    for (const item of data.results) {
+      const typed = item as { type: string; name: string };
+      if (typed.type === "code") {
+        storedCode.push(item as typeof storedCode[number]);
+      } else if (typed.type === "egress") {
+        egressHandlers.push({
+          name: (item as { name: string }).name,
+          description: (item as { description?: string }).description ?? "",
+          domains: (item as { domains: string[] }).domains,
+          enabled: (item as { enabled?: boolean }).enabled ?? true,
+          config: (item as { config?: unknown }).config ?? {},
+        });
+      }
     }
-
-    if (collection === "egress_handlers" || collection === "all") {
-      result.egressHandlers = await this.searchEgressHandlers(query, limit);
-    }
-
-    return result;
+    return { storedCode, egressHandlers };
   }
-}
-
-function firstRow(rows: Iterable<unknown>): Record<string, unknown> | null {
-  const iterator = rows[Symbol.iterator]();
-  const next = iterator.next();
-  return next.done ? null : (next.value as Record<string, unknown>);
-}
-
-// Helper to get datastore instance
-export function getDatastore(env: { DATASTORE: DurableObjectNamespace }): ClawflareDatastore {
-  const id = env.DATASTORE.idFromName("global");
-  return env.DATASTORE.get(id) as unknown as ClawflareDatastore;
 }

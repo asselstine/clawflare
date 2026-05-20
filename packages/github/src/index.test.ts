@@ -23,7 +23,7 @@ describe("github egress handler", () => {
       const handler = registry.get("github");
       assert.ok(handler);
       assert.strictEqual(handler.name, "github");
-      assert.strictEqual(handler.description, "GitHub API and content access");
+      assert.strictEqual(handler.description.startsWith("GitHub API and content access"), true);
     });
 
     it("should register with correct domains", () => {

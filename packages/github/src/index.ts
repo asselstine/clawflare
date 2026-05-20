@@ -9,7 +9,7 @@ const domains = ["api.github.com", "github.com", "raw.githubusercontent.com"];
 
 const githubHandler: EgressHandler<GithubEnv> = {
   name: "github",
-  description: "GitHub API and content access",
+  description: "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers when GITHUB_TOKEN is configured",
   domains,
 
   handles(request: Request): boolean {

@@ -11,12 +11,14 @@ import {
   Editor,
   Loader,
   Markdown,
-  CombinedAutocompleteProvider,
   matchesKey,
   type Component,
   type Focusable,
   type EditorTheme,
   type MarkdownTheme,
+  type AutocompleteProvider,
+  type AutocompleteItem,
+  type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 import type { AgentClient, AgentMessage, ContextInfo, ToolInfo, ServerInfo, SessionResponse, SessionEvent } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
@@ -111,6 +113,16 @@ function getEventDisplayMessage(event: SessionEvent): string {
 // Helper to create Text with 0 padding
 function createText(content: string): Text {
   return new Text(content, 0, 0);
+}
+
+// Helper to create Markdown component for assistant messages
+function createMarkdown(content: string, theme: MarkdownTheme): Markdown {
+  // Default text style: white text on transparent background
+  const defaultStyle = {
+    color: (text: string) => chalk.white(text),
+  };
+  // paddingX: 2 (to align with the "🤖 " prefix), paddingY: 0
+  return new Markdown(content, 2, 0, theme, defaultStyle);
 }
 
 type DisplayMessageRole = "user" | "assistant" | "toolResult" | "error";
@@ -217,9 +229,54 @@ export class ClawflareTUIApp {
       paddingX: 1,
     });
 
-    // Set up autocomplete with slash commands
-    const autocomplete = new CombinedAutocompleteProvider(slashCommands, process.cwd());
-    this.editor.setAutocompleteProvider(autocomplete);
+    // Set up slash command autocomplete provider
+    const slashCommandAutocomplete: AutocompleteProvider = {
+      getSuggestions: async (lines: string[], cursorLine: number, cursorCol: number, options: { signal: AbortSignal }): Promise<AutocompleteSuggestions | null> => {
+        const currentLine = lines[cursorLine] ?? "";
+        const textBeforeCursor = currentLine.slice(0, cursorCol);
+        
+        // Only trigger on slash at start of line
+        if (!textBeforeCursor.startsWith("/")) {
+          return null;
+        }
+        
+        const query = textBeforeCursor.slice(1).toLowerCase();
+        const matched = slashCommands.filter(cmd => 
+          cmd.name.toLowerCase().startsWith(query) || cmd.name.toLowerCase().includes(query)
+        );
+        
+        if (matched.length === 0) {
+          return null;
+        }
+        
+        const items: AutocompleteItem[] = matched.map(cmd => ({
+          value: `/${cmd.name} `,
+          label: `/${cmd.name}`,
+          description: cmd.description,
+        }));
+        
+        return {
+          items,
+          prefix: textBeforeCursor,
+        };
+      },
+      
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      applyCompletion: (lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, prefix: string) => {
+        const currentLine = lines[cursorLine] ?? "";
+        const beforeCursor = currentLine.slice(0, cursorCol - prefix.length);
+        const afterCursor = currentLine.slice(cursorCol);
+        const newLine = beforeCursor + item.value + afterCursor;
+        const newLines = [...lines];
+        newLines[cursorLine] = newLine;
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: beforeCursor.length + item.value.length,
+        };
+      },
+    };
+    this.editor.setAutocompleteProvider(slashCommandAutocomplete);
 
     // Handle submissions
     this.editor.onSubmit = (value: string) => this.handleSubmit(value);
@@ -243,22 +300,8 @@ export class ClawflareTUIApp {
         return { consume: true };
       }
       // Only handle up/down for message navigation when autocomplete is not showing
-      if (matchesKey(data, "up")) {
-        if (this.editor.isShowingAutocomplete()) {
-          // Let the Editor handle up arrow for autocomplete navigation
-          return undefined;
-        }
-        this.selectPreviousMessage();
-        return { consume: true };
-      }
-      if (matchesKey(data, "down")) {
-        if (this.editor.isShowingAutocomplete()) {
-          // Let the Editor handle down arrow for autocomplete navigation
-          return undefined;
-        }
-        this.selectNextMessage();
-        return { consume: true };
-      }
+    // Up/Down arrows are handled by the Editor for prompt history
+    // Do not intercept them here
       return undefined;
     });
 
@@ -395,35 +438,46 @@ export class ClawflareTUIApp {
     for (let i = 0; i < this.messages.length; i++) {
       const msg = this.messages[i]!;
       const isSelected = i === this.selectedMessageIndex;
-      const prefix =
-        msg.role === "user" ? "❱ " :
-        msg.role === "assistant" ? "🤖 " :
-        msg.role === "toolResult" ? (msg.isError ? "❌ " : "🔧 ") :
-        "⚠ ";
-      const colorFn =
-        msg.role === "user" ? theme.user :
-        msg.role === "assistant" ? theme.assistant :
-        msg.role === "toolResult" ? (msg.isError ? theme.error : theme.dim) :
-        theme.error;
 
       // Show full content if selected+expanded, otherwise truncate
       let displayContent = msg.content;
-      const maxLen = 500;
+      // Higher limit for assistant messages with markdown (they may contain tables)
+      const maxLen = msg.role === "assistant" ? 8000 : 500;
       const wasTruncated = displayContent.length > maxLen;
       const isExpanded = isSelected && msg.expanded;
       
       if (wasTruncated && !isExpanded) {
-        displayContent = displayContent.substring(0, maxLen) + "\n" + theme.dim("(truncated, press Ctrl+O to expand)");
+        // Try to truncate at a line boundary to avoid breaking tables
+        let truncateAt = maxLen;
+        const nextNewline = displayContent.indexOf("\n", maxLen - 100);
+        if (nextNewline !== -1 && nextNewline < maxLen + 200) {
+          truncateAt = nextNewline;
+        }
+        displayContent = displayContent.substring(0, truncateAt) + "\n" + theme.dim("... (truncated, press Ctrl+O to expand)");
       }
 
       // Add selection indicator if selected
       const indicator = isSelected ? theme.accent("▶ ") : "  ";
 
-      // Use full-width block with background for user messages, plain text for others
+      // Use full-width block with background for user messages
       if (msg.role === "user") {
-        this.messageContainer.addChild(createUserBlock(colorFn(indicator + prefix + displayContent)));
-      } else {
+        const prefix = "❱ ";
+        this.messageContainer.addChild(createUserBlock(theme.user(indicator + prefix + displayContent)));
+      } else if (msg.role === "assistant") {
+        // Use Markdown component for assistant messages with proper formatting
+        const prefix = indicator + "🤖 ";
+        // Add the prefix as a plain text line, then the markdown content
+        if (prefix.trim()) {
+          this.messageContainer.addChild(createText(prefix));
+        }
+        this.messageContainer.addChild(createMarkdown(displayContent, markdownTheme));
+      } else if (msg.role === "toolResult") {
+        const prefix = msg.isError ? "❌ " : "🔧 ";
+        const colorFn = msg.isError ? theme.error : theme.dim;
         this.messageContainer.addChild(createText(colorFn(indicator + prefix + displayContent)));
+      } else {
+        // error role
+        this.messageContainer.addChild(createText(theme.error(indicator + "⚠ " + displayContent)));
       }
     }
 
@@ -870,9 +924,10 @@ Ctrl+O - Expand/collapse selected message`,
 
   start(): void {
     // Start periodic render to catch async state changes
+    // Reduced to 500ms to minimize full redraw triggers
     this.renderInterval = setInterval(() => {
       this.tui.requestRender();
-    }, 100);
+    }, 500);
     this.tui.start();
   }
 

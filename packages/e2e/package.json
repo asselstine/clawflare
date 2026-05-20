@@ -8,6 +8,7 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "node --import=tsx src/index.ts",
+    "test:cloudflare": "node --import=tsx src/cloudflare-egress.test.ts",
     "deploy": "cd ../harness && npx wrangler deploy",
     "dev": "cd ../harness && npx wrangler dev",
     "clean": "rm -f src/index.js tsconfig.tsbuildinfo"

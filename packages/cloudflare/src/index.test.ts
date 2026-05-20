@@ -23,7 +23,7 @@ describe("cloudflare egress handler", () => {
       const handler = registry.get("cloudflare");
       assert.ok(handler);
       assert.strictEqual(handler.name, "cloudflare");
-      assert.strictEqual(handler.description, "Cloudflare REST API access");
+      assert.strictEqual(handler.description.startsWith("Cloudflare REST API access"), true);
     });
 
     it("should register with correct domains", () => {

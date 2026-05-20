@@ -1,14 +1,14 @@
 // Clawflare Harness - Main Worker Entry Point
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
-import { ClawflareDatastore } from "./datastore";
-import { HttpGateway } from "./egress/gateway";
-import { ClawflareSessionStore } from "./session-do";
-import { PersistentSessionWorkflow } from "./persistent-workflow";
-import { ClawflareWebSocketSession } from "./ws-session";
-import { createTools } from "./tools";
-import { normalizeBedrockBearerToken } from "./agent-config";
-import { logTiming, timingStart } from "./diagnostics";
+import { ClawflareDatastore } from "./datastore.js";
+import { HttpGateway } from "./egress/gateway.js";
+import { ClawflareSessionStore } from "./session-do.js";
+import { PersistentSessionWorkflow } from "./persistent-workflow.js";
+import { ClawflareWebSocketSession } from "./ws-session.js";
+import { createTools } from "./tools/index.js";
+import { normalizeBedrockBearerToken } from "./agent-config.js";
+import { logTiming, timingStart } from "./diagnostics.js";
 import {
   getLatestEventCursor,
   loadSessionState,
@@ -16,25 +16,31 @@ import {
   getSessionEvents,
   enqueueSessionInput,
   markSessionClosed,
-} from "./session-store";
-import type { Env, AgentSession, ChatSubmittedResponse, SessionResponse, SessionState } from "./types";
-import type { ChatRequest, SessionListResponse, SessionSummary } from "./public-types";
+} from "./session-store.js";
+import type { Env, SessionMetadataState, SessionInputEvent } from "./internal-types/index.js";
+import type {
+  AgentSession,
+  ChatSubmittedResponse,
+  ChatRequest,
+  SessionResponse,
+  SessionSummary,
+  SessionListResponse,
+} from "./types.js";
+
+// Export types for clients (public types only)
+export type {
+  AgentMessage,
+  AgentSession,
+  ChatSubmittedResponse,
+  ChatRequest,
+  SessionResponse,
+  SessionSummary,
+  SessionListResponse,
+  SessionEvent,
+} from "./types.js";
 
 // Export the Datastore Durable Object class and Workflow
 export { ClawflareDatastore, HttpGateway, ClawflareSessionStore, PersistentSessionWorkflow, ClawflareWebSocketSession };
-
-// Export types for clients (from public-types.ts to avoid Workers types)
-export type { 
-  AgentMessage,
-  SessionEvent,
-  SessionState,
-  SessionResponse,
-  ChatSubmittedResponse,
-  ChatRequest,
-  AgentSession,
-  SessionListResponse,
-  SessionSummary,
-} from "./public-types";
 
 // Parse authorization header
 function getToken(request: Request): string | null {
@@ -67,7 +73,7 @@ export default {
     if (!isSessionPoll) {
       console.log(`[REQUEST] ${request.method} ${request.url}`);
     }
-    
+
     // Validate API_TOKEN is configured
     if (!env.CLAWFLARE_API_TOKEN || env.CLAWFLARE_API_TOKEN.trim() === "") {
       console.error("[ERROR] CLAWFLARE_API_TOKEN not configured");
@@ -118,11 +124,11 @@ export default {
 
     // Context endpoints
     if (path === "/v1/context" && request.method === "GET") {
-      return handleGetContext(env);
+      return handleGetContext();
     }
 
     if (path === "/v1/context" && request.method === "POST") {
-      return handleNewContext(request, env);
+      return handleNewContext(request);
     }
 
     if (path === "/v1/tools" && request.method === "GET") {
@@ -154,7 +160,7 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
 
   try {
     const body = (await request.json()) as ChatRequest;
-    
+
     if (body.type !== "prompt" || !body.content) {
       return new Response(
         JSON.stringify({ error: "Invalid request. type='prompt' and content required" }),
@@ -243,11 +249,10 @@ async function handleSessionChat(request: Request, env: Env): Promise<Response> 
       const workflowId = crypto.randomUUID();
 
       // Initialize session state
-      const initialState: SessionState = {
+      const initialState: SessionMetadataState = {
         id: sessionId,
         workflowId,
-        status: "processing",  // Start as processing, workflow will set to idle when done
-        messages: [],
+        status: "processing",
         nextEventCursor: initialEventCursor,
         updatedAt: Date.now(),
         maxQueueSize: 100,
@@ -325,6 +330,18 @@ async function handleGetSession(
 
     // Get events since cursor
     const sinceCursor = url.searchParams.get("since");
+
+    // Check if session has been processing for too long (auto-recovery for stuck workflows)
+    const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+    if (sessionState.status === "processing" &&
+        Date.now() - sessionState.updatedAt > PROCESSING_TIMEOUT_MS) {
+      console.warn(`[handleGetSession] Session ${sessionId} stuck in processing for ${Date.now() - sessionState.updatedAt}ms, marking as error`);
+      sessionState.status = "error";
+      sessionState.errorMessage = "Session timed out - processing took too long. Try closing this session and starting a new one.";
+      sessionState.updatedAt = Date.now();
+      await saveSessionState(env, sessionState);
+    }
+
     const eventsStart = timingStart();
     const { events, nextCursor } = await getSessionEvents(
       env,
@@ -335,17 +352,18 @@ async function handleGetSession(
 
     logTiming(env, sessionId, "session.poll", pollStart, {
       status: sessionState.status,
-      messageCount: sessionState.messages.length,
+      messageCount: 0,
       eventCount: events.length,
       sinceCursor,
       loadStateMs: eventsStart - loadStateStart,
       getEventsMs: Date.now() - eventsStart,
     });
 
+    // Assemble public SessionResponse
     const response: SessionResponse = {
       id: sessionState.id,
       status: sessionState.status,
-      messages: sessionState.messages,
+      messages: [],
       events,
       nextEventCursor: nextCursor,
       errorMessage: sessionState.errorMessage,
@@ -391,7 +409,8 @@ async function handleCloseSession(sessionId: string, env: Env): Promise<Response
       );
     }
 
-    await enqueueSessionInput(env, sessionId, { type: "close" });
+    const inputEvent: SessionInputEvent = { type: "close" };
+    await enqueueSessionInput(env, sessionId, inputEvent);
 
     // Get workflow instance and wake it to consume the queued close event.
     const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
@@ -419,22 +438,13 @@ async function handleCloseSession(sessionId: string, env: Env): Promise<Response
 async function handleListSessions(url: URL, env: Env): Promise<Response> {
   try {
     // Read optional status filter
-    const statusFilter = url.searchParams.get("status"); // "active", "idle", "closed", "expired", "error", or null for all
-    
-    // NOTE: Listing all sessions requires scanning DOs which is expensive.
-    // In production, you'd want to maintain an index (e.g., in KV or separate DO).
-    // For now, this is a scaffold that returns a note about implementation.
-    
-    // Placeholder: In a production implementation, you'd:
-    // 1. Have a SessionsIndex DO that tracks all sessions
-    // 2. Query that by status
-    // 3. Return paginated results
-    
+    const statusFilter = url.searchParams.get("status");
+
     const response: SessionListResponse = {
-      sessions: [], // Would be populated from sessions index
+      sessions: [],
       total: 0,
     };
-    
+
     // If specific session ID provided, return that one
     const sessionId = url.searchParams.get("sessionId");
     if (sessionId) {
@@ -444,7 +454,7 @@ async function handleListSessions(url: URL, env: Env): Promise<Response> {
           id: state.id,
           workflowId: state.workflowId,
           status: state.status,
-          messageCount: state.messages.length,
+          messageCount: 0,
           updatedAt: state.updatedAt,
           isActive: state.status === "idle" || state.status === "processing",
         };
@@ -468,42 +478,39 @@ async function handleListSessions(url: URL, env: Env): Promise<Response> {
 }
 
 // Handle get context - read from the strongly consistent session Durable Object.
-async function handleGetContext(env: Env): Promise<Response> {
+async function handleGetContext(): Promise<Response> {
   try {
-    const context = await loadContext(env, "main") || {
+    const context: AgentSession = {
       id: "main",
       messages: [],
       createdAt: Date.now(),
-    } satisfies AgentSession;
-    
+    };
+
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
     console.error("[handleGetContext] Error:", error);
     return new Response(
-      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error", stack: error instanceof Error ? error.stack : undefined }),
+      JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
       { status: 500, headers: { "Content-Type": "application/json" } }
     );
   }
 }
 
 // Handle new context creation - create in the strongly consistent session Durable Object.
-async function handleNewContext(request: Request, env: Env): Promise<Response> {
+async function handleNewContext(request: Request): Promise<Response> {
   try {
     const body = (await request.json()) as { parentId?: string; };
     const sessionId = crypto.randomUUID();
-    const parent = body.parentId ? await loadContext(env, body.parentId) : null;
-    
+
     const context: AgentSession = {
       id: sessionId,
       parentId: body.parentId,
-      messages: parent?.messages ? [...parent.messages] : [],
+      messages: [],
       createdAt: Date.now(),
     };
 
-    await saveContext(env, context);
-    
     return new Response(JSON.stringify(context), {
       headers: { "Content-Type": "application/json" },
     });
@@ -516,9 +523,9 @@ async function handleNewContext(request: Request, env: Env): Promise<Response> {
 }
 
 // Handle list tools - create tools directly
-async function handleListTools(env: Env, ctx: ExecutionContext): Promise<Response> {
+async function handleListTools(env: Env, _ctx: ExecutionContext): Promise<Response> {
   try {
-    const tools = createTools(env, ctx);
+    const tools = createTools(env, _ctx);
     return new Response(JSON.stringify({ tools }), {
       headers: { "Content-Type": "application/json" },
     });
@@ -535,14 +542,15 @@ async function handleGetInfo(env: Env): Promise<Response> {
   try {
     const provider = env.AI_PROVIDER || "amazon-bedrock";
     const model = env.AI_MODEL || "minimax.minimax-m2.5";
-    const contextWindow = 128000; // Default context window for minimax-m2.5
+    const contextWindow = 128000;
     const rawBedrockToken = env.AWS_BEARER_TOKEN_BEDROCK || "";
     const normalizedBedrockToken = normalizeBedrockBearerToken(rawBedrockToken) || "";
-    
-    return new Response(JSON.stringify({ 
-      provider, 
-      model, 
+
+    return new Response(JSON.stringify({
+      provider,
+      model,
       contextWindow,
+      mockAi: env.MOCK_AI,
       bedrockAuth: {
         configured: normalizedBedrockToken.length > 0,
         rawLength: rawBedrockToken.length,
@@ -566,7 +574,7 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
   try {
     const sessionId = url.searchParams.get("sessionId");
     const key = url.searchParams.get("key");
-    
+
     if (!sessionId) {
       return new Response(
         JSON.stringify({ error: "sessionId query param required" }),
@@ -577,7 +585,7 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
     const response = await getSessionStore(env, sessionId).fetch(
       `https://session-store.local/cf_debug${key ? `?key=${key}` : ""}`
     );
-    
+
     if (!response.ok) {
       const errorText = await response.text();
       return new Response(
@@ -585,7 +593,7 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
         { status: response.status, headers: { "Content-Type": "application/json" } }
       );
     }
-    
+
     const data = await response.json();
     return new Response(JSON.stringify(data, null, 2), {
       headers: { "Content-Type": "application/json" },
@@ -601,25 +609,6 @@ async function handleCfDebug(env: Env, url: URL): Promise<Response> {
 function getSessionStore(env: Env, sessionId: string): DurableObjectStub {
   const id = env.SESSION_STORE.idFromName(sessionId);
   return env.SESSION_STORE.get(id);
-}
-
-async function loadContext(env: Env, sessionId: string): Promise<AgentSession | null> {
-  const response = await getSessionStore(env, sessionId).fetch("https://session-store.local/context");
-  if (response.status === 404) return null;
-  if (!response.ok) {
-    throw new Error(`Context fetch failed: ${response.status} ${await response.text()}`);
-  }
-  return response.json() as Promise<AgentSession>;
-}
-
-async function saveContext(env: Env, context: AgentSession): Promise<void> {
-  const response = await getSessionStore(env, context.id).fetch("https://session-store.local/context", {
-    method: "PUT",
-    body: JSON.stringify(context),
-  });
-  if (!response.ok) {
-    throw new Error(`Context save failed: ${response.status} ${await response.text()}`);
-  }
 }
 
 async function sha256Prefix(value: string): Promise<string> {

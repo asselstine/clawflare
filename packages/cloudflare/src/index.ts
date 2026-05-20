@@ -9,7 +9,7 @@ const domains = ["api.cloudflare.com"];
 
 const cloudflareHandler: EgressHandler<CloudflareEnv> = {
   name: "cloudflare",
-  description: "Cloudflare REST API access",
+  description: "Cloudflare REST API access - automatically injects Authorization: Bearer token from CLOUDFLARE_API_TOKEN",
   domains,
 
   handles(request: Request): boolean {

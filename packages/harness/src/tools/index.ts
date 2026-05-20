@@ -4,7 +4,8 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
-import type { Env, ExecutionResult } from "../types";
+import type { Env } from "./../internal-types/index.js";
+import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDatastore } from "../datastore";
 import { executeDynamicWorker } from "../runtime/dynamic-worker";
 
@@ -126,7 +127,7 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
   return {
     name: "execute_code",
     description:
-      "Execute JavaScript code in an isolated Dynamic Worker. Use this for one-off code execution.",
+      "Execute JavaScript code in an isolated Dynamic Worker.",
     label: "Execute Code",
     parameters: Type.Object({
       code: Type.String({ description: "JavaScript code to execute" }),
@@ -164,7 +165,7 @@ function createSearchTool(env: Env): AgentTool {
           { description: "Collection to search" }
         )
       ),
-      query: Type.Optional(Type.String({ description: "Search query string" })),
+      query: Type.Optional(Type.String({ description: "Search query string. Supports * as wildcard (e.g., *github.com). Use * alone to list all." })),
       limit: Type.Optional(Type.Number({ description: "Maximum results to return (max 20)" })),
     }) as TSchema,
     execute: async (
@@ -178,7 +179,7 @@ function createSearchTool(env: Env): AgentTool {
       const limit = Math.min(p.limit || 20, 20); // Cap at 20
 
       const datastore = getDatastore(env);
-      const results = await datastore.search(collection, p.query, limit);
+      const results = await datastore.search(collection, p.query ?? "*", limit);
 
       const lines: string[] = [];
 
@@ -216,10 +217,10 @@ function createSearchTool(env: Env): AgentTool {
 // Format execution result for the agent
 function formatExecutionResult(result: ExecutionResult): AgentToolResult<unknown> {
   if (result.ok) {
-    const text = result.result !== undefined 
+    const text = result.result !== undefined
       ? `Result: ${JSON.stringify(result.result, null, 2)}`
       : "Code executed successfully.";
-    
+
     return {
       content: [{ type: "text", text }],
       details: result,

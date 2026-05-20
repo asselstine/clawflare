@@ -1,4 +1,5 @@
-import type { Env, ExecutionResult } from "../types";
+import type { Env, WorkerLoaderWorkerCode } from "./../internal-types/index.js";
+import type { ExecutionResult } from "./../internal-types/tools.js";
 
 interface DynamicExecutionOptions {
   requestId?: string;
@@ -43,7 +44,7 @@ export default {
 
     workerCode.globalOutbound = outbound ?? null;
 
-    const worker = env.LOADER.load(workerCode);
+    const worker = await env.LOADER.load(workerCode);
     const entrypoint = worker.getEntrypoint();
     const response = await entrypoint.fetch(
       new Request("https://clawflare.local/execute", {

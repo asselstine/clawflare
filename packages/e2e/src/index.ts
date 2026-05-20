@@ -441,6 +441,31 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
+  await runner.runTest("search egress with * wildcard lists all handlers", async () => {
+    const response = await fetch(`${url}/__test/search?collection=egress_handlers&q=*`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json() as { results?: { egressHandlers: Array<{ name: string }> } };
+    const names = data.results?.egressHandlers.map((h) => h.name).sort();
+    if (!names || names.length < 2) {
+      throw new Error(`Expected at least 2 handlers, got: ${JSON.stringify(names)}`);
+    }
+    if (!names.includes("github") || !names.includes("cloudflare")) {
+      throw new Error(`Expected github and cloudflare handlers, got: ${JSON.stringify(names)}`);
+    }
+  });
+
+  await runner.runTest("search egress with wildcard prefix finds matching domains", async () => {
+    const response = await fetch(`${url}/__test/search?collection=egress_handlers&q=*github.com`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await response.json() as { results?: { egressHandlers: Array<{ name: string }> } };
+    const names = data.results?.egressHandlers.map((h) => h.name);
+    if (!names?.includes("github")) {
+      throw new Error(`Expected github handler, got: ${JSON.stringify(names)}`);
+    }
+  });
+
   await runner.runTest("unsupported egress is blocked", async () => {
     const response = await fetch(`${url}/__test/execute-code`, {
       method: "POST",

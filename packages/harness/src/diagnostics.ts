@@ -1,30 +1,91 @@
-import type { Env } from "./types";
+import type { Env } from "./internal-types/index.js";
 
+interface TimingEvent {
+  phase: string;
+  at: number;
+  elapsedMs?: number;
+  details?: Record<string, unknown>;
+}
+
+interface TimingSession {
+  sessionId: string;
+  events: TimingEvent[];
+}
+
+const sessions = new Map<string, TimingSession>();
+const MAX_SESSIONS = 100;
+const MAX_EVENTS_PER_SESSION = 1000;
+
+/**
+ * Start timing a phase. Returns a timestamp that should be passed to logTiming.
+ */
 export function timingStart(): number {
-  return Date.now();
+  return performance.now();
 }
 
-export function isTimingDebugEnabled(env: Pick<Env, "CLAWFLARE_DEBUG_TIMING">): boolean {
-  const value = env.CLAWFLARE_DEBUG_TIMING?.toLowerCase();
-  return value === "1" || value === "true" || value === "yes";
-}
-
+/**
+ * Log a timing event for diagnostics.
+ */
 export function logTiming(
-  env: Pick<Env, "CLAWFLARE_DEBUG_TIMING">,
+  env: Env,
   sessionId: string | undefined,
   phase: string,
   startedAt?: number,
-  details: Record<string, unknown> = {},
+  details?: Record<string, unknown>,
 ): void {
-  if (!isTimingDebugEnabled(env)) return;
+  const isDebugEnabled = env.CLAWFLARE_DEBUG_TIMING === "true" || env.CLAWFLARE_DEBUG_TIMING === "1";
+  if (!isDebugEnabled) return;
+  if (!sessionId) return;
 
-  const now = Date.now();
-  console.log(JSON.stringify({
-    source: "clawflare-timing",
-    sessionId,
+  const now = performance.now();
+  const elapsedMs = startedAt !== undefined ? now - startedAt : undefined;
+
+  let session = sessions.get(sessionId);
+  if (!session) {
+    // Prune if at capacity
+    if (sessions.size >= MAX_SESSIONS) {
+      const oldest = sessions.keys().next().value;
+      if (oldest) sessions.delete(oldest);
+    }
+    session = { sessionId, events: [] };
+    sessions.set(sessionId, session);
+  }
+
+  // Prune events if at capacity
+  if (session.events.length >= MAX_EVENTS_PER_SESSION) {
+    session.events.shift();
+  }
+
+  session.events.push({
     phase,
     at: now,
-    elapsedMs: startedAt === undefined ? undefined : now - startedAt,
-    ...details,
-  }));
+    elapsedMs,
+    details,
+  });
+
+  // Also log to console for tail -f visibility
+  const elapsedStr = elapsedMs !== undefined ? `${elapsedMs.toFixed(2)}ms` : "";
+  const detailStr = details ? ` ${JSON.stringify(details)}` : "";
+  console.log(`[TIMING] ${sessionId} ${phase}${elapsedStr ? ` (${elapsedStr})` : ""}${detailStr}`);
+}
+
+/**
+ * Get timing events for a session.
+ */
+export function getTimingEvents(sessionId: string): TimingEvent[] {
+  return sessions.get(sessionId)?.events ?? [];
+}
+
+/**
+ * Get all active timing sessions.
+ */
+export function getTimingSessions(): TimingSession[] {
+  return Array.from(sessions.values());
+}
+
+/**
+ * Clear timing data for a session.
+ */
+export function clearTiming(sessionId: string): void {
+  sessions.delete(sessionId);
 }

@@ -1,9 +1,12 @@
 // Session state management - backed by a per-session Durable Object.
-import type { AgentEvent } from "@earendil-works/pi-agent-core";
-import type { SessionEvent, SessionState, SessionInputEvent } from "./types";
-import type { Env } from "./types";
-
-type NewSessionEvent = AgentEvent & { timestamp: number };
+import type {
+  Env,
+  SessionMetadataState,
+  SessionInputEvent,
+  StoredSessionEvent,
+  NewSessionEvent,
+} from "./internal-types/index.js";
+import type { SessionEvent } from "./types.js";
 
 function getSessionStore(env: Env, sessionId: string): DurableObjectStub {
   const id = env.SESSION_STORE.idFromName(sessionId);
@@ -19,12 +22,25 @@ async function jsonFetch<T>(stub: DurableObjectStub, path: string, init?: Reques
   return response.json() as Promise<T>;
 }
 
+// Storage keys for session data (documented for reference)
+// const STATE_KEY = "state";
+// const EVENT_META_KEY = "event_meta";
+// const EVENT_PREFIX = "evt/";
+// const WORKFLOW_SESSION_KEY = "workflowSession";
+// const WORKFLOW_ID_KEY = "workflowId";
+// const INPUT_QUEUE_KEY = "inputQueue";
+// const SESSION_ACTIVE_KEY = "sessionActive";
+
+// const MAX_EVENTS_PER_SESSION = 1000;
+// const EVENT_TRIM_BATCH = 100;
+// const MAX_QUEUE_SIZE = 100;
+
 /**
  * Create or update a session state.
  */
 export async function saveSessionState(
   env: Env,
-  session: SessionState,
+  session: SessionMetadataState,
 ): Promise<void> {
   await jsonFetch(getSessionStore(env, session.id), "/state", {
     method: "PUT",
@@ -38,14 +54,14 @@ export async function saveSessionState(
 export async function loadSessionState(
   env: Env,
   sessionId: string,
-): Promise<SessionState | null> {
+): Promise<SessionMetadataState | null> {
   const stub = getSessionStore(env, sessionId);
   const response = await stub.fetch("https://session-store.local/state");
   if (response.status === 404) return null;
   if (!response.ok) {
     throw new Error(`Session state fetch failed: ${response.status} ${await response.text()}`);
   }
-  return response.json() as Promise<SessionState>;
+  return response.json() as Promise<SessionMetadataState>;
 }
 
 /**
@@ -71,6 +87,7 @@ export async function getLatestEventCursor(env: Env, sessionId: string): Promise
 
 /**
  * Get events for a session, optionally filtered by sequence cursor.
+ * Returns public SessionEvent type (converts from stored events).
  */
 export async function getSessionEvents(
   env: Env,
@@ -81,7 +98,22 @@ export async function getSessionEvents(
   const url = new URL("https://session-store.local/events");
   url.searchParams.set("since", sinceCursor || "0");
   url.searchParams.set("limit", String(limit));
-  return jsonFetch(getSessionStore(env, sessionId), `${url.pathname}${url.search}`);
+  const result = await jsonFetch<{ events: StoredSessionEvent[]; nextCursor: string }>(
+    getSessionStore(env, sessionId),
+    `${url.pathname}${url.search}`
+  );
+  // Convert stored events to public SessionEvent type
+  const events = result.events.map(convertStoredToPublicEvent);
+  return { events, nextCursor: result.nextCursor };
+}
+
+/**
+ * Convert stored event to public SessionEvent
+ */
+function convertStoredToPublicEvent(stored: StoredSessionEvent): SessionEvent {
+  // Storedevents are a subset of SessionEvent - cast for now
+  // In production, this would properly convert between the formats
+  return stored as unknown as SessionEvent;
 }
 
 /**
@@ -97,10 +129,6 @@ export async function appendSessionEvents(
     body: JSON.stringify({ events: newEvents }),
   });
 }
-
-// ==========================================
-// NEW: Persistent Workflow Session Functions
-// ==========================================
 
 /**
  * Get the workflow ID associated with a session.
@@ -216,3 +244,6 @@ export async function markSessionClosed(
   }
   await setSessionActive(env, sessionId, false);
 }
+
+// Re-export status for convenience
+export type { SessionMetadataState } from "./internal-types/index.js";
