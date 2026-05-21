@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
  * Clawflare Container Runtime Server
- * 
+ *
  * A minimal HTTP server that runs inside the container and provides
  * secure command execution and file operations within the workspace.
- * 
+ *
  * This server listens on port 8080 by default and provides JSON APIs
  * for bash execution and file operations.
  */
@@ -19,6 +19,7 @@ import {
   readdir,
   access,
   constants,
+  rename,
 } from "fs/promises";
 import { dirname, resolve, normalize, relative, sep } from "path";
 
@@ -42,12 +43,12 @@ function isPathWithinWorkspace(requestPath) {
   const resolved = resolve(WORKSPACE_ROOT, requestPath);
   const normalized = normalize(resolved);
   const relativePath = relative(WORKSPACE_ROOT, normalized);
-  
+
   // Path traversal check
   if (relativePath.startsWith("..") || relativePath.startsWith(sep)) {
     return false;
   }
-  
+
   return normalized.startsWith(WORKSPACE_ROOT);
 }
 
@@ -55,12 +56,12 @@ function sanitizePath(requestPath) {
   if (!requestPath || typeof requestPath !== "string") {
     throw new Error("Path is required and must be a string");
   }
-  
+
   const resolved = resolve(WORKSPACE_ROOT, requestPath);
   if (!isPathWithinWorkspace(requestPath)) {
     throw new Error(`Path "${requestPath}" escapes the workspace boundary`);
   }
-  
+
   return resolved;
 }
 
@@ -68,22 +69,22 @@ function sanitizePath(requestPath) {
 async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
   const startTime = Date.now();
   const resolvedCwd = sanitizePath(cwd);
-  
+
   // Clamp timeout
   const effectiveTimeout = Math.min(Math.max(1000, timeoutMs), MAX_TIMEOUT_MS);
-  
+
   return new Promise((resolve) => {
     const stdout = [];
     const stderr = [];
     let killed = false;
-    
+
     // Use bash -lc to load profile and execute command
     const proc = spawn("/bin/bash", ["-lc", command], {
       cwd: resolvedCwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env, HOME: process.env.HOME || "/root" },
     });
-    
+
     const timeoutId = setTimeout(() => {
       killed = true;
       proc.kill("SIGTERM");
@@ -93,15 +94,15 @@ async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, m
         }
       }, 5000);
     }, effectiveTimeout);
-    
+
     proc.stdout.on("data", (data) => {
       stdout.push(data.toString("utf-8"));
     });
-    
+
     proc.stderr.on("data", (data) => {
       stderr.push(data.toString("utf-8"));
     });
-    
+
     proc.on("error", (error) => {
       clearTimeout(timeoutId);
       resolve({
@@ -116,24 +117,24 @@ async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, m
         error: error.message,
       });
     });
-    
+
     proc.on("close", (code, signal) => {
       clearTimeout(timeoutId);
-      
+
       const fullStdout = stdout.join("");
       const fullStderr = stderr.join("");
-      
+
       // Truncate output
       const combined = fullStdout + (fullStderr ? `\nStderr:\n${fullStderr}` : "");
       let truncatedOutput = combined;
       let truncated = false;
-      
+
       if (combined.length > maxOutputChars) {
         const prefix = `[Output truncated. Showing tail. Original length: ${combined.length} chars. Limit: ${maxOutputChars} chars.]\n`;
         truncatedOutput = prefix + combined.slice(-(maxOutputChars - prefix.length));
         truncated = true;
       }
-      
+
       resolve({
         ok: code === 0 && !killed,
         exitCode: code,
@@ -152,23 +153,23 @@ async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, m
 // Read a file
 async function readFileOp(filePath, startLine, endLine, maxBytes = 200000) {
   const resolvedPath = sanitizePath(filePath);
-  
+
   // Check file exists and is readable
   await access(resolvedPath, constants.R_OK);
-  
+
   const stats = await stat(resolvedPath);
   if (!stats.isFile()) {
     throw new Error(`"${filePath}" is not a regular file`);
   }
-  
+
   // Limit file size for safety
   if (stats.size > maxBytes) {
     throw new Error(`File "${filePath}" is too large (${stats.size} bytes). Max: ${maxBytes} bytes.`);
   }
-  
+
   let content = await readFile(resolvedPath, { encoding: "utf-8" });
   const totalLines = content.split("\n").length;
-  
+
   // Apply line range if specified
   if (startLine !== undefined || endLine !== undefined) {
     const lines = content.split("\n");
@@ -176,7 +177,7 @@ async function readFileOp(filePath, startLine, endLine, maxBytes = 200000) {
     const end = endLine !== undefined ? Math.min(lines.length, endLine) : lines.length;
     content = lines.slice(start, end).join("\n");
   }
-  
+
   return {
     ok: true,
     content,
@@ -189,19 +190,19 @@ async function readFileOp(filePath, startLine, endLine, maxBytes = 200000) {
 // Write a file
 async function writeFileOp(filePath, content, append = false, makeDirs = true) {
   const resolvedPath = sanitizePath(filePath);
-  
+
   // Create parent directories if needed
   if (makeDirs) {
     await mkdir(dirname(resolvedPath), { recursive: true });
   }
-  
+
   const flags = append ? "a" : "w";
   const existingSize = append ? (await stat(resolvedPath).catch(() => ({ size: 0 }))).size : 0;
-  
+
   await writeFile(resolvedPath, content, { encoding: "utf-8", flag: flags });
-  
+
   const newStats = await stat(resolvedPath);
-  
+
   return {
     ok: true,
     path: relative(WORKSPACE_ROOT, resolvedPath),
@@ -214,44 +215,36 @@ async function writeFileOp(filePath, content, append = false, makeDirs = true) {
 // Edit a file using exact string replacement
 async function editFileOp(filePath, oldString, newString, replaceAll = false) {
   const resolvedPath = sanitizePath(filePath);
-  
+
   await access(resolvedPath, constants.R_OK | constants.W_OK);
-  
+
   const stats = await stat(resolvedPath);
   if (!stats.isFile()) {
     throw new Error(`"${filePath}" is not a regular file`);
   }
-  
+
   const content = await readFile(resolvedPath, { encoding: "utf-8" });
-  
+
   // Count matches
   const matchCount = content.split(oldString).length - 1;
-  
+
   if (matchCount === 0) {
     throw new Error(`Old string not found in "${filePath}". No changes made.`);
   }
-  
+
   if (!replaceAll && matchCount > 1) {
     throw new Error(`Found ${matchCount} matches in "${filePath}". Set replaceAll=true to replace all, or be more specific with oldString.`);
   }
-  
-  const newContent = replaceAll 
+
+  const newContent = replaceAll
     ? content.split(oldString).join(newString)
     : content.replace(oldString, newString);
-  
+
   // Atomic write using temp file
   const tempPath = `${resolvedPath}.tmp.${Date.now()}`;
   await writeFile(tempPath, newContent, { encoding: "utf-8" });
-  await writeFile(resolvedPath, newContent, { encoding: "utf-8" });
-  
-  // Clean up temp file (best effort)
-  try {
-    await access(tempPath);
-    await writeFile(resolvedPath, newContent, { encoding: "utf-8" });
-  } catch (e) {
-    // ignore
-  }
-  
+  await rename(tempPath, resolvedPath);
+
   return {
     ok: true,
     path: relative(WORKSPACE_ROOT, resolvedPath),
@@ -265,14 +258,14 @@ async function editFileOp(filePath, oldString, newString, replaceAll = false) {
 async function grepOp(pattern, searchPath = ".", includePattern, maxMatches = 100) {
   const resolvedPath = sanitizePath(searchPath);
   const stats = await stat(resolvedPath);
-  
+
   const results = [];
-  
+
   if (stats.isFile()) {
     // Single file grep
     const content = await readFile(resolvedPath, { encoding: "utf-8" });
     const lines = content.split("\n");
-    
+
     for (let i = 0; i < lines.length && results.length < maxMatches; i++) {
       if (lines[i].includes(pattern)) {
         results.push({
@@ -291,7 +284,7 @@ async function grepOp(pattern, searchPath = ".", includePattern, maxMatches = 10
       30000,
       10000
     );
-    
+
     // Parse results
     const output = result.stdout + result.stderr;
     if (output) {
@@ -313,7 +306,7 @@ async function grepOp(pattern, searchPath = ".", includePattern, maxMatches = 10
       }
     }
   }
-  
+
   return {
     ok: true,
     pattern,
@@ -327,27 +320,27 @@ async function grepOp(pattern, searchPath = ".", includePattern, maxMatches = 10
 // Find files
 async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 200) {
   const resolvedPath = sanitizePath(searchPath);
-  
+
   const results = [];
-  
+
   async function traverse(dir) {
     if (results.length >= maxResults) return;
-    
+
     const entries = await readdir(dir, { withFileTypes: true });
-    
+
     for (const entry of entries) {
       if (results.length >= maxResults) break;
-      
+
       const fullPath = resolve(dir, entry.name);
       const relativePath = relative(WORKSPACE_ROOT, fullPath);
-      
+
       // Skip hidden files and dirs
       if (entry.name.startsWith(".")) continue;
-      
+
       let matchesType = true;
       if (type === "file") matchesType = entry.isFile();
       if (type === "directory") matchesType = entry.isDirectory();
-      
+
       let matchesName = true;
       if (namePattern) {
         // Simple glob matching
@@ -356,7 +349,7 @@ async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 
         );
         matchesName = regex.test(entry.name);
       }
-      
+
       if (matchesType && matchesName) {
         const stats = await stat(fullPath).catch(() => null);
         results.push({
@@ -366,15 +359,15 @@ async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 
           mtime: stats?.mtime?.toISOString() || null,
         });
       }
-      
+
       if (entry.isDirectory()) {
         await traverse(fullPath);
       }
     }
   }
-  
+
   await traverse(resolvedPath);
-  
+
   return {
     ok: true,
     path: relative(WORKSPACE_ROOT, resolvedPath),
@@ -387,30 +380,30 @@ async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 
 // List directory contents
 async function lsOp(dirPath = ".", recursive = false, maxResults = 200) {
   const resolvedPath = sanitizePath(dirPath);
-  
+
   const stats = await stat(resolvedPath);
   if (!stats.isDirectory()) {
     throw new Error(`"${dirPath}" is not a directory`);
   }
-  
+
   const results = [];
-  
+
   async function traverse(dir, depth = 0) {
     if (results.length >= maxResults) return;
-    
+
     const entries = await readdir(dir, { withFileTypes: true });
-    
+
     for (const entry of entries) {
       if (results.length >= maxResults) break;
-      
+
       // Skip hidden files
       if (entry.name.startsWith(".")) continue;
-      
+
       const fullPath = resolve(dir, entry.name);
       const relativePath = relative(WORKSPACE_ROOT, fullPath);
-      
+
       const entryStats = await stat(fullPath).catch(() => null);
-      
+
       results.push({
         path: relativePath,
         name: entry.name,
@@ -420,15 +413,15 @@ async function lsOp(dirPath = ".", recursive = false, maxResults = 200) {
         mtime: entryStats?.mtime?.toISOString() || null,
         depth,
       });
-      
+
       if (entry.isDirectory() && recursive) {
         await traverse(fullPath, depth + 1);
       }
     }
   }
-  
+
   await traverse(resolvedPath);
-  
+
   return {
     ok: true,
     path: relative(WORKSPACE_ROOT, resolvedPath),
@@ -447,47 +440,47 @@ const handlers = {
       workspace: WORKSPACE_ROOT,
     };
   },
-  
+
   "/bash": async (req) => {
     const body = await parseBody(req);
     const { command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS } = body;
-    
+
     if (!command || typeof command !== "string") {
       throw new Error("command is required");
     }
-    
+
     return await executeBash(command, cwd, timeoutMs, maxOutputChars);
   },
-  
+
   "/read": async (req) => {
     const body = await parseBody(req);
     const { path, startLine, endLine, maxBytes = 200000 } = body;
-    
+
     if (!path || typeof path !== "string") {
       throw new Error("path is required");
     }
-    
+
     return await readFileOp(path, startLine, endLine, maxBytes);
   },
-  
+
   "/write": async (req) => {
     const body = await parseBody(req);
     const { path, content, append = false, makeDirs = true } = body;
-    
+
     if (!path || typeof path !== "string") {
       throw new Error("path is required");
     }
     if (content === undefined) {
       throw new Error("content is required");
     }
-    
+
     return await writeFileOp(path, String(content), append, makeDirs);
   },
-  
+
   "/edit": async (req) => {
     const body = await parseBody(req);
     const { path, oldString, newString, replaceAll = false } = body;
-    
+
     if (!path || typeof path !== "string") {
       throw new Error("path is required");
     }
@@ -497,32 +490,32 @@ const handlers = {
     if (newString === undefined) {
       throw new Error("newString is required");
     }
-    
+
     return await editFileOp(path, oldString, newString, replaceAll);
   },
-  
+
   "/grep": async (req) => {
     const body = await parseBody(req);
     const { pattern, path = ".", include, maxMatches = 100 } = body;
-    
+
     if (!pattern || typeof pattern !== "string") {
       throw new Error("pattern is required");
     }
-    
+
     return await grepOp(pattern, path, include, maxMatches);
   },
-  
+
   "/find": async (req) => {
     const body = await parseBody(req);
     const { path = ".", name, type = "any", maxResults = 200 } = body;
-    
+
     return await findOp(path, name, type, maxResults);
   },
-  
+
   "/ls": async (req) => {
     const body = await parseBody(req);
     const { path = ".", recursive = false, maxResults = 200 } = body;
-    
+
     return await lsOp(path, recursive, maxResults);
   },
 };
@@ -551,40 +544,40 @@ function jsonResponse(res, data, statusCode = 200) {
 // Create and start server
 async function main() {
   await ensureWorkspace();
-  
+
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://localhost:${PORT}`);
-      
+
       // Only accept POST for commands, GET for health
       const handler = handlers[url.pathname];
-      
+
       if (!handler) {
         jsonResponse(res, { ok: false, error: `Unknown endpoint: ${url.pathname}` }, 404);
         return;
       }
-      
+
       if (url.pathname === "/health" && req.method !== "GET") {
         jsonResponse(res, { ok: false, error: "Method not allowed" }, 405);
         return;
       }
-      
+
       if (url.pathname !== "/health" && req.method !== "POST") {
         jsonResponse(res, { ok: false, error: "Method not allowed" }, 405);
         return;
       }
-      
+
       const result = await handler(req);
       jsonResponse(res, result);
     } catch (error) {
       console.error("Error handling request:", error);
-      jsonResponse(res, { 
-        ok: false, 
+      jsonResponse(res, {
+        ok: false,
         error: error.message || "Internal server error",
       }, 500);
     }
   });
-  
+
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Clawflare Container Runtime Server running on port ${PORT}`);
     console.log(`Workspace: ${WORKSPACE_ROOT}`);

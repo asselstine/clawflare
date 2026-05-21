@@ -2,6 +2,7 @@
  * Container Client - Worker-side RPC client for the container runtime server
  */
 
+import { getContainer } from "@cloudflare/containers";
 import type { Env } from "../internal-types/index.js";
 
 // Container fetch result types
@@ -111,36 +112,14 @@ export interface HealthResult {
   [key: string]: unknown;
 }
 
-// Durable Object stub interface for container
-interface ContainerStub {
-  startAndWaitForPorts(options: {
-    ports: number[];
-    startOptions: { enableInternet: boolean };
-    cancellationOptions: { portReadyTimeoutMS: number; abort?: AbortSignal };
-  }): Promise<void>;
-  containerFetch(url: string, init: {
-    method: string;
-    headers: Record<string, string>;
-    body: string;
-    signal?: AbortSignal;
-  }): Promise<Response>;
-}
-
-// Get container stub from Durable Object namespace
-function getContainerStub(env: Env, id: string): ContainerStub {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const codingContainer = (env as unknown as Record<string, unknown>).CODING_CONTAINER as DurableObjectNamespace | undefined;
-  if (!codingContainer) {
-    throw new Error("CODING_CONTAINER binding not available");
-  }
-  
-  const durableObjectId = codingContainer.idFromName(id);
-  return codingContainer.get(durableObjectId) as unknown as ContainerStub;
-}
-
 // Default timeout for container operations
 const DEFAULT_CONTAINER_TIMEOUT = 30000;
 const MAX_CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+
+// Get container stub using Cloudflare's getContainer helper
+function getContainerStub(env: Env, id: string) {
+  return getContainer(env.CODING_CONTAINER, id);
+}
 
 /**
  * Call the container runtime server
@@ -153,29 +132,29 @@ export async function callContainerRuntime(
   signal?: AbortSignal,
 ): Promise<ContainerRuntimeResponse> {
   const container = getContainerStub(env, containerId);
-  
+
   // Start container and wait for port
   await container.startAndWaitForPorts({
     ports: [8080],
     startOptions: { enableInternet: false },
     cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
   });
-  
+
   const response = await container.containerFetch(`http://localhost${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal,
   });
-  
+
   const payload = (await response.json()) as ContainerRuntimeResponse;
-  
+
   if (!response.ok || payload?.ok === false) {
-    const errorMsg = payload?.error as string | undefined || 
+    const errorMsg = payload?.error as string | undefined ||
       `Container runtime call failed: ${response.status}`;
     throw new Error(errorMsg);
   }
-  
+
   return payload;
 }
 
@@ -188,26 +167,24 @@ export async function getContainerHealth(
   signal?: AbortSignal
 ): Promise<HealthResult> {
   const container = getContainerStub(env, containerId);
-  
+
   await container.startAndWaitForPorts({
     ports: [8080],
     startOptions: { enableInternet: false },
     cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
   });
-  
+
   const response = await container.containerFetch("http://localhost/health", {
     method: "GET",
-    headers: {},
-    body: "",
     signal,
   });
-  
+
   const payload = (await response.json()) as HealthResult;
-  
+
   if (!response.ok) {
     throw new Error(`Container health check failed: ${response.status}`);
   }
-  
+
   return payload;
 }
 
@@ -226,11 +203,11 @@ export async function containerBash(
     Math.max(1000, timeoutMs || DEFAULT_CONTAINER_TIMEOUT),
     MAX_CONTAINER_TIMEOUT
   );
-  
+
   const result = await callContainerRuntime(
-    env, 
-    containerId, 
-    "/bash", 
+    env,
+    containerId,
+    "/bash",
     {
       command,
       cwd: cwd || ".",
@@ -239,7 +216,7 @@ export async function containerBash(
     },
     signal
   );
-  
+
   return result as BashResult;
 }
 
@@ -264,7 +241,7 @@ export async function containerRead(
     },
     signal
   );
-  
+
   return result as ReadResult;
 }
 
@@ -289,7 +266,7 @@ export async function containerWrite(
     },
     signal
   );
-  
+
   return result as WriteResult;
 }
 
@@ -314,7 +291,7 @@ export async function containerEdit(
     },
     signal
   );
-  
+
   return result as EditResult;
 }
 
@@ -339,7 +316,7 @@ export async function containerGrep(
     },
     signal
   );
-  
+
   return result as GrepResult;
 }
 
@@ -364,7 +341,7 @@ export async function containerFind(
     },
     signal
   );
-  
+
   return result as FindResult;
 }
 
@@ -387,6 +364,6 @@ export async function containerLs(
     },
     signal
   );
-  
+
   return result as LsResult;
 }

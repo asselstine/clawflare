@@ -1,6 +1,9 @@
 // Worker Environment types - Cloudflare Workers bindings
 // These types are NOT exported publicly and can only be used in Workers code
 
+// Import Container type for type-only usage
+import type { Container } from "@cloudflare/containers";
+
 // WorkerLoaderWorkerCode is defined as a module type (not global)
 export interface WorkerLoaderWorkerCode {
   compatibilityDate: string;
@@ -49,7 +52,7 @@ export interface Env {
   AGENT_WORKFLOW: Workflow;
 
   // Cloudflare Container for isolated development environment
-  CODING_CONTAINER: DurableObjectNamespace;
+  CODING_CONTAINER: DurableObjectNamespace<Container<Env>>;
   CLOUDFLARE_ACCOUNT_ID: string;
 
   // GitHub token (optional)

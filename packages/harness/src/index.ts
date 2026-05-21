@@ -4,7 +4,7 @@
 import { HttpGateway } from "./egress/gateway.js";
 import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
-import { CodingContainer, CodingContainerClass } from "./container/coding-container.js";
+import { CodingContainer, ContainerProxy } from "./container/coding-container.js";
 import { handleHttpRequest } from "./http/router.js";
 
 // Export types for clients (public types only)
@@ -60,7 +60,7 @@ export {
   PersistentSessionWorkflow,
   ClawflareWebSocketSession,
   CodingContainer,
-  CodingContainerClass,
+  ContainerProxy,
 };
 
 // Export HTTP utilities for extension
