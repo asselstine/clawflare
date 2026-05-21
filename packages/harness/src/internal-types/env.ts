@@ -48,8 +48,8 @@ export interface Env {
   // Workflow for durable agent execution
   AGENT_WORKFLOW: Workflow;
 
-  // Cloudflare API credentials
-  CLOUDFLARE_API_TOKEN: string;
+  // Cloudflare Container for isolated development environment
+  CODING_CONTAINER: DurableObjectNamespace;
   CLOUDFLARE_ACCOUNT_ID: string;
 
   // GitHub token (optional)

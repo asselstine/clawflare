@@ -4,11 +4,12 @@
 import { HttpGateway, routeOutboundRequest } from "./egress/gateway.js";
 import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
+import { CodingContainer } from "./container/coding-container.js";
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
 
-export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession };
+export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer };
 
 // Test endpoints
 export default {

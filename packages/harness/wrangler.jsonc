@@ -27,6 +27,15 @@
     }
   ],
 
+  "containers": [
+    {
+      "class_name": "CodingContainer",
+      "image": "./container-runtime/Dockerfile",
+      "max_instances": 10,
+      "instance_type": "lite"
+    }
+  ],
+
   "d1_databases": [
     {
       "binding": "DB",
@@ -42,6 +51,10 @@
       {
         "name": "WEBSOCKET_SESSION",
         "class_name": "ClawflareWebSocketSession"
+      },
+      {
+        "name": "CODING_CONTAINER",
+        "class_name": "CodingContainer"
       }
     ]
   },
@@ -58,6 +71,10 @@
     {
       "tag": "v3",
       "deleted_classes": ["ClawflareDatastore"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["CodingContainer"]
     }
   ],
 

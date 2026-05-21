@@ -119,7 +119,7 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
   const componentsStart = timingStart();
   const components = await buildAgentComponents(env);
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
-  const tools = createTools(env);
+  const tools = createTools(env, undefined, { sessionId });
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
     model: components.model.id,
     provider: components.model.provider,

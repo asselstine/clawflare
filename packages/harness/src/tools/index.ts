@@ -1,5 +1,5 @@
 // Tools for the Clawflare Agent
-// These are the only four model-visible tools
+// Model-visible tools including code execution and container filesystem operations
 
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
@@ -8,6 +8,7 @@ import type { Env } from "./../internal-types/index.js";
 import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDataLayer } from "../data/index.js";
 import { executeDynamicWorker, USER_FUNCTION_CONTRACT } from "./dynamic-worker";
+import { createContainerTools } from "../container/tools.js";
 
 // Tool parameter types
 interface StoreCodeParams {
@@ -50,13 +51,25 @@ function validateName(name: string): void {
   }
 }
 
-export function createTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
-  return [
+export interface ToolContext {
+  sessionId?: string;
+}
+
+export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
+  const baseTools: AgentTool[] = [
     createStoreCodeTool(env),
     createExecuteStoredCodeTool(env, ctx),
     createExecuteCodeTool(env, ctx),
     createSearchTool(env),
   ];
+  
+  // Add container tools if session ID is available
+  if (toolCtx?.sessionId) {
+    const containerTools = createContainerTools(env, { sessionId: toolCtx.sessionId });
+    return [...baseTools, ...containerTools];
+  }
+  
+  return baseTools;
 }
 
 // Tool: Store code for later execution

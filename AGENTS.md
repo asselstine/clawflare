@@ -21,12 +21,23 @@
 - `src/session-do.ts` - Legacy `ClawflareSessionStore`; deprecated, not an active source of truth
 - `src/legacy-datastore-do.ts` - Legacy no-op `ClawflareDatastore` export for Durable Object migration-history compatibility
 
-**Tools (4 model-visible tools only):**
+**Tools (4 base tools + 8 container tools):**
 - `src/tools/index.ts` - Tool definitions:
   - `store_code` - Save reusable JavaScript by name
-  - `execute_stored_code` - Run stored JavaScript
+  - `execute_stored_code` - Run stored JavaScript  
   - `execute_code` - Run inline JavaScript in Dynamic Worker
   - `search` - Query stored code and egress handlers
+- `src/container/` - Container workspace tools:
+  - `coding-container.ts` - `CodingContainer` Cloudflare Container subclass with egress routing
+  - `client.ts` - Container RPC client for calling runtime endpoints
+  - `tools.ts` - 8 model-visible container tools
+  - `ids.ts` - Container ID validation and generation
+  - `paths.ts` - Path validation and workspace boundary checks
+  - `output.ts` - Output truncation utilities
+
+**Container Runtime:**
+- `container-runtime/Dockerfile` - Debian-based image (node:22-bookworm-slim) with git, ripgrep
+- `container-runtime/server.mjs` - HTTP server inside container: bash, read, write, edit, grep, find, ls, health
 
 **Execution & Egress:**
 - `src/runtime/dynamic-worker.ts` - `executeDynamicWorker()` - Isolated JavaScript execution via Worker Loader API
@@ -100,6 +111,7 @@
 | Coordination | Durable Objects (`ClawflareSessionCoordinator`, `ClawflareWebSocketSession`) |
 | Workflows | Cloudflare Workflows (`PersistentSessionWorkflow`) |
 | Dynamic Code | Worker Loader API (`env.LOADER.load()`) |
+| Container | Cloudflare Containers (`CodingContainer`) |
 
 ## Environment Configuration
 
@@ -125,6 +137,17 @@ No CI/CD defined. Use `pnpm typecheck`, `pnpm --filter @clawflare/harness test`,
 - `pnpm test` - Run remote E2E tests (deploys test Worker, creates D1 DB, applies migrations, runs tests, tears down)
 - `pnpm test -- --keep-alive` - Keep test Worker/D1 resources after tests for debugging
 - `pnpm cli` - Launch TUI for local development
+
+### Container Tests
+
+E2E tests include container functionality:
+- Container lifecycle (create, health check)
+- Bash command execution (`echo ok`, `git --version`)
+- File operations (write, read, edit, ls, find)
+- Content search (grep)
+- Git clone over HTTPS with MITM TLS
+
+Note: Container tests require the Cloudflare Containers feature enabled on your account.
 
 ## Development Commands
 

@@ -152,6 +152,7 @@ pnpm test -- --keep-alive
 # - Stored code and Dynamic Worker execution
 # - Controlled egress
 # - Search over stored code and egress handlers
+# - Container workspace (create, bash, file ops, git clone)
 # - 404 handling
 ```
 
@@ -215,6 +216,8 @@ clawflare/
 ├── packages/
 │   ├── cli/          # TUI client for agent communication
 │   ├── harness/      # Cloudflare Worker runtime
+│   │   ├── src/container/       # Container workspace tools
+│   │   └── container-runtime/   # Container image and runtime server
 │   ├── e2e/          # Remote end-to-end tests
 │   ├── egress-core/  # Shared egress handler types/registry
 │   ├── github/       # GitHub egress handler
@@ -232,7 +235,31 @@ pnpm dev
 pnpm --filter @clawflare/harness build
 ```
 
-### Chat Workflows
+### Container Workspace
+
+Clawflare supports an isolated container workspace via Cloudflare Containers. The container provides:
+
+- Debian-based environment with Node.js, git, ripgrep, and dev tools
+- Persistent filesystem at `/workspace` per session
+- MITM HTTPS for secure git operations via egress handlers
+- 8 model-visible tools: `container_create`, `container_bash`, `container_read`, `container_write`, `container_edit`, `container_grep`, `container_find`, `container_ls`
+
+**Requirements:**
+- Cloudflare Containers requires Docker to build images
+- Ensure Docker CLI is installed and the daemon is running before deploying
+
+**Configuration:**
+The container is configured in `wrangler.jsonc`:
+```json
+{
+  "containers": [{
+    "class_name": "CodingContainer",
+    "image": "./container-runtime/Dockerfile",
+    "max_instances": 10,
+    "instance_type": "lite"
+  }]
+}
+```
 
 `POST /v1/chat` starts or resumes a D1-backed session and returns immediately with a `sessionId` and event cursor. Clients poll `GET /v1/session/:sessionId` until the session status is `idle`, `error`, `closed`, or `expired`. Follow-up prompts reuse the same `sessionId`.
 
@@ -240,16 +267,27 @@ Session input is persisted in D1 and serialized through `ClawflareSessionCoordin
 
 The WebSocket endpoint `/ws` is backed by `ClawflareWebSocketSession`. It accepts prompt messages, starts/wakes the same D1-backed workflow path, and sends the final assistant message over the socket.
 
-### Tools, Dynamic Code, Egress, and Skills
+### Tools, Dynamic Code, Egress, Container Workspace, and Skills
 
-Clawflare exposes exactly four built-in model-visible tools:
+Clawflare exposes four base model-visible tools plus eight container workspace tools:
 
+**Base Tools:**
 - `execute_code` - run JavaScript in an isolated Dynamic Worker
 - `store_code` - save reusable JavaScript by name
 - `execute_stored_code` - run previously stored JavaScript by name
 - `search` - query stored code and egress handler metadata
 
-Reusable behavior should be saved with `store_code` instead of adding more model-visible tools. Network access from dynamic code is blocked unless an egress handler supports the target domain. GitHub and Cloudflare egress support is provided by `@clawflare/github` and `@clawflare/cloudflare`.
+**Container Tools:**
+- `container_create` - create/initialize a persistent coding container
+- `container_bash` - execute shell commands in the workspace
+- `container_read` - read text files with optional line ranges  
+- `container_write` - write or append to files
+- `container_edit` - make surgical edits with exact string replacement
+- `container_grep` - search file contents (uses ripgrep)
+- `container_find` - find files/directories by name/type
+- `container_ls` - list directory contents
+
+The container provides an isolated Debian-based environment with Node.js, git, ripgrep, and development tools. All filesystem operations are confined to `/workspace`. Container egress routes through the same egress gateway as Dynamic Workers, with MITM HTTPS enabling secure git operations. Reusable behavior should be saved with `store_code` instead of adding more model-visible tools. Network access from dynamic code is blocked unless an egress handler supports the target domain. GitHub and Cloudflare egress support is provided by `@clawflare/github` and `@clawflare/cloudflare`.
 
 Skills are loaded by the CLI from generic Agent Skills locations (`~/.agents/skills/` and project `.agents/skills/`) and sent to the harness as prompt context.
 

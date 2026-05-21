@@ -3,9 +3,6 @@
  *
  * The suite deploys a brand-new Cloudflare Worker test instance, runs API tests
  * against the workers.dev URL, then deletes the Worker.
- * 
- * Note: Some tests (container workspace) require Docker to be installed and
- * running, as Cloudflare Containers need to build the container image.
  */
 
 import { spawn } from "node:child_process";
