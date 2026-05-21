@@ -292,11 +292,13 @@ export class Agent {
     });
 
     const streamCreateStart = now();
-    const response = await this.streamFn(session.model, llmContext, {
+    const streamOptions = {
       apiKey: apiKey ?? undefined,
       signal,
       reasoning: session.thinkingLevel === "off" ? undefined : session.thinkingLevel,
-    });
+      ...(session.model.provider === "amazon-bedrock" && apiKey ? { bearerToken: apiKey } : {}),
+    };
+    const response = await this.streamFn(session.model, llmContext, streamOptions);
     this.config.debugTiming?.("assistant.stream.created", streamCreateStart, {
       model: session.model.id,
       provider: session.model.provider,

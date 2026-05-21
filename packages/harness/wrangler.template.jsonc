@@ -31,8 +31,8 @@
     {
       "binding": "DB",
       "database_name": "clawflare",
-      "database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
-      "preview_database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
+      "database_id": "{{DATABASE_ID}}",
+      "preview_database_id": "{{PREVIEW_DATABASE_ID}}",
       "migrations_dir": "migrations"
     }
   ],
@@ -70,7 +70,7 @@
   ],
 
   "vars": {
-    "AI_PROVIDER": "amazon-bedrock",
-    "AI_MODEL": "minimax.minimax-m2.5"
+    "AI_PROVIDER": "{{AI_PROVIDER}}",
+    "AI_MODEL": "{{AI_MODEL}}"
   }
 }

@@ -1,6 +1,10 @@
-import { getModel, streamSimple, type Model } from "@earendil-works/pi-ai";
+import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@earendil-works/pi-ai";
+import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Env } from "./internal-types/index.js";
+
+// Eagerly register the bedrock provider module to prevent dynamic import issues in Workers
+setBedrockProviderModule(bedrockProviderModule);
 
 export interface BuildAgentComponentsResult {
   model: Model<"bedrock-converse-stream">;
@@ -20,6 +24,7 @@ export async function buildAgentComponents(env: Env): Promise<BuildAgentComponen
 
   // Normalize bedrock token if present
   const bedrockToken = normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK) || "";
+  console.log("Bedrock token", bedrockToken ? `${bedrockToken.slice(0, 2)}…${bedrockToken.slice(-2)}` : "missing");
 
   // Create getApiKey function for the provider
   const getApiKey = async () => {

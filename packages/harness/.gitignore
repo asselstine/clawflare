@@ -1,0 +1,12 @@
+# Local environment files
+.env
+
+# Build output
+dist/
+.wrangler/
+
+# Node modules
+node_modules/
+
+# TypeScript
+*.tsbuildinfo

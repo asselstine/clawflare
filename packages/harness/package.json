@@ -16,6 +16,7 @@
     "dev:raw": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "timing:analyze": "node scripts/analyze-timing.mjs",
+    "generate:config": "node scripts/generate-config.mjs",
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

@@ -10,35 +10,102 @@ pnpm install
 pnpm dev
 ```
 
+## Configuration
+
+The harness uses a **template-based configuration** to separate complex Worker setup from environment-specific values.
+
+### Template-based Configuration
+
+Instead of editing `wrangler.jsonc` directly, use the template system:
+
+1. **Copy the environment example**:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **Fill in your values** in `.env`:
+   ```bash
+   # Required: D1 Database IDs
+   DATABASE_ID=your-production-database-id
+   
+   # Optional: AI configuration (has defaults)
+   AI_PROVIDER=amazon-bedrock
+   AI_MODEL=minimax.minimax-m2.5
+   ```
+
+3. **Generate wrangler.jsonc** from the template:
+   ```bash
+   pnpm generate:config
+   ```
+
+This substitutes your environment variables into `wrangler.template.jsonc` and outputs `wrangler.jsonc`.
+
+### Getting D1 Database IDs
+
+```bash
+# Or list existing databases
+npx wrangler d1 list
+```
+
 ## Cloudflare Bindings
 
 The harness uses:
 
-- `SESSION_STORE` Durable Object for strongly consistent conversation state and events
-- `DATASTORE` SQLite Durable Object for stored code and egress handler metadata
+- `DB` D1 database for persistent sessions, events, stored code, and egress handler metadata
+- `WEBSOCKET_SESSION` Durable Object for WebSocket connections
 - `LOADER` Worker Loader binding for Dynamic Worker execution
+- `AGENT_WORKFLOW` Workflow for durable agent execution
+- `HTTP_GATEWAY` Service binding for controlled outbound HTTP from Dynamic Workers
 
-`wrangler.jsonc` configures the Worker Loader and Durable Object migrations.
+`wrangler.template.jsonc` configures these bindings with placeholder values for substitution.
 
 ## Secrets and Variables
+
+Set production secrets via Wrangler:
 
 ```bash
 npx wrangler secret put CLAWFLARE_API_TOKEN
 npx wrangler secret put AWS_BEARER_TOKEN_BEDROCK
 npx wrangler secret put CLOUDFLARE_API_TOKEN
 npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
-# optional
-npx wrangler secret put GITHUB_TOKEN
+npx wrangler secret put GITHUB_TOKEN  # optional
+```
+
+For local development, create `.dev.vars`:
+
+```bash
+CLAWFLARE_API_TOKEN=your-token
+AWS_BEARER_TOKEN_BEDROCK=your-aws-token
+```
+
+## Database Migrations
+
+```bash
+# Create a new migration
+pnpm db:migrations:create <migration_name>
+
+# Apply to local database
+pnpm db:migrations:apply:local
+
+# Apply to remote/production database
+pnpm db:migrations:apply:remote
+
+# List migrations
+pnpm db:migrations:list
 ```
 
 ## API Endpoints
 
 - `POST /v1/chat` - send a prompt or command
+- `GET /v1/session/:id` - poll session messages/events/status
+- `POST /v1/session/:id/close` - close a session
+- `GET /v1/sessions` - list sessions
 - `GET /v1/context` - get current context
 - `POST /v1/context` - create a new context
 - `GET /v1/tools` - list available model-visible tools
 - `GET /v1/info` - provider/model metadata
 - `GET /health` - health check
+- `/ws` - WebSocket upgrade for real-time sessions
 
 All endpoints except `/health` require a bearer token:
 
@@ -56,7 +123,7 @@ The agent exposes exactly four model-visible tools:
 - `execute_stored_code` - run previously stored JavaScript by name
 - `search` - query stored code and egress handler metadata
 
-Dynamic code receives constrained capabilities only. It does not receive raw Cloudflare/GitHub tokens, session/store Durable Objects, or the datastore binding.
+Dynamic code receives constrained capabilities only. It does not receive raw Cloudflare/GitHub tokens or database bindings.
 
 ## Egress
 
@@ -67,8 +134,24 @@ Built-in egress packages:
 - `@clawflare/github` for `api.github.com`, `github.com`, and `raw.githubusercontent.com`
 - `@clawflare/cloudflare` for `api.cloudflare.com`
 
-Enabled handler metadata is stored in the SQLite Durable Object.
+Enabled handler metadata is stored in D1.
 
 ## Skills
 
 Skills are not stored or served by the harness. The CLI loads generic Agent Skills locally from `~/.agents/skills/` and project `.agents/skills/` directories, then includes relevant skill context in prompts sent to the harness.
+
+## Environment-Specific Deployment
+
+For production deployment with specific environment configs:
+
+```bash
+# Ensure environment variables are set
+export DATABASE_ID=prod-db-id
+export PREVIEW_DATABASE_ID=prod-preview-db-id
+export AI_PROVIDER=amazon-bedrock
+export AI_MODEL=minimax.minimax-m2.5
+
+# Generate config and deploy
+pnpm generate:config
+pnpm deploy
+```

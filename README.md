@@ -36,19 +36,27 @@ cd packages/harness
 wrangler d1 create clawflare
 ```
 
-Copy the database ID from the output and update `wrangler.jsonc`:
+Copy the database ID from the output.
 
-```json
-"d1_databases": [
-  {
-    "binding": "DB",
-    "database_name": "clawflare",
-    "database_id": "YOUR_ACTUAL_DATABASE_ID",
-    "preview_database_id": "YOUR_PREVIEW_DATABASE_ID",
-    "migrations_dir": "migrations"
-  }
-]
+#### Configure with Templates (Recommended)
+
+Instead of manually editing `wrangler.jsonc`, use environment-based substitution:
+
+```bash
+# 1. Create environment file
+cp packages/harness/.env.example packages/harness/.env
+
+# 2. Edit with your database IDs and preferences
+# Required: DATABASE_ID and PREVIEW_DATABASE_ID from `wrangler d1 create` output
+# Optional: AI_PROVIDER, AI_MODEL (have defaults)
+
+# 3. Generate wrangler.jsonc from template
+pnpm --filter @clawflare/harness generate:config
 ```
+
+#### Manual Configuration (Alternative)
+
+Edit `packages/harness/wrangler.jsonc` directly, replacing the placeholder values.
 
 #### Apply migrations
 
@@ -170,6 +178,18 @@ pnpm typecheck
 
 # Run harness unit tests
 pnpm --filter @clawflare/harness test
+
+# Generate wrangler.jsonc from template
+pnpm --filter @clawflare/harness generate:config
+
+# Create database migration
+pnpm --filter @clawflare/harness db:migrations:create <name>
+
+# Apply local migrations
+pnpm --filter @clawflare/harness db:migrations:apply:local
+
+# Apply remote migrations
+pnpm --filter @clawflare/harness db:migrations:apply:remote
 ```
 
 ### Environment Variables
@@ -235,7 +255,12 @@ Skills are loaded by the CLI from generic Agent Skills locations (`~/.agents/ski
 
 ### Deploying
 
-Before deploying production, replace the placeholder D1 IDs in `packages/harness/wrangler.jsonc` or use an environment-specific Wrangler config with real D1 database IDs.
+Before deploying production, generate the config with your D1 database IDs:
+
+```bash
+# Ensure DATABASE_ID and PREVIEW_DATABASE_ID are set
+pnpm --filter @clawflare/harness generate:config
+```
 
 Apply remote migrations first:
 
