@@ -650,6 +650,35 @@ async function runTests(url: string, token: string): Promise<void> {
     // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
   });
 
+  await runner.runTest("Container: git clone works through GitHub egress", async () => {
+    const containerId = `e2e-github-clone-${Date.now()}`;
+
+    const createResponse = await fetch(`${url}/__test/container-create`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ containerId }),
+    });
+    const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
+    if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
+    if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+
+    const cloneCommand = [
+      "rm -rf /workspace/clawflare",
+      "git clone --depth 1 --filter=blob:none https://github.com/asselstine/clawflare.git /workspace/clawflare",
+      "test -f /workspace/clawflare/package.json",
+    ].join(" && ");
+
+    const bashResponse = await fetch(`${url}/__test/container-bash`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ containerId, command: cloneCommand, cwd: "/workspace" }),
+    });
+    const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
+    if (!bashData.ok || bashData.exitCode !== 0) {
+      throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
+    }
+  });
+
   await runner.runTest("404 on unknown endpoint", async () => {
     const response = await fetch(`${url}/unknown-endpoint`, { headers: { Authorization: `Bearer ${token}` } });
     if (response.status !== 404) throw new Error(`Expected 404, got ${response.status}`);

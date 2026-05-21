@@ -71,6 +71,7 @@ describe("github egress handler", () => {
       ["https://api.github.com/repos/owner/repo", "api"],
       ["https://raw.githubusercontent.com/owner/repo/main/a.ts", "raw"],
       ["https://codeload.github.com/owner/repo/tar.gz/main", "archive"],
+      ["https://github.com/owner/repo/archive/refs/heads/main.tar.gz", "archive"],
       ["https://github.com/owner/repo", "web"],
       ["https://github.com/owner/repo.git", "git-smart-http"],
       ["https://github.com/owner/repo.git/info/refs?service=git-upload-pack", "git-smart-http"],
@@ -172,26 +173,36 @@ describe("github egress handler", () => {
       expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBe("2022-11-28");
     });
 
+    it("should add default User-Agent header for API requests", async () => {
+      const capturedRequest = await captureFetchRequest(new Request("https://api.github.com/user"));
+
+      expect(capturedRequest.headers.get("User-Agent")).toBe("Clawflare-Agent");
+    });
+
     it("should preserve existing API request headers", async () => {
       const capturedRequest = await captureFetchRequest(new Request("https://api.github.com/user", {
         headers: {
           "Accept": "application/vnd.github.v3+json",
+          "User-Agent": "Existing-Agent",
           "X-Custom-Header": "custom-value",
         },
       }));
 
       expect(capturedRequest.headers.get("Accept")).toBe("application/vnd.github.v3+json");
+      expect(capturedRequest.headers.get("User-Agent")).toBe("Existing-Agent");
       expect(capturedRequest.headers.get("X-Custom-Header")).toBe("custom-value");
     });
 
     it.each([
       "https://raw.githubusercontent.com/user/repo/main/README.md",
       "https://codeload.github.com/user/repo/tar.gz/main",
+      "https://github.com/owner/repo/archive/refs/heads/main.tar.gz",
       "https://github.com/owner/repo",
     ])("should not add REST API headers to %s", async (url) => {
       const capturedRequest = await captureFetchRequest(new Request(url));
 
       expect(capturedRequest.headers.get("Accept")).not.toBe("application/vnd.github+json");
+      expect(capturedRequest.headers.get("User-Agent")).toBe("Clawflare-Agent");
       expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
     });
 
@@ -202,6 +213,35 @@ describe("github egress handler", () => {
       ));
 
       expect(capturedRequest.headers.get("Accept")).toBe("application/x-git-upload-pack-advertisement");
+      expect(capturedRequest.headers.get("User-Agent")).toBeNull();
+      expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
+    });
+
+    it("should remove browser-only headers from native git smart HTTP", async () => {
+      const capturedRequest = await captureFetchRequest(new Request(
+        "https://github.com/owner/repo.git/git-upload-pack",
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/x-git-upload-pack-result",
+            Origin: "https://example.com",
+            Referer: "https://example.com/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-User": "?1",
+            "X-GitHub-Api-Version": "2022-11-28",
+          },
+        }
+      ));
+
+      expect(capturedRequest.headers.get("Accept")).toBe("application/x-git-upload-pack-result");
+      expect(capturedRequest.headers.get("Origin")).toBeNull();
+      expect(capturedRequest.headers.get("Referer")).toBeNull();
+      expect(capturedRequest.headers.get("Sec-Fetch-Dest")).toBeNull();
+      expect(capturedRequest.headers.get("Sec-Fetch-Mode")).toBeNull();
+      expect(capturedRequest.headers.get("Sec-Fetch-Site")).toBeNull();
+      expect(capturedRequest.headers.get("Sec-Fetch-User")).toBeNull();
       expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
     });
 
@@ -222,7 +262,7 @@ describe("github egress handler", () => {
   });
 
   describe("decorateGithubHeaders", () => {
-    it("only decorates API traffic", () => {
+    it("only adds User-Agent for raw traffic", () => {
       const headers = new Headers();
 
       decorateGithubHeaders(
@@ -231,6 +271,7 @@ describe("github egress handler", () => {
         createContext({ GITHUB_TOKEN: "secret" })
       );
 
+      expect(headers.get("User-Agent")).toBe("Clawflare-Agent");
       expect(headers.get("Accept")).toBeNull();
       expect(headers.get("Authorization")).toBeNull();
       expect(headers.get("X-GitHub-Api-Version")).toBeNull();

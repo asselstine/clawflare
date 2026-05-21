@@ -152,13 +152,13 @@ All tools accept an optional `containerId` to use a specific container:
 Agent interactions:
 
 ```
-User: Clone the workers-sdk repo and show me the README
+User: Create a scratch workspace and write a note
 
 Agent: 
-1. Calls container_create with cloneUrl
-2. Container starts and clones repo
-3. Calls container_read path="README.md"
-4. Returns contents to user
+1. Calls container_create
+2. Container starts with an empty /workspace
+3. Calls container_write path="note.txt"
+4. Returns confirmation to user
 ```
 
 ## Testing

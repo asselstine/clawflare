@@ -33,6 +33,10 @@ export function classifyGithubRequest(request: Request): GithubTrafficKind {
   if (host === "codeload.github.com") return "archive";
 
   if (host === "github.com") {
+    if (/^\/[^/]+\/[^/]+\/archive\/refs\//.test(path)) {
+      return "archive";
+    }
+
     if (
       path.includes(".git/") ||
       path.endsWith(".git") ||
@@ -55,15 +59,18 @@ export function decorateGithubHeaders(
 ): void {
   const kind = classifyGithubRequest(request);
 
-  if (kind !== "api") {
-    return;
+  if (kind === "api") {
+    headers.set("User-Agent", headers.get("User-Agent") || "Clawflare-Agent");
+    headers.set("Accept", headers.get("Accept") || "application/vnd.github+json");
+    headers.set("X-GitHub-Api-Version", headers.get("X-GitHub-Api-Version") || "2022-11-28");
+
+    if (context.env.GITHUB_TOKEN) {
+      headers.set("Authorization", `Bearer ${context.env.GITHUB_TOKEN}`);
+    }
   }
 
-  headers.set("Accept", headers.get("Accept") || "application/vnd.github+json");
-  headers.set("X-GitHub-Api-Version", headers.get("X-GitHub-Api-Version") || "2022-11-28");
-
-  if (context.env.GITHUB_TOKEN) {
-    headers.set("Authorization", `Bearer ${context.env.GITHUB_TOKEN}`);
+  if (kind === "raw" || kind === "archive" || kind === "web") {
+    headers.set("User-Agent", headers.get("User-Agent") || "Clawflare-Agent");
   }
 }
 
@@ -75,6 +82,15 @@ function withDiagnosticHeaders(response: Response, kind: GithubTrafficKind): Res
     status: response.status,
     statusText: response.statusText,
     headers,
+  });
+}
+
+function createOutboundRequest(request: Request, headers: Headers): Request {
+  return new Request(request.url, {
+    method: request.method,
+    headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    redirect: request.redirect,
   });
 }
 
@@ -90,11 +106,11 @@ export const githubHandler = {
   ...baseGithubHandler,
 
   async fetch(request: Request, context: HttpEgressHandlerContext<GithubEnv>): Promise<Response> {
-    if (context.env.MOCK_AI === "true") {
+    const kind = classifyGithubRequest(request);
+
+    if (context.env.MOCK_AI === "true" && kind !== "git-smart-http") {
       return Response.json({ ok: true, handler: metadata.name, url: request.url });
     }
-
-    const kind = classifyGithubRequest(request);
 
     if (kind === "git-smart-http" && context.env.GITHUB_SMART_HTTP_EGRESS === "disabled") {
       return new Response(
@@ -115,6 +131,12 @@ export const githubHandler = {
 
     if (kind === "git-smart-http") {
       headers.delete("X-GitHub-Api-Version");
+      headers.delete("Origin");
+      headers.delete("Referer");
+      headers.delete("Sec-Fetch-Dest");
+      headers.delete("Sec-Fetch-Mode");
+      headers.delete("Sec-Fetch-Site");
+      headers.delete("Sec-Fetch-User");
       if (context.env.GITHUB_TOKEN && !headers.has("Authorization")) {
         headers.set("Authorization", `Bearer ${context.env.GITHUB_TOKEN}`);
       }
@@ -122,7 +144,7 @@ export const githubHandler = {
       decorateGithubHeaders(headers, request, context);
     }
 
-    const response = await fetch(new Request(request, { headers }));
+    const response = await fetch(createOutboundRequest(request, headers));
     return withDiagnosticHeaders(response, kind);
   },
 };

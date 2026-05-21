@@ -32,7 +32,10 @@ const codingContainerOutbound = async (
  * The static outbound handler is called for egress requests.
  */
 export class CodingContainer extends Container<Env> {
-  static override outbound = codingContainerOutbound;
+  static {
+    // Assign through the base accessor so @cloudflare/containers registers the handler.
+    this.outbound = codingContainerOutbound;
+  }
 
   defaultPort = 8080;
   requiredPorts = [8080];
