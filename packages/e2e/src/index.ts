@@ -77,6 +77,16 @@ class TestRunner {
   }
 }
 
+async function readJsonResponse<T>(response: Response): Promise<T> {
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    const preview = text.length > 1000 ? `${text.slice(0, 1000)}...` : text;
+    throw new Error(`Expected JSON response, got HTTP ${response.status} ${response.statusText}: ${preview}`);
+  }
+}
+
 function runWrangler(args: string[], options: { capture?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("pnpm", ["exec", "wrangler", ...args], {
@@ -510,7 +520,7 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
-  await runner.runTest("generic egress is allowed", async () => {
+  await runner.runTest("generic egress is blocked by default", async () => {
     const response = await fetch(`${url}/__test/execute-code`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -519,8 +529,8 @@ async function runTests(url: string, token: string): Promise<void> {
       }),
     });
     const data = await response.json() as { ok: boolean; result?: { status?: number; body?: string } };
-    if (!data.ok || data.result?.status !== 200 || !data.result.body?.includes("Example Domain")) {
-      throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
+    if (!data.ok || data.result?.status !== 403 || !data.result.body?.includes("No enabled egress handler")) {
+      throw new Error(`Expected generic egress to be blocked, got: ${JSON.stringify(data)}`);
     }
   });
 
@@ -616,7 +626,7 @@ async function runTests(url: string, token: string): Promise<void> {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ containerId }),
     });
-    const createData = await createResponse.json() as { ok: boolean; containerId: string; status: string };
+    const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
     if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
     if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
     
@@ -626,7 +636,7 @@ async function runTests(url: string, token: string): Promise<void> {
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ containerId, command: "ls -la", cwd: "/workspace" }),
     });
-    const bashData = await bashResponse.json() as { ok: boolean; exitCode: number | null; stdout: string; stderr: string };
+    const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
     if (!bashData.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
     if (bashData.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.exitCode}`);
     if (!bashData.stdout.includes("total") || !bashData.stdout.includes("workspace")) {

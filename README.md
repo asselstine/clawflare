@@ -241,7 +241,7 @@ Clawflare supports an isolated container workspace via Cloudflare Containers. Th
 
 - Debian-based environment with Node.js, git, ripgrep, and dev tools
 - Persistent filesystem at `/workspace` per session
-- MITM HTTPS for secure git operations via egress handlers
+- MITM HTTPS for controlled outbound traffic via egress handlers
 - 8 model-visible tools: `container_create`, `container_bash`, `container_read`, `container_write`, `container_edit`, `container_grep`, `container_find`, `container_ls`
 
 **Requirements:**
@@ -287,7 +287,9 @@ Clawflare exposes four base model-visible tools plus eight container workspace t
 - `container_find` - find files/directories by name/type
 - `container_ls` - list directory contents
 
-The container provides an isolated Debian-based environment with Node.js, git, ripgrep, and development tools. All filesystem operations are confined to `/workspace`. Container egress routes through the same egress gateway as Dynamic Workers, with MITM HTTPS enabling secure git operations. Reusable behavior should be saved with `store_code` instead of adding more model-visible tools. Network access from dynamic code is blocked unless an egress handler supports the target domain. GitHub and Cloudflare egress support is provided by `@clawflare/github` and `@clawflare/cloudflare`.
+The container provides an isolated Debian-based environment with Node.js, git, ripgrep, and development tools. All filesystem operations are confined to `/workspace`. Container egress routes through the same egress gateway as Dynamic Workers, with MITM HTTPS intercepting outbound requests. Reusable behavior should be saved with `store_code` instead of adding more model-visible tools. Network access from dynamic code is blocked unless an egress handler supports the target domain. GitHub and Cloudflare egress support is provided by `@clawflare/github` and `@clawflare/cloudflare`.
+
+GitHub egress classifies traffic by host/path. REST API requests to `api.github.com` receive GitHub API headers and optional `GITHUB_TOKEN` auth. Raw content (`raw.githubusercontent.com`) and archives (`codeload.github.com`) pass through without REST JSON headers. `container_create({ cloneUrl })` bootstraps GitHub repositories from codeload archives by default, so it does not depend on native `git clone`. Native Git smart-HTTP pass-through is enabled by default and can be disabled with `GITHUB_SMART_HTTP_EGRESS=disabled`.
 
 Skills are loaded by the CLI from generic Agent Skills locations (`~/.agents/skills/` and project `.agents/skills/`) and sent to the harness as prompt context.
 

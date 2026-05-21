@@ -27,6 +27,111 @@ export interface ContainerToolContext {
   sessionId: string;
 }
 
+export interface GithubRepoRef {
+  owner: string;
+  repo: string;
+  ref?: string;
+}
+
+function stripGitSuffix(value: string): string {
+  return value.endsWith(".git") ? value.slice(0, -4) : value;
+}
+
+function isValidGithubPathPart(value: string): boolean {
+  return /^[A-Za-z0-9_.-]+$/.test(value);
+}
+
+export function parseGithubCloneUrl(input: string): GithubRepoRef | null {
+  const trimmed = input.trim();
+  const scpMatch = /^git@github\.com:([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#?].*)?$/.exec(trimmed);
+
+  if (scpMatch) {
+    const owner = scpMatch[1]!;
+    const repo = stripGitSuffix(scpMatch[2]!);
+    if (isValidGithubPathPart(owner) && isValidGithubPathPart(repo)) {
+      return { owner, repo };
+    }
+    return null;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+
+  if (url.hostname.toLowerCase() !== "github.com") {
+    return null;
+  }
+
+  let owner: string | undefined;
+  let repo: string | undefined;
+
+  if ((url.protocol === "https:" || url.protocol === "http:") && !url.username) {
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length !== 2) return null;
+    [owner, repo] = parts;
+  } else if (url.protocol === "ssh:" && url.username === "git") {
+    const parts = url.pathname.split("/").filter(Boolean);
+    if (parts.length !== 2) return null;
+    [owner, repo] = parts;
+  } else {
+    return null;
+  }
+
+  if (!owner || !repo) {
+    return null;
+  }
+
+  repo = stripGitSuffix(repo);
+
+  if (!isValidGithubPathPart(owner) || !isValidGithubPathPart(repo)) {
+    return null;
+  }
+
+  const ref = url.searchParams.get("ref") || (url.hash ? decodeURIComponent(url.hash.slice(1)) : undefined);
+  return ref ? { owner, repo, ref } : { owner, repo };
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+export async function createGithubArchiveBootstrapCommand(
+  _env: Env,
+  cloneUrl: string,
+  _signal?: AbortSignal
+): Promise<string | null> {
+  const repo = parseGithubCloneUrl(cloneUrl);
+  if (!repo) return null;
+
+  const refAssignment = repo.ref
+    ? `ref=${shellQuote(repo.ref)}`
+    : [
+        `metadata_url=${shellQuote(`https://api.github.com/repos/${repo.owner}/${repo.repo}`)}`,
+        "ref=\"$(node -e 'fetch(process.argv[1]).then(async (response) => { if (!response.ok) throw new Error(`GitHub metadata HTTP ${response.status}: ${await response.text()}`); return response.json(); }).then((data) => { if (typeof data.default_branch !== \"string\" || data.default_branch.length === 0) throw new Error(\"GitHub metadata did not include default_branch\"); process.stdout.write(data.default_branch); }).catch((error) => { console.error(error.message); process.exit(1); });' \"$metadata_url\")\"",
+      ].join("\n");
+
+  return [
+    "set -euo pipefail",
+    `owner=${shellQuote(repo.owner)}`,
+    `repo=${shellQuote(repo.repo)}`,
+    refAssignment,
+    "archive_url=\"$(node -e 'const [owner, repo, ref] = process.argv.slice(1); process.stdout.write(`https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tar.gz/${encodeURIComponent(ref)}`);' \"$owner\" \"$repo\" \"$ref\")\"",
+    "tmp=\"$(mktemp -d /workspace/.tmp-clone.XXXXXX)\"",
+    "cleanup() { rm -rf \"$tmp\"; }",
+    "trap cleanup EXIT",
+    "curl -fsSL \"$archive_url\" -o \"$tmp/repo.tar.gz\"",
+    "mkdir -p \"$tmp/extract\"",
+    "tar -xzf \"$tmp/repo.tar.gz\" -C \"$tmp/extract\"",
+    "root=\"$(find \"$tmp/extract\" -mindepth 1 -maxdepth 1 -type d | head -n 1)\"",
+    "if [ -z \"$root\" ]; then echo 'GitHub archive did not contain a repository directory' >&2; exit 1; fi",
+    "shopt -s dotglob nullglob",
+    "mv \"$root\"/* /workspace/",
+  ].join("\n");
+}
+
 // Container create parameters
 interface ContainerCreateParams {
   containerId?: string;
@@ -278,10 +383,13 @@ export function createContainerCreateTool(
       
       // Clone repository if requested
       if (p.cloneUrl) {
+        const bootstrapCommand = await createGithubArchiveBootstrapCommand(env, p.cloneUrl, signal);
+        const cloneCommand = bootstrapCommand ?? `git clone ${shellQuote(p.cloneUrl)} .`;
+        const cloneLabel = bootstrapCommand ? "GitHub archive bootstrap" : "Git clone";
         const cloneResult = await containerBash(
           env,
           containerId,
-          `git clone "${p.cloneUrl}" .`,
+          cloneCommand,
           "/workspace",
           120000, // 2 minute timeout for clone
           undefined,
@@ -290,7 +398,7 @@ export function createContainerCreateTool(
         
         if (!cloneResult.ok) {
           const formatted = formatBashResult(cloneResult, 12000);
-          throw new Error(`Git clone failed:\n${formatted.text}`);
+          throw new Error(`${cloneLabel} failed:\n${formatted.text}`);
         }
       }
       

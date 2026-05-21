@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { formatExecutionResult, MAX_TOOL_RESPONSE_LENGTH_CHARS } from "../src/tools/index.js";
+import { createGithubArchiveBootstrapCommand, parseGithubCloneUrl } from "../src/container/tools.js";
 
 describe("tool output formatting", () => {
   it("shows captured stdout when code returns no explicit result", () => {
@@ -43,5 +44,36 @@ describe("tool output formatting", () => {
 
     expect(text.length).toBeLessThanOrEqual(200);
     expect(text).toContain("Tool output truncated");
+  });
+});
+
+describe("GitHub container archive bootstrap", () => {
+  it.each([
+    ["https://github.com/owner/repo.git", { owner: "owner", repo: "repo" }],
+    ["https://github.com/owner/repo", { owner: "owner", repo: "repo" }],
+    ["ssh://git@github.com/owner/repo.git", { owner: "owner", repo: "repo" }],
+    ["git@github.com:owner/repo.git", { owner: "owner", repo: "repo" }],
+    ["https://github.com/owner/repo.git#dev", { owner: "owner", repo: "repo", ref: "dev" }],
+  ])("parses %s", (input, expected) => {
+    expect(parseGithubCloneUrl(input)).toEqual(expected);
+  });
+
+  it.each([
+    "https://gitlab.com/owner/repo.git",
+    "https://github.com/owner/repo/extra",
+    "git@github.com:owner/repo/path.git",
+  ])("rejects unsupported clone URL %s", (input) => {
+    expect(parseGithubCloneUrl(input)).toBeNull();
+  });
+
+  it("creates a codeload bootstrap command using repository metadata from inside the container", async () => {
+    const command = await createGithubArchiveBootstrapCommand(
+      {} as never,
+      "https://github.com/owner/repo.git"
+    );
+
+    expect(command).toContain("https://api.github.com/repos/owner/repo");
+    expect(command).toContain("https://codeload.github.com/");
+    expect(command).toContain("tar -xzf");
   });
 });

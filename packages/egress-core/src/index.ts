@@ -54,7 +54,7 @@ export interface DefineHttpEgressHandlerConfig<Env = unknown> {
   /**
    * Decorates headers before the request is made
    */
-  decorateHeaders?: (headers: Headers, context: HttpEgressHandlerContext<Env>) => void | Promise<void>;
+  decorateHeaders?: (headers: Headers, request: Request, context: HttpEgressHandlerContext<Env>) => void | Promise<void>;
 }
 
 /**
@@ -85,7 +85,7 @@ export function defineHttpEgressHandler<Env = unknown>(
 
     async fetch(request: Request, context: HttpEgressHandlerContext<Env>): Promise<Response> {
       // Mock mode support
-      if (context.env.MOCK_AI === "true" as unknown) {
+      if (context.env.MOCK_AI === "true") {
         if (config.mock) {
           return config.mock(request, context);
         }
@@ -96,7 +96,7 @@ export function defineHttpEgressHandler<Env = unknown>(
 
       // Apply header decorations
       if (config.decorateHeaders) {
-        await config.decorateHeaders(headers, context);
+        await config.decorateHeaders(headers, request, context);
       }
 
       return fetch(new Request(request, { headers }));

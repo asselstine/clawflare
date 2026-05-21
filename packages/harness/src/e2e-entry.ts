@@ -4,13 +4,30 @@
 import { HttpGateway, routeOutboundRequest } from "./egress/gateway.js";
 import { PersistentSessionWorkflow } from "./workflow.js";
 import { ClawflareWebSocketSession } from "./ws-session.js";
-import { CodingContainer } from "./container/coding-container.js";
+import { CodingContainer, ContainerProxy } from "./container/coding-container.js";
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
 import { containerBash, containerLs, getContainerHealth } from "./container/client.js";
 
-export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer };
+export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer, ContainerProxy };
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryContainerTestCall<T>(operation: () => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) await sleep(1000 * attempt);
+    }
+  }
+  throw lastError;
+}
 
 // Test endpoints
 export default {
@@ -80,22 +97,47 @@ export default {
 
     // Container test endpoints
     if (path === "/__test/container-create" && request.method === "POST") {
-      const body = await request.json<{ containerId?: string }>();
-      const containerId = body.containerId || `e2e-test-${Date.now()}`;
-      const health = await getContainerHealth(env, containerId);
-      return Response.json({ ok: true, containerId, status: health.status });
+      try {
+        const body = await request.json<{ containerId?: string }>();
+        const containerId = body.containerId || `e2e-test-${Date.now()}`;
+        const health = await retryContainerTestCall(() => getContainerHealth(env, containerId));
+        return Response.json({ ok: true, containerId, status: health.status });
+      } catch (error) {
+        return Response.json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }, { status: 500 });
+      }
     }
 
     if (path === "/__test/container-bash" && request.method === "POST") {
-      const body = await request.json<{ containerId: string; command: string; cwd?: string }>();
-      const result = await containerBash(env, body.containerId, body.command, body.cwd);
-      return Response.json({ ok: result.ok, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+      try {
+        const body = await request.json<{ containerId: string; command: string; cwd?: string }>();
+        const result = await retryContainerTestCall(() => containerBash(env, body.containerId, body.command, body.cwd));
+        return Response.json({ ok: result.ok, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+      } catch (error) {
+        return Response.json({
+          ok: false,
+          exitCode: null,
+          stdout: "",
+          stderr: error instanceof Error ? error.message : String(error),
+        }, { status: 500 });
+      }
     }
 
     if (path === "/__test/container-ls" && request.method === "POST") {
-      const body = await request.json<{ containerId: string; path?: string }>();
-      const result = await containerLs(env, body.containerId, body.path);
-      return Response.json({ ok: result.ok, entries: result.entries, entryCount: result.entryCount });
+      try {
+        const body = await request.json<{ containerId: string; path?: string }>();
+        const result = await retryContainerTestCall(() => containerLs(env, body.containerId, body.path));
+        return Response.json({ ok: result.ok, entries: result.entries, entryCount: result.entryCount });
+      } catch (error) {
+        return Response.json({
+          ok: false,
+          entries: [],
+          entryCount: 0,
+          error: error instanceof Error ? error.message : String(error),
+        }, { status: 500 });
+      }
     }
 
     // Delegate to main handler for other endpoints

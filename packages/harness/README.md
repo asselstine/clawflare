@@ -131,8 +131,10 @@ Network egress from Dynamic Workers is routed through `HttpGateway`. Unsupported
 
 Built-in egress packages:
 
-- `@clawflare/github` for `api.github.com`, `github.com`, and `raw.githubusercontent.com`
+- `@clawflare/github` for `api.github.com`, `github.com`, `raw.githubusercontent.com`, and `codeload.github.com`
 - `@clawflare/cloudflare` for `api.cloudflare.com`
+
+GitHub REST API requests receive API-specific headers and optional `GITHUB_TOKEN` auth. Raw content and codeload archives pass through without REST JSON headers. GitHub `cloneUrl` container initialization uses archive bootstrap; native Git smart-HTTP pass-through is enabled by default and can be disabled with `GITHUB_SMART_HTTP_EGRESS=disabled`.
 
 Enabled handler metadata is stored in D1.
 

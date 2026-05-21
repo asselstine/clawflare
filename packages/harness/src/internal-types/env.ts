@@ -96,6 +96,9 @@ export interface Env {
   XIAOMI_TOKEN_PLAN_AMS_API_KEY?: string;
   XIAOMI_TOKEN_PLAN_SGP_API_KEY?: string;
 
+  // Egress policy
+  ALLOW_GENERIC_EGRESS?: string;
+
   // Debug settings
   CLAWFLARE_DEBUG_TIMING?: string;
 }
