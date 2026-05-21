@@ -436,6 +436,10 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         const finalizeStart = timingStart();
         const dataLayer = getDataLayer(this.env);
         const status = agentSession.status === "error" ? "error" : "idle";
+        logTiming(this.env, sessionId, "workflow.prompt.finalizing", finalizeStart, { 
+          currentSessionStatus: agentSession.status,
+          willSetStatusTo: status 
+        });
         await saveSessionMetadata(dataLayer, sessionId, status, agentSession.errorMessage);
         logTiming(this.env, sessionId, "workflow.prompt.finalized", finalizeStart, { status });
       });

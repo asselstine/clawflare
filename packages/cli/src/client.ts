@@ -180,7 +180,7 @@ export class AgentClient {
   async *streamSession(
     sessionId: string,
     signal?: AbortSignal,
-    options: { pollIntervalMs?: number; maxPolls?: number; initialCursor?: string } = {},
+    options: { pollIntervalMs?: number; maxPolls?: number; initialCursor?: string; debug?: boolean } = {},
   ): AsyncGenerator<{ session: SessionResponse; newEvents: SessionEvent[]; complete: boolean }> {
     const pollIntervalMs = options.pollIntervalMs ?? 500;
     const maxPolls = options.maxPolls ?? 300;
@@ -194,9 +194,18 @@ export class AgentClient {
       const newEvents = session.events;
       const complete = session.status === "idle" || session.status === "error";
       
+      if (options.debug) {
+        console.log(`[streamSession] poll=${poll} status=${session.status} events=${newEvents.length} complete=${complete} cursor=${cursor ?? "0"}`);
+      }
+      
       yield { session, newEvents, complete };
       
-      if (complete) return;
+      if (complete) {
+        if (options.debug) {
+          console.log(`[streamSession] polling complete - status=${session.status}`);
+        }
+        return;
+      }
       
       cursor = session.nextEventCursor;
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
