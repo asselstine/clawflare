@@ -8,7 +8,7 @@ import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { Env } from "../../internal-types/index.js";
 
-const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
  * Get session state - polls for messages and events

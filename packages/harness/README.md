@@ -127,7 +127,7 @@ Dynamic code receives constrained capabilities only. It does not receive raw Clo
 
 ## Egress
 
-Network egress from Dynamic Workers is routed through `HttpGateway`. Unsupported outbound requests are blocked with `403`.
+Network egress from Dynamic Workers is routed through `HttpGateway`. Registered egress handlers get first chance to handle matching domains; all other HTTP requests fall back to generic outbound `fetch`.
 
 Built-in egress packages:
 

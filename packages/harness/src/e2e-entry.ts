@@ -8,7 +8,7 @@ import { CodingContainer, ContainerProxy } from "./container/coding-container.js
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
-import { containerBash, containerLs, getContainerHealth } from "./container/client.js";
+import { containerBash, containerLs, destroyContainer, getContainerHealth } from "./container/client.js";
 
 export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer, ContainerProxy };
 
@@ -121,6 +121,19 @@ export default {
           exitCode: null,
           stdout: "",
           stderr: error instanceof Error ? error.message : String(error),
+        }, { status: 500 });
+      }
+    }
+
+    if (path === "/__test/container-destroy" && request.method === "POST") {
+      try {
+        const body = await request.json<{ containerId: string }>();
+        await destroyContainer(env, body.containerId);
+        return Response.json({ ok: true, containerId: body.containerId });
+      } catch (error) {
+        return Response.json({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
         }, { status: 500 });
       }
     }

@@ -178,6 +178,97 @@ function formatToolCallHeader(toolName: string, params: Record<string, unknown>)
       return "Search";
     }
 
+    // Container tools
+    case "container_bash": {
+      const command = params.command as string | undefined;
+      const cwd = params.cwd as string | undefined;
+      if (command) {
+        const display = command.length > 40 ? `${command.slice(0, 40)}...` : command;
+        const cwdInfo = cwd ? ` (cwd: ${cwd})` : "";
+        return `container_bash: "${display}"${cwdInfo}`;
+      }
+      return "container_bash";
+    }
+
+    case "container_ls": {
+      const path = params.path as string | undefined;
+      const recursive = params.recursive as boolean | undefined;
+      const pathDisplay = path || ".";
+      const recursiveFlag = recursive ? " -R" : "";
+      return `container_ls: ${pathDisplay}${recursiveFlag}`;
+    }
+
+    case "container_read": {
+      const path = params.path as string | undefined;
+      const startLine = params.startLine as number | undefined;
+      const endLine = params.endLine as number | undefined;
+      if (path) {
+        const range = startLine && endLine ? ` [${startLine}-${endLine}]` : "";
+        return `container_read: ${path}${range}`;
+      }
+      return "container_read";
+    }
+
+    case "container_write": {
+      const path = params.path as string | undefined;
+      const append = params.append as boolean | undefined;
+      if (path) {
+        const action = append ? ">>" : ">";
+        return `container_write: ${action} ${path}`;
+      }
+      return "container_write";
+    }
+
+    case "container_edit": {
+      const path = params.path as string | undefined;
+      const replaceAll = params.replaceAll as boolean | undefined;
+      if (path) {
+        const mode = replaceAll ? " (replace all)" : " (replace one)";
+        return `container_edit: ${path}${mode}`;
+      }
+      return "container_edit";
+    }
+
+    case "container_grep": {
+      const pattern = params.pattern as string | undefined;
+      const path = params.path as string | undefined;
+      const include = params.include as string | undefined;
+      const parts: string[] = [];
+      if (pattern) parts.push(`"${pattern}"`);
+      if (path && path !== ".") parts.push(`in: ${path}`);
+      if (include) parts.push(`include: ${include}`);
+      if (parts.length > 0) {
+        return `container_grep: ${parts.join(", ")}`;
+      }
+      return "container_grep";
+    }
+
+    case "container_find": {
+      const name = params.name as string | undefined;
+      const type = params.type as string | undefined;
+      const path = params.path as string | undefined;
+      const parts: string[] = [];
+      if (name) parts.push(`name: "${name}"`);
+      if (type && type !== "any") parts.push(`type: ${type}`);
+      if (path && path !== ".") parts.push(`in: ${path}`);
+      if (parts.length > 0) {
+        return `container_find: ${parts.join(", ")}`;
+      }
+      return "container_find";
+    }
+
+    case "container_create": {
+      const containerId = params.containerId as string | undefined;
+      const description = params.description as string | undefined;
+      if (description) {
+        return `container_create: ${description}`;
+      }
+      if (containerId) {
+        return `container_create: ${containerId.slice(0, 16)}...`;
+      }
+      return "container_create";
+    }
+
     default: {
       // Generic fallback for unknown tools
       const entries = Object.entries(params)

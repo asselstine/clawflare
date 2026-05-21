@@ -32,7 +32,7 @@
       "class_name": "CodingContainer",
       "image": "./container-runtime/Dockerfile",
       "max_instances": 10,
-      "instance_type": "lite"
+      "instance_type": "standard-2"
     }
   ],
 

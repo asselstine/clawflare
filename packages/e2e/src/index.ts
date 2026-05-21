@@ -87,6 +87,22 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
+async function destroyTestContainer(url: string, token: string, containerId: string): Promise<void> {
+  try {
+    const response = await fetch(`${url}/__test/container-destroy`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ containerId }),
+    });
+    const data = await readJsonResponse<{ ok: boolean; error?: string }>(response);
+    if (!data.ok) {
+      console.error(`Failed to destroy container ${containerId}: ${data.error || JSON.stringify(data)}`);
+    }
+  } catch (error) {
+    console.error(`Failed to destroy container ${containerId}:`, error instanceof Error ? error.message : String(error));
+  }
+}
+
 function runWrangler(args: string[], options: { capture?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("pnpm", ["exec", "wrangler", ...args], {
@@ -520,7 +536,7 @@ async function runTests(url: string, token: string): Promise<void> {
     }
   });
 
-  await runner.runTest("generic egress is blocked by default", async () => {
+  await runner.runTest("generic egress is allowed", async () => {
     const response = await fetch(`${url}/__test/execute-code`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -529,8 +545,8 @@ async function runTests(url: string, token: string): Promise<void> {
       }),
     });
     const data = await response.json() as { ok: boolean; result?: { status?: number; body?: string } };
-    if (!data.ok || data.result?.status !== 403 || !data.result.body?.includes("No enabled egress handler")) {
-      throw new Error(`Expected generic egress to be blocked, got: ${JSON.stringify(data)}`);
+    if (!data.ok || data.result?.status !== 200 || !data.result.body?.includes("Example Domain")) {
+      throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
     }
   });
 
@@ -619,63 +635,71 @@ async function runTests(url: string, token: string): Promise<void> {
 
   await runner.runTest("Container: create and run ls command", async () => {
     const containerId = `e2e-container-${Date.now()}`;
-    
-    // Create container
-    const createResponse = await fetch(`${url}/__test/container-create`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ containerId }),
-    });
-    const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
-    if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
-    if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
-    
-    // Run ls command
-    const bashResponse = await fetch(`${url}/__test/container-bash`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ containerId, command: "ls -la", cwd: "/workspace" }),
-    });
-    const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
-    if (!bashData.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
-    if (bashData.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.exitCode}`);
-    if (!bashData.stdout.includes("total") || !bashData.stdout.includes("workspace")) {
-      // Container might list differently; just ensure we got some output
-      if (bashData.stdout.trim().length === 0 && bashData.stderr.trim().length === 0) {
-        throw new Error(`No output from ls command`);
+
+    try {
+      // Create container
+      const createResponse = await fetch(`${url}/__test/container-create`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ containerId }),
+      });
+      const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
+      if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
+      if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+      
+      // Run ls command
+      const bashResponse = await fetch(`${url}/__test/container-bash`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ containerId, command: "ls -la", cwd: "/workspace" }),
+      });
+      const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
+      if (!bashData.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
+      if (bashData.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.exitCode}`);
+      if (!bashData.stdout.includes("total") || !bashData.stdout.includes("workspace")) {
+        // Container might list differently; just ensure we got some output
+        if (bashData.stdout.trim().length === 0 && bashData.stderr.trim().length === 0) {
+          throw new Error(`No output from ls command`);
+        }
       }
+      
+      // Verify container respects the deployed compatibility by checking it works at all
+      // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
+    } finally {
+      await destroyTestContainer(url, token, containerId);
     }
-    
-    // Verify container respects the deployed compatibility by checking it works at all
-    // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
   });
 
   await runner.runTest("Container: git clone works through GitHub egress", async () => {
     const containerId = `e2e-github-clone-${Date.now()}`;
 
-    const createResponse = await fetch(`${url}/__test/container-create`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ containerId }),
-    });
-    const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
-    if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
-    if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+    try {
+      const createResponse = await fetch(`${url}/__test/container-create`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ containerId }),
+      });
+      const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
+      if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
+      if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
 
-    const cloneCommand = [
-      "rm -rf /workspace/clawflare",
-      "git clone --depth 1 --filter=blob:none https://github.com/asselstine/clawflare.git /workspace/clawflare",
-      "test -f /workspace/clawflare/package.json",
-    ].join(" && ");
+      const cloneCommand = [
+        "rm -rf /workspace/clawflare",
+        "git clone --depth 1 --filter=blob:none https://github.com/asselstine/clawflare.git /workspace/clawflare",
+        "test -f /workspace/clawflare/package.json",
+      ].join(" && ");
 
-    const bashResponse = await fetch(`${url}/__test/container-bash`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ containerId, command: cloneCommand, cwd: "/workspace" }),
-    });
-    const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
-    if (!bashData.ok || bashData.exitCode !== 0) {
-      throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
+      const bashResponse = await fetch(`${url}/__test/container-bash`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ containerId, command: cloneCommand, cwd: "/workspace" }),
+      });
+      const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
+      if (!bashData.ok || bashData.exitCode !== 0) {
+        throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
+      }
+    } finally {
+      await destroyTestContainer(url, token, containerId);
     }
   });
 

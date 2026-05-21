@@ -29,17 +29,7 @@ export async function routeOutboundRequest(
     }
   }
 
-  if (env.ALLOW_GENERIC_EGRESS === "true") {
-    return fetch(request);
-  }
-
-  return new Response(
-    `No enabled egress handler for ${new URL(request.url).hostname}`,
-    {
-      status: 403,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    }
-  );
+  return fetch(request);
 }
 
 export class HttpGateway extends WorkerEntrypoint<Env, { requestId?: string }> {

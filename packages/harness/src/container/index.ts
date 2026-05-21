@@ -12,6 +12,7 @@ export {
   containerFind,
   containerLs,
   getContainerHealth,
+  destroyContainer,
   callContainerRuntime,
 } from "./client.js";
 export { createContainerTools } from "./tools.js";

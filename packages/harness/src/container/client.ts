@@ -225,6 +225,14 @@ export async function callContainerRuntime(
 /**
  * Check if container is healthy
  */
+export async function destroyContainer(
+  env: Env,
+  containerId: string
+): Promise<void> {
+  const container = getContainerStub(env, containerId);
+  await container.destroy();
+}
+
 export async function getContainerHealth(
   env: Env,
   containerId: string,

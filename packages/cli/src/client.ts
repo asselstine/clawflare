@@ -182,8 +182,8 @@ export class AgentClient {
     signal?: AbortSignal,
     options: { pollIntervalMs?: number; maxPolls?: number; initialCursor?: string; debug?: boolean } = {},
   ): AsyncGenerator<{ session: SessionResponse; newEvents: SessionEvent[]; complete: boolean }> {
-    const pollIntervalMs = options.pollIntervalMs ?? 500;
-    const maxPolls = options.maxPolls ?? 300;
+    const pollIntervalMs = options.pollIntervalMs ?? 250;
+    const maxPolls = options.maxPolls ?? 10000;
     let cursor: string | undefined = options.initialCursor;
 
     for (let poll = 0; poll < maxPolls; poll++) {

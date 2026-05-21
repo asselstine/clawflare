@@ -25,8 +25,8 @@ import { dirname, resolve, normalize, relative, sep } from "path";
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 8080;
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspace";
-const DEFAULT_TIMEOUT_MS = 30000;
-const MAX_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const MAX_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 const DEFAULT_MAX_OUTPUT_CHARS = 8000;
 
 // Ensure workspace exists
