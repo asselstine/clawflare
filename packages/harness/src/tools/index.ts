@@ -20,12 +20,14 @@ interface ExecuteStoredCodeParams {
   name: string;
   description?: string;
   input?: unknown;
+  maxResponseLength?: number;
 }
 
 interface ExecuteCodeParams {
   code: string;
   description?: string;
   input?: unknown;
+  maxResponseLength?: number;
 }
 
 interface SearchParams {
@@ -33,6 +35,8 @@ interface SearchParams {
   query?: string;
   limit?: number;
 }
+
+export const MAX_TOOL_RESPONSE_LENGTH_CHARS = 1_000_000;
 
 // Name validation - conservative pattern
 const VALID_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -101,6 +105,11 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
       name: Type.String({ description: "Name of the stored code to execute" }),
       description: Type.Optional(Type.String({ description: "Brief description of this execution (80 chars max)" })),
       input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
+      maxResponseLength: Type.Optional(Type.Number({
+        description: "Maximum response characters to return to the agent. Output is tailed when truncated. Hard cap: 1,000,000.",
+        minimum: 1,
+        maximum: MAX_TOOL_RESPONSE_LENGTH_CHARS,
+      })),
     }) as TSchema,
     execute: async (
       _toolCallId: string,
@@ -120,7 +129,7 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
 
       const result = await executeDynamicWorker(env, ctx, stored.code, p.input);
 
-      return formatExecutionResult(result);
+      return formatExecutionResult(result, { maxResponseLength: p.maxResponseLength });
     },
   };
 }
@@ -136,6 +145,11 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
       code: Type.String({ description: "JavaScript code to execute" }),
       description: Type.Optional(Type.String({ description: "Brief description of what the code does (80 chars max)" })),
       input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
+      maxResponseLength: Type.Optional(Type.Number({
+        description: "Maximum response characters to return to the agent. Output is tailed when truncated. Hard cap: 1,000,000.",
+        minimum: 1,
+        maximum: MAX_TOOL_RESPONSE_LENGTH_CHARS,
+      })),
     }) as TSchema,
     execute: async (
       _toolCallId: string,
@@ -146,7 +160,7 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
 
       const result = await executeDynamicWorker(env, ctx, p.code, p.input);
 
-      return formatExecutionResult(result);
+      return formatExecutionResult(result, { maxResponseLength: p.maxResponseLength });
     },
   };
 }
@@ -233,22 +247,73 @@ function createSearchTool(env: Env): AgentTool {
   };
 }
 
+interface FormatExecutionOptions {
+  maxResponseLength?: number;
+}
+
+interface TruncatedOutput {
+  text: string;
+  truncated: boolean;
+  originalLength: number;
+  limit: number;
+}
+
+function responseLengthLimit(maxResponseLength: number | undefined): number {
+  if (maxResponseLength === undefined) return MAX_TOOL_RESPONSE_LENGTH_CHARS;
+  if (!Number.isFinite(maxResponseLength) || maxResponseLength < 1) {
+    throw new Error("maxResponseLength must be a positive number");
+  }
+  return Math.min(Math.floor(maxResponseLength), MAX_TOOL_RESPONSE_LENGTH_CHARS);
+}
+
+function tailToolOutput(text: string, limit: number): TruncatedOutput {
+  if (text.length <= limit) {
+    return { text, truncated: false, originalLength: text.length, limit };
+  }
+
+  const prefix = `[Tool output truncated. Showing the tail of the response. Original length: ${text.length} characters. Limit: ${limit} characters.]\n`;
+  const tailLength = Math.max(0, limit - prefix.length);
+  return {
+    text: `${prefix}${text.slice(-tailLength)}`,
+    truncated: true,
+    originalLength: text.length,
+    limit,
+  };
+}
+
 // Format execution result for the agent
-function formatExecutionResult(result: ExecutionResult): AgentToolResult<unknown> {
+export function formatExecutionResult(
+  result: ExecutionResult,
+  options: FormatExecutionOptions = {},
+): AgentToolResult<unknown> {
+  const limit = responseLengthLimit(options.maxResponseLength);
+
   if (result.ok) {
     const text = result.result !== undefined
       ? `Result: ${JSON.stringify(result.result, null, 2)}`
       : "Code executed successfully.";
+    const output = tailToolOutput(text, limit);
 
     return {
-      content: [{ type: "text", text }],
-      details: result,
+      content: [{ type: "text", text: output.text }],
+      details: {
+        ok: true,
+        truncated: output.truncated,
+        originalLength: output.originalLength,
+        limit: output.limit,
+      },
     };
   } else {
     const text = result.error ? `Error: ${result.error}` : "Unknown error during execution.";
+    const output = tailToolOutput(text, limit);
     return {
-      content: [{ type: "text", text }],
-      details: result,
+      content: [{ type: "text", text: output.text }],
+      details: {
+        ok: false,
+        truncated: output.truncated,
+        originalLength: output.originalLength,
+        limit: output.limit,
+      },
     };
   }
 }

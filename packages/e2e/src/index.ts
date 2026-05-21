@@ -245,6 +245,12 @@ async function runTests(url: string, token: string): Promise<void> {
   if (!ready) throw new Error("Remote Worker failed to become responsive");
   console.log("✅ Remote Worker is responsive\n");
 
+  // Add extra delay for Cloudflare edge propagation to complete
+  // Different edge locations may propagate at different times
+  console.log("⏳ Waiting for edge propagation...");
+  await new Promise(resolve => setTimeout(resolve, 3000));
+  console.log("✅ Starting tests\n");
+
   await runner.runTest("Health check - unauthenticated", async () => {
     const response = await fetch(`${url}/health`);
     if (!response.ok) throw new Error(`Expected OK, got ${response.status}`);

@@ -2,7 +2,7 @@
 /**
  * Deploy script.
  *
- * Sets required secrets from .dev.vars when needed, then delegates to wrangler deploy.
+ * Sets required secrets from environment variables when needed, then delegates to wrangler deploy.
  */
 
 import { spawn } from "node:child_process";
@@ -13,18 +13,24 @@ import { dirname, join } from "node:path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SECRETS = ["AWS_BEARER_TOKEN_BEDROCK", "CLOUDFLARE_API_TOKEN", "CLAWFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"];
 
-async function runWrangler(args, { capture = false, stdio = undefined } = {}) {
+async function runWrangler(args, { capture = false, input = undefined, stdio = undefined } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn("npx", ["wrangler", ...args], {
-      stdio: stdio ?? (capture ? "pipe" : "inherit"),
+      stdio: stdio ?? (input !== undefined ? ["pipe", "inherit", "inherit"] : capture ? "pipe" : "inherit"),
       cwd: join(__dirname, ".."),
+      env: process.env,
     });
 
     let stdout = "";
-    if (capture) {
+    if (capture && proc.stdout) {
       proc.stdout.on("data", (data) => {
         stdout += data.toString();
       });
+    }
+
+    if (input !== undefined && proc.stdin) {
+      proc.stdin.write(input.endsWith("\n") ? input : `${input}\n`);
+      proc.stdin.end();
     }
 
     proc.on("close", (code) => {
@@ -70,8 +76,11 @@ Options:
   -h, --help       Show this help message
 
 The script will:
-  1. Set secrets from .dev.vars (skips if already set, unless --force-secrets)
+  1. Set secrets from environment variables (skips if already set, unless --force-secrets)
   2. Run wrangler deploy
+
+Required environment variables for missing/forced secrets:
+  ${SECRETS.join("\n  ")}
 `);
     process.exit(0);
   }
@@ -86,8 +95,13 @@ The script will:
       continue;
     }
     
+    const value = process.env[secret];
+    if (!value) {
+      throw new Error(`${secret} is not set in the environment and is not already configured as a Wrangler secret`);
+    }
+
     console.log(`  ${forceSecrets && existingSecretNames.has(secret) ? "🔄 Updating" : "📝 Setting"} ${secret}...`);
-    await runWrangler(["secret", "put", secret, "--env-file", ".dev.vars"]);
+    await runWrangler(["secret", "put", secret], { input: value });
   }
   
   console.log();

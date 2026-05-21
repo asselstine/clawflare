@@ -7,9 +7,9 @@ import { Agent, createEmptyAgentSession, type AgentSessionState, type NextStepIn
 import { buildAgentComponents } from "./agent-config.js";
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
 import { createTools } from "./tools/index.js";
+import { logTiming, timingStart } from "./diagnostics.js";
 
-const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running inside a Cloudflare Worker.
-Use the available tools when they are helpful, keep responses concise, and preserve useful context across turns.`;
+const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web service. Your core tools allow you to execute code, and egress handlers afford authorized fetches from HTTP APIs.`;
 
 type JsonValue = null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
 
@@ -87,12 +87,18 @@ function toSessionEvents(events: AgentEvent[]): NewSessionEvent[] {
 }
 
 async function appendAgentEvents(
+  env: Env,
   dataLayer: DataLayer,
   sessionId: string,
   events: AgentEvent[],
 ): Promise<void> {
   if (events.length === 0) return;
+  const appendStart = timingStart();
   await dataLayer.events.append(sessionId, toSessionEvents(events));
+  logTiming(env, sessionId, "workflow.events.appended", appendStart, {
+    eventCount: events.length,
+    eventTypes: events.map((event) => event.type),
+  });
 }
 
 async function appendErrorEvent(
@@ -109,16 +115,25 @@ async function appendErrorEvent(
   ]);
 }
 
-async function createWorkflowAgent(env: Env): Promise<Agent> {
+async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> {
+  const componentsStart = timingStart();
   const components = await buildAgentComponents(env);
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
+  const tools = createTools(env);
+  logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
+    model: components.model.id,
+    provider: components.model.provider,
+    toolCount: tools.length,
+    mockAI: shouldUseMockAI(env),
+  });
 
   return new Agent({
     model: components.model,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
-    tools: createTools(env),
+    tools,
     streamFn,
     getApiKey: () => components.getApiKey(),
+    debugTiming: (phase, startedAt, details) => logTiming(env, sessionId, `agent.${phase}`, startedAt, details),
   });
 }
 
@@ -127,8 +142,13 @@ async function loadAgentSession(
   sessionId: string,
 ): Promise<AgentSessionState> {
   const dataLayer = getDataLayer(env);
+  const loadStart = timingStart();
   const components = await buildAgentComponents(env);
   const stored = await dataLayer.runtime.getWorkflowSession(sessionId);
+  logTiming(env, sessionId, "workflow.session.loaded", loadStart, {
+    hasStoredSession: Boolean(stored),
+    storedSessionValid: isAgentSessionState(stored),
+  });
 
   if (isAgentSessionState(stored)) {
     return stored;
@@ -207,9 +227,16 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
     const sessionId =
       (event as unknown as { payload?: { sessionId?: string } }).payload?.sessionId ?? "unknown";
 
+    const workflowEventType = (event as unknown as { type?: unknown }).type;
+    logTiming(this.env, sessionId, "workflow.run.start", undefined, {
+      workflowEventType: typeof workflowEventType === "string" ? workflowEventType : undefined,
+    });
+
     await step.do("mark-session-active", async () => {
+      const markStart = timingStart();
       const dataLayer = getDataLayer(this.env);
       await dataLayer.runtime.setActive(sessionId, true);
+      logTiming(this.env, sessionId, "workflow.mark_active.done", markStart);
     });
 
     let shouldContinue = true;
@@ -221,18 +248,26 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
       // On workflow startup, drain any already-queued input immediately.
       // Subsequent iterations wait for an explicit wake event.
       if (shouldWaitForWake) {
+        logTiming(this.env, sessionId, "workflow.wait_for_wake.start");
+        const waitStart = timingStart();
         await step.waitForEvent("session-input", {
           type: "session-input",
           timeout: "7 days",
         });
+        logTiming(this.env, sessionId, "workflow.wait_for_wake.done", waitStart);
       }
       shouldWaitForWake = true;
 
       let drained = false;
 
       while (!drained) {
+        const dequeueStart = timingStart();
         const { event: input, remaining } = await step.do(`dequeue-input-${dequeueStep++}`, async () => {
           return getDataLayer(this.env).inputQueue.dequeue(sessionId);
+        });
+        logTiming(this.env, sessionId, "workflow.input.dequeued", dequeueStart, {
+          inputType: input?.type,
+          remaining,
         });
 
         if (!input) {
@@ -242,16 +277,24 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
         if (input.type === "close") {
           await step.do(`mark-session-closed-${inputStep++}`, async () => {
+            const closeStart = timingStart();
             const dataLayer = getDataLayer(this.env);
             await dataLayer.sessions.markClosed(sessionId, "user");
             await dataLayer.runtime.setActive(sessionId, false);
+            logTiming(this.env, sessionId, "workflow.session.closed", closeStart);
           });
           shouldContinue = false;
           break;
         }
 
         if (input.type === "prompt") {
+          const promptStart = timingStart();
+          logTiming(this.env, sessionId, "workflow.prompt.start", undefined, {
+            promptLength: input.content.length,
+            maxTurns: input.maxTurns,
+          });
           await this.processPrompt(sessionId, input, step, inputStep++);
+          logTiming(this.env, sessionId, "workflow.prompt.done", promptStart);
         }
 
         if (remaining === 0) {
@@ -261,8 +304,10 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
     }
 
     await step.do("mark-session-inactive", async () => {
+      const inactiveStart = timingStart();
       const dataLayer = getDataLayer(this.env);
       await dataLayer.runtime.setActive(sessionId, false);
+      logTiming(this.env, sessionId, "workflow.mark_inactive.done", inactiveStart);
     });
 
     return { ok: true, sessionId, reason: "closed" };
@@ -283,18 +328,33 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
     try {
       const enqueued = await runWorkflowStep(step, `enqueue-prompt-${inputIndex}`, async () => {
         const dataLayer = getDataLayer(this.env);
+        const metadataStart = timingStart();
         await saveSessionMetadata(dataLayer, sessionId, "processing");
+        logTiming(this.env, sessionId, "workflow.session.processing_saved", metadataStart);
 
-        const agent = await createWorkflowAgent(this.env);
+        const agent = await createWorkflowAgent(this.env, sessionId);
         const loadedSession = await loadAgentSession(this.env, sessionId);
+        const enqueueStart = timingStart();
         const result = agent.enqueuePrompt(loadedSession, input.content);
+        const nextStep = agent.determineNextStep(result.session) ?? null;
+        logTiming(this.env, sessionId, "workflow.prompt.enqueued", enqueueStart, {
+          eventCount: result.events.length,
+          nextStepType: nextStep?.type,
+          nextStepId: nextStep?.stepId,
+        });
 
+        const saveStart = timingStart();
         await dataLayer.runtime.saveWorkflowSession(sessionId, result.session);
-        await appendAgentEvents(dataLayer, sessionId, result.events);
+        logTiming(this.env, sessionId, "workflow.session.saved", saveStart, {
+          status: result.session.status,
+          messageCount: result.session.messages.length,
+          turnCount: result.session.turns.length,
+        });
+        await appendAgentEvents(this.env, dataLayer, sessionId, result.events);
 
         return {
           session: serializeForWorkflow(result.session),
-          nextStep: serializeForWorkflow(agent.determineNextStep(result.session) ?? null),
+          nextStep: serializeForWorkflow(nextStep),
         };
       });
 
@@ -307,12 +367,33 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
           step,
           `agent-${inputIndex}-${agentStep++}-${currentStep.stepId}`,
           async () => {
+            const stepStart = timingStart();
+            logTiming(this.env, sessionId, "workflow.agent_step.start", undefined, {
+              stepType: currentStep.type,
+              stepId: currentStep.stepId,
+              displayName: currentStep.displayName,
+              toolCallId: currentStep.toolCallId,
+            });
             const dataLayer = getDataLayer(this.env);
-            const agent = await createWorkflowAgent(this.env);
+            const agent = await createWorkflowAgent(this.env, sessionId);
             const result = await agent.runSingleStep(agentSession, currentStep);
+            logTiming(this.env, sessionId, "workflow.agent_step.ran", stepStart, {
+              stepType: currentStep.type,
+              stepId: currentStep.stepId,
+              eventCount: result.events.length,
+              nextStepType: result.nextStep?.type,
+              nextStepId: result.nextStep?.stepId,
+              sessionStatus: result.session.status,
+            });
 
+            const saveStart = timingStart();
             await dataLayer.runtime.saveWorkflowSession(sessionId, result.session);
-            await appendAgentEvents(dataLayer, sessionId, result.events);
+            logTiming(this.env, sessionId, "workflow.session.saved", saveStart, {
+              status: result.session.status,
+              messageCount: result.session.messages.length,
+              turnCount: result.session.turns.length,
+            });
+            await appendAgentEvents(this.env, dataLayer, sessionId, result.events);
 
             return {
               session: serializeForWorkflow(result.session),
@@ -331,6 +412,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         if (nextStep && completedTurns >= maxTurns) {
           const message = `Agent stopped after reaching maxTurns (${maxTurns}).`;
           const limited = await runWorkflowStep(step, `agent-${inputIndex}-max-turns`, async () => {
+            const limitStart = timingStart();
             const dataLayer = getDataLayer(this.env);
             const erroredSession: AgentSessionState = {
               ...agentSession,
@@ -341,6 +423,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
 
             await dataLayer.runtime.saveWorkflowSession(sessionId, erroredSession);
             await appendErrorEvent(dataLayer, sessionId, message);
+            logTiming(this.env, sessionId, "workflow.max_turns_saved", limitStart, { maxTurns });
             return serializeForWorkflow(erroredSession);
           });
 
@@ -350,14 +433,19 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
       }
 
       await step.do(`finalize-prompt-${inputIndex}`, async () => {
+        const finalizeStart = timingStart();
         const dataLayer = getDataLayer(this.env);
         const status = agentSession.status === "error" ? "error" : "idle";
         await saveSessionMetadata(dataLayer, sessionId, status, agentSession.errorMessage);
+        logTiming(this.env, sessionId, "workflow.prompt.finalized", finalizeStart, { status });
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      logTiming(this.env, sessionId, "workflow.prompt.error", undefined, { error: message });
       await step.do(`prompt-error-${inputIndex}`, async () => {
+        const errorStart = timingStart();
         await markPromptError(this.env, sessionId, message);
+        logTiming(this.env, sessionId, "workflow.prompt.error_saved", errorStart);
       });
     }
   }

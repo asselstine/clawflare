@@ -49,12 +49,12 @@ export async function handleGetSession(
       100
     );
 
-    logTiming(env, sessionId, "session.poll", pollStart, {
-      status: sessionState.status,
-      messageCount: 0,
-      eventCount: events.length,
-      sinceCursor,
-    });
+    // logTiming(env, sessionId, "session.poll", pollStart, {
+    //   status: sessionState.status,
+    //   messageCount: 0,
+    //   eventCount: events.length,
+    //   sinceCursor,
+    // });
 
     const workflowSession = await data.runtime.getWorkflowSession(sessionId) as
       | { messages?: import("../../types.js").AgentMessage[] }

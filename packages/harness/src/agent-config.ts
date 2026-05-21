@@ -1,6 +1,6 @@
 import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@earendil-works/pi-ai";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import type { Env } from "./internal-types/index.js";
 
 // Eagerly register the bedrock provider module to prevent dynamic import issues in Workers
@@ -39,9 +39,21 @@ export async function buildAgentComponents(env: Env): Promise<BuildAgentComponen
     modelId as "minimax.minimax-m2.5"
   ) as unknown as Model<"bedrock-converse-stream">;
 
+  const streamFn = ((requestModel: Model<any>, context: any, options?: any) => {
+    if (provider === "amazon-bedrock") {
+      const bearerToken = options?.bearerToken || options?.apiKey || bedrockToken || undefined;
+      return bedrockProviderModule.streamBedrock(requestModel as Model<"bedrock-converse-stream">, context, {
+        ...options,
+        bearerToken,
+        maxTokens: options?.maxTokens ?? (requestModel.maxTokens > 0 ? Math.min(requestModel.maxTokens, 32000) : undefined),
+      });
+    }
+    return streamSimple(requestModel, context, options);
+  }) as StreamFn as typeof streamSimple;
+
   return {
     model,
-    streamFn: streamSimple,
+    streamFn,
     tools: [], // Tools are created separately
     getApiKey,
   };

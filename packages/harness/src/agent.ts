@@ -298,6 +298,11 @@ export class Agent {
       reasoning: session.thinkingLevel === "off" ? undefined : session.thinkingLevel,
       ...(session.model.provider === "amazon-bedrock" && apiKey ? { bearerToken: apiKey } : {}),
     };
+    this.config.debugTiming?.("assistant.stream.create.start", undefined, {
+      model: session.model.id,
+      provider: session.model.provider,
+      reasoning: streamOptions.reasoning,
+    });
     const response = await this.streamFn(session.model, llmContext, streamOptions);
     this.config.debugTiming?.("assistant.stream.created", streamCreateStart, {
       model: session.model.id,
@@ -407,6 +412,12 @@ export class Agent {
 
     const events: AgentEvent[] = [];
     const tool = this.toolsByName.get(toolCall.name);
+    const toolStepStart = now();
+    this.config.debugTiming?.("tool.start", undefined, {
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      hasTool: Boolean(tool),
+    });
     events.push({
       type: "tool_execution_start",
       toolCallId: toolCall.id,
@@ -422,6 +433,7 @@ export class Agent {
       isError = true;
     } else {
       try {
+        const argsStart = now();
         const preparedArgs = tool.prepareArguments ? tool.prepareArguments(toolCall.args) : toolCall.args;
         const validatedArgs = validateToolArguments(tool, {
           id: toolCall.id,
@@ -429,7 +441,12 @@ export class Agent {
           arguments: preparedArgs,
           type: "toolCall",
         } as AgentToolCall);
+        this.config.debugTiming?.("tool.args.validated", argsStart, {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+        });
 
+        const executeStart = now();
         result = await tool.execute(toolCall.id, validatedArgs as never, signal, (partialResult) => {
           events.push({
             type: "tool_execution_update",
@@ -439,11 +456,27 @@ export class Agent {
             partialResult,
           });
         });
+        this.config.debugTiming?.("tool.execute.done", executeStart, {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          contentLength: JSON.stringify(result.content).length,
+        });
       } catch (error) {
         result = createErrorToolResult(error instanceof Error ? error.message : String(error));
         isError = true;
+        this.config.debugTiming?.("tool.execute.error", toolStepStart, {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
+
+    this.config.debugTiming?.("tool.done", toolStepStart, {
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      isError,
+    });
 
     events.push({
       type: "tool_execution_end",
@@ -474,7 +507,6 @@ export class Agent {
         [toolCall.id]: {
           ...toolCall,
           status: isError ? "error" : "complete",
-          result,
           isError,
         },
       },
