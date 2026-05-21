@@ -6,6 +6,16 @@ interface DynamicExecutionOptions {
   allowOutbound?: boolean;
 }
 
+export const USER_FUNCTION_TYPES = `type Params = unknown;
+type WorkerEnv = Record<string, never>;
+
+export default function userFunction(
+  input: Params,
+  env: WorkerEnv,
+): string | Promise<string>;`;
+
+export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a default export matching this TypeScript contract:\n${USER_FUNCTION_TYPES}\n\nThe env argument has no direct secret bindings. Available globals include console, fetch, Request, Response, URL, and standard Worker runtime APIs; outbound fetch is routed through the configured egress gateway.\n\nExecutable JavaScript example:\nexport default async function(input, env) {\n  return JSON.stringify({ message: "ok", input });\n}`;
+
 export async function executeDynamicWorker(
   env: Env,
   _ctx: ExecutionContext | undefined,
@@ -15,6 +25,7 @@ export async function executeDynamicWorker(
 ): Promise<ExecutionResult> {
   try {
     const outbound = options.allowOutbound === false ? null : createGatewayOutbound(env);
+    const userModule = createUserModule(code);
 
     const workerCode: WorkerLoaderWorkerCode = {
       compatibilityDate: "2025-01-01",
@@ -26,19 +37,61 @@ export async function executeDynamicWorker(
         "worker.js": {
           js: `import userFunction from "./user.js";
 
+function formatConsoleArg(value) {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.stack || value.message;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function formatConsoleArgs(args) {
+  return args.map(formatConsoleArg).join(" ");
+}
+
 export default {
   async fetch(request, env) {
+    const stdout = [];
+    const stderr = [];
+    const originalConsole = globalThis.console;
+    globalThis.console = {
+      ...originalConsole,
+      log: (...args) => {
+        stdout.push(formatConsoleArgs(args));
+        return originalConsole.log(...args);
+      },
+      info: (...args) => {
+        stdout.push(formatConsoleArgs(args));
+        return originalConsole.info(...args);
+      },
+      warn: (...args) => {
+        stderr.push(formatConsoleArgs(args));
+        return originalConsole.warn(...args);
+      },
+      error: (...args) => {
+        stderr.push(formatConsoleArgs(args));
+        return originalConsole.error(...args);
+      },
+    };
+
     try {
+      if (typeof userFunction !== "function") {
+        throw new Error("Dynamic Worker user module default export must be a function.");
+      }
       const input = await request.json();
       const result = await userFunction(input, env);
-      return Response.json({ ok: true, result });
+      return Response.json({ ok: true, result, stdout: stdout.join("\\n"), stderr: stderr.join("\\n") });
     } catch (error) {
-      return Response.json({ ok: false, error: error && error.message ? error.message : String(error) }, { status: 500 });
+      return Response.json({ ok: false, error: error && error.message ? error.message : String(error), stdout: stdout.join("\\n"), stderr: stderr.join("\\n") }, { status: 500 });
+    } finally {
+      globalThis.console = originalConsole;
     }
   }
 };`,
         },
-        "user.js": { js: wrapUserCode(code) },
+        "user.js": { js: userModule },
       },
     };
 
@@ -56,10 +109,15 @@ export default {
 
     const payload = await readJson(response);
     if (!response.ok || !payload.ok) {
-      return { ok: false, error: String(payload.error || `Dynamic Worker failed with status ${response.status}`) };
+      return {
+        ok: false,
+        error: String(payload.error || `Dynamic Worker failed with status ${response.status}`),
+        stdout: payload.stdout,
+        stderr: payload.stderr,
+      };
     }
 
-    return { ok: true, result: payload.result };
+    return { ok: true, result: payload.result, stdout: payload.stdout, stderr: payload.stderr };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -69,20 +127,20 @@ function createGatewayOutbound(env: Env): Fetcher {
   return env.HTTP_GATEWAY;
 }
 
-function wrapUserCode(code: string): string {
-  const indented = code
-    .split("\n")
-    .map((line) => `  ${line}`)
-    .join("\n");
-
-  return `export default async function(input, env) {
-${indented}
-}`;
+function createUserModule(code: string): string {
+  if (!hasDefaultExport(code)) {
+    throw new Error(`Dynamic Worker code must be an ES module with a default exported function.\n\n${USER_FUNCTION_CONTRACT}`);
+  }
+  return code;
 }
 
-async function readJson(response: Response): Promise<{ ok?: boolean; result?: unknown; error?: unknown }> {
+function hasDefaultExport(code: string): boolean {
+  return /(^|\n)\s*export\s+default\s+/.test(code);
+}
+
+async function readJson(response: Response): Promise<{ ok?: boolean; result?: unknown; error?: unknown; stdout?: string; stderr?: string }> {
   try {
-    return (await response.json()) as { ok?: boolean; result?: unknown; error?: unknown };
+    return (await response.json()) as { ok?: boolean; result?: unknown; error?: unknown; stdout?: string; stderr?: string };
   } catch {
     return { ok: false, error: await response.text() };
   }

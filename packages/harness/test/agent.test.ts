@@ -1,9 +1,58 @@
 import { describe, expect, it } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
+import { Type } from "@earendil-works/pi-ai";
 import { Agent, createEmptyAgentSession } from "../src/agent.js";
 
 describe("Agent", () => {
+  const model = {
+    id: "test-model",
+    provider: "test-provider",
+    api: "openai-chat-completions",
+    maxTokens: 4096,
+  } as Model<any>;
+
+  it("persists tool results with details.ok false as errors", async () => {
+    const tool = {
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async () => ({
+        content: [{ type: "text", text: "Error: require is not defined" }],
+        details: { ok: false },
+      }),
+    } satisfies AgentTool;
+
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool] });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const result = await agent.runToolStep(session, "tool-1");
+
+    expect(result.toolResultMessage.isError).toBe(true);
+    expect(result.session.toolCalls["tool-1"]?.status).toBe("error");
+    expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
+  });
+
   it("passes Bedrock credentials as bearerToken", async () => {
     const model = {
       id: "minimax.minimax-m2.5",

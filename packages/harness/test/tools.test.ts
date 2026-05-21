@@ -2,6 +2,23 @@ import { describe, expect, it } from "vitest";
 import { formatExecutionResult, MAX_TOOL_RESPONSE_LENGTH_CHARS } from "../src/tools/index.js";
 
 describe("tool output formatting", () => {
+  it("shows captured stdout when code returns no explicit result", () => {
+    const result = formatExecutionResult({
+      ok: true,
+      stdout: "loaded docs\nparsed section",
+    });
+
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+    expect(text).toBe("Stdout:\nloaded docs\nparsed section");
+  });
+
+  it("marks failed execution details as not ok", () => {
+    const result = formatExecutionResult({ ok: false, error: "require is not defined" });
+
+    expect(result.details).toMatchObject({ ok: false });
+  });
+
   it("tails oversized successful tool output at the hard cap", () => {
     const result = formatExecutionResult({
       ok: true,

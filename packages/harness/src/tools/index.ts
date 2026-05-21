@@ -7,7 +7,7 @@ import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "./../internal-types/index.js";
 import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDataLayer } from "../data/index.js";
-import { executeDynamicWorker } from "./dynamic-worker";
+import { executeDynamicWorker, USER_FUNCTION_CONTRACT } from "./dynamic-worker";
 
 // Tool parameter types
 interface StoreCodeParams {
@@ -64,12 +64,12 @@ function createStoreCodeTool(env: Env): AgentTool {
   return {
     name: "store_code",
     description:
-      "Store JavaScript code by name for later execution. Use this to save reusable code snippets.",
+      `Store JavaScript code by name for later execution. Use this to save reusable code snippets. Stored code must follow this contract: ${USER_FUNCTION_CONTRACT}`,
     label: "Store Code",
     parameters: Type.Object({
       name: Type.String({ description: "Name for the code (alphanumeric, hyphens, underscores)" }),
       description: Type.Optional(Type.String({ description: "Description of what the code does" })),
-      code: Type.String({ description: "JavaScript code to store" }),
+      code: Type.String({ description: `JavaScript ES module to store. ${USER_FUNCTION_CONTRACT}` }),
     }) as TSchema,
     execute: async (
       _toolCallId: string,
@@ -100,7 +100,7 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
   return {
     name: "execute_stored_code",
     description:
-      "Execute previously stored JavaScript code by name. The code runs in an isolated Dynamic Worker.",
+      `Execute previously stored JavaScript code by name. The code runs in an isolated Dynamic Worker. Stored code must follow this contract: ${USER_FUNCTION_CONTRACT}`,
     label: "Execute Stored Code",
     parameters: Type.Object({
       name: Type.String({ description: "Name of the stored code to execute" }),
@@ -130,7 +130,10 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
 
       const result = await executeDynamicWorker(env, ctx, stored.code, p.input);
 
-      return formatExecutionResult(result, { maxResponseLength: p.maxResponseLength });
+      return formatExecutionResult(result, {
+        maxResponseLength: p.maxResponseLength,
+        executedCode: stored.code,
+      });
     },
   };
 }
@@ -140,10 +143,10 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
   return {
     name: "execute_code",
     description:
-      "Execute JavaScript code in an isolated Dynamic Worker.",
+      `Execute JavaScript code in an isolated Dynamic Worker. Code must follow this contract: ${USER_FUNCTION_CONTRACT}`,
     label: "Execute Code",
     parameters: Type.Object({
-      code: Type.String({ description: "JavaScript code to execute" }),
+      code: Type.String({ description: `JavaScript ES module to execute. ${USER_FUNCTION_CONTRACT}` }),
       description: Type.Optional(Type.String({ description: "Brief description of what the code does (80 chars max)" })),
       input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
       maxResponseLength: Type.Optional(Type.Number({
@@ -250,6 +253,7 @@ function createSearchTool(env: Env): AgentTool {
 
 interface FormatExecutionOptions {
   maxResponseLength?: number;
+  executedCode?: string;
 }
 
 interface TruncatedOutput {
@@ -290,9 +294,12 @@ export function formatExecutionResult(
   const limit = responseLengthLimit(options.maxResponseLength);
 
   if (result.ok) {
-    const text = result.result !== undefined
-      ? `Result: ${JSON.stringify(result.result, null, 2)}`
-      : "Code executed successfully.";
+    const parts: string[] = [];
+    if (result.stdout) parts.push(`Stdout:\n${result.stdout}`);
+    if (result.stderr) parts.push(`Stderr:\n${result.stderr}`);
+    if (result.result !== undefined) parts.push(`Result: ${JSON.stringify(result.result, null, 2)}`);
+
+    const text = parts.length > 0 ? parts.join("\n\n") : "Code executed successfully.";
     const output = tailToolOutput(text, limit);
 
     return {
@@ -302,11 +309,15 @@ export function formatExecutionResult(
         truncated: output.truncated,
         originalLength: output.originalLength,
         limit: output.limit,
+        ...(options.executedCode === undefined ? {} : { executedCode: options.executedCode }),
       },
     };
   } else {
-    const text = result.error ? `Error: ${result.error}` : "Unknown error during execution.";
-    const output = tailToolOutput(text, limit);
+    const parts: string[] = [result.error ? `Error: ${result.error}` : "Unknown error during execution."];
+    if (result.stdout) parts.push(`Stdout:\n${result.stdout}`);
+    if (result.stderr) parts.push(`Stderr:\n${result.stderr}`);
+
+    const output = tailToolOutput(parts.join("\n\n"), limit);
     return {
       content: [{ type: "text", text: output.text }],
       details: {
@@ -314,6 +325,7 @@ export function formatExecutionResult(
         truncated: output.truncated,
         originalLength: output.originalLength,
         limit: output.limit,
+        ...(options.executedCode === undefined ? {} : { executedCode: options.executedCode }),
       },
     };
   }

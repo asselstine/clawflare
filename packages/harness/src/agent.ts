@@ -133,6 +133,11 @@ function createErrorToolResult(message: string): AgentToolResult<unknown> {
   };
 }
 
+function isErroredToolResult(result: AgentToolResult<unknown>): boolean {
+  const details = result.details;
+  return typeof details === "object" && details !== null && "ok" in details && details.ok === false;
+}
+
 function createToolResultMessage(
   toolCall: AgentToolCallState,
   result: AgentToolResult<unknown>,
@@ -456,6 +461,7 @@ export class Agent {
             partialResult,
           });
         });
+        isError = isErroredToolResult(result);
         this.config.debugTiming?.("tool.execute.done", executeStart, {
           toolCallId: toolCall.id,
           toolName: toolCall.name,

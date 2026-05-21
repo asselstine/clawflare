@@ -420,7 +420,7 @@ async function runTests(url: string, token: string): Promise<void> {
     const response = await fetch(`${url}/__test/execute-code`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ code: "return { message: 'ok', input };", input: { value: 42 } }),
+      body: JSON.stringify({ code: "export default async function(input, env) { return { message: 'ok', input }; }", input: { value: 42 } }),
     });
     const data = await response.json() as { ok: boolean; result?: { message?: string; input?: { value?: number } } };
     if (!data.ok || data.result?.message !== "ok" || data.result?.input?.value !== 42) {
@@ -432,7 +432,7 @@ async function runTests(url: string, token: string): Promise<void> {
     const storeResponse = await fetch(`${url}/__test/store-code`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "double_number", description: "Doubles a numeric input", code: "return input.value * 2;" }),
+      body: JSON.stringify({ name: "double_number", description: "Doubles a numeric input", code: "export default async function(input, env) { return input.value * 2; }" }),
     });
     const stored = await storeResponse.json() as { ok: boolean };
     if (!stored.ok) throw new Error(`store_code failed: ${JSON.stringify(stored)}`);
@@ -498,7 +498,7 @@ async function runTests(url: string, token: string): Promise<void> {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        code: "const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() };",
+        code: "export default async function(input, env) { const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() }; }",
       }),
     });
     const data = await response.json() as { ok: boolean; result?: { status?: number; body?: string } };
@@ -512,7 +512,7 @@ async function runTests(url: string, token: string): Promise<void> {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        code: "const response = await fetch('https://api.cloudflare.com/client/v4/accounts'); return { status: response.status, body: await response.json() };",
+        code: "export default async function(input, env) { const response = await fetch('https://api.cloudflare.com/client/v4/accounts'); return { status: response.status, body: await response.json() }; }"
       }),
     });
     const data = await response.json() as { ok: boolean; result?: { status?: number; body?: { handler?: string } }; error?: string };

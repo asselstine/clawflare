@@ -101,11 +101,13 @@ describe("Cloudflare Egress Integration Tests", () => {
       headers: { Authorization: `Bearer ${TEST_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         code: `
-          const response = await fetch('${testUrl}', {
-            headers: { 'Content-Type': 'application/json' }
-          });
-          const body = await response.json();
-          return { status: response.status, result: body };
+          export default async function(input, env) {
+            const response = await fetch('${testUrl}', {
+              headers: { 'Content-Type': 'application/json' }
+            });
+            const body = await response.json();
+            return { status: response.status, result: body };
+          }
         `,
       }),
     });
@@ -127,11 +129,13 @@ describe("Cloudflare Egress Integration Tests", () => {
       headers: { Authorization: `Bearer ${TEST_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         code: `
-          // Check that we can access the env
-          return { 
-            hasCloudflareToken: !!env.CLOUDFLARE_API_TOKEN,
-            tokenLength: env.CLOUDFLARE_API_TOKEN?.length || 0
-          };
+          export default async function(input, env) {
+            // Dynamic Worker user env intentionally has no direct secret bindings.
+            return {
+              hasCloudflareToken: !!env.CLOUDFLARE_API_TOKEN,
+              tokenLength: env.CLOUDFLARE_API_TOKEN?.length || 0
+            };
+          }
         `,
       }),
     });
@@ -155,18 +159,20 @@ describe("Cloudflare Egress Integration Tests", () => {
       headers: { Authorization: `Bearer ${TEST_TOKEN}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         code: `
-          const response = await fetch('${testUrl}');
-          const data = await response.json();
-          
-          if (!response.ok) {
-            return { error: \`API error: \${response.status}\`, details: data };
+          export default async function(input, env) {
+            const response = await fetch('${testUrl}');
+            const data = await response.json();
+            
+            if (!response.ok) {
+              return { error: \`API error: \${response.status}\`, details: data };
+            }
+            
+            return {
+              status: response.status,
+              workerCount: data.result?.length || 0,
+              workers: data.result?.map((w) => w.id).slice(0, 5) || []
+            };
           }
-          
-          return {
-            status: response.status,
-            workerCount: data.result?.length || 0,
-            workers: data.result?.map((w) => w.id).slice(0, 5) || []
-          };
         `,
       }),
     });
