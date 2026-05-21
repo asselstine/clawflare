@@ -37,6 +37,7 @@ interface SearchParams {
 }
 
 export const MAX_TOOL_RESPONSE_LENGTH_CHARS = 1_000_000;
+export const DEFAULT_TOOL_RESPONSE_LENGTH_CHARS = 8_000;
 
 // Name validation - conservative pattern
 const VALID_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -259,7 +260,7 @@ interface TruncatedOutput {
 }
 
 function responseLengthLimit(maxResponseLength: number | undefined): number {
-  if (maxResponseLength === undefined) return MAX_TOOL_RESPONSE_LENGTH_CHARS;
+  if (maxResponseLength === undefined) return DEFAULT_TOOL_RESPONSE_LENGTH_CHARS;
   if (!Number.isFinite(maxResponseLength) || maxResponseLength < 1) {
     throw new Error("maxResponseLength must be a positive number");
   }
