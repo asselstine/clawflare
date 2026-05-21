@@ -27,6 +27,8 @@ RUN apt-get update \
 # Set up workspace
 WORKDIR /workspace
 
+EXPOSE 8080
+
 # Copy runtime server
 COPY server.mjs /usr/local/bin/clawflare-container-server.mjs
 

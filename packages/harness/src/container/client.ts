@@ -115,6 +115,67 @@ export interface HealthResult {
 // Default timeout for container operations
 const DEFAULT_CONTAINER_TIMEOUT = 30000;
 const MAX_CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const MAX_ERROR_DETAIL_CHARS = 8000;
+
+interface RuntimeCallOptions {
+  allowRuntimeFailure?: boolean;
+}
+
+function truncateDetail(value: string): string {
+  if (value.length <= MAX_ERROR_DETAIL_CHARS) return value;
+
+  return `[Truncated to last ${MAX_ERROR_DETAIL_CHARS} chars. Original length: ${value.length} chars.]\n` +
+    value.slice(-MAX_ERROR_DETAIL_CHARS);
+}
+
+function appendDetail(parts: string[], label: string, value: unknown): void {
+  if (value === undefined || value === null || value === "") return;
+
+  const text = typeof value === "string" ? value : String(value);
+  parts.push(`${label}:\n${truncateDetail(text)}`);
+}
+
+export function buildContainerRuntimeFailureMessage(
+  response: Pick<Response, "ok" | "status" | "statusText">,
+  payload: ContainerRuntimeResponse | null,
+  rawBody: string,
+): string {
+  const statusText = response.statusText ? ` ${response.statusText}` : "";
+  const reason = response.ok
+    ? `runtime reported ok=false (HTTP ${response.status}${statusText})`
+    : `HTTP ${response.status}${statusText}`;
+  const parts = [`Container runtime call failed: ${reason}`];
+
+  if (payload) {
+    if (payload.exitCode !== undefined) parts.push(`Exit code: ${payload.exitCode}`);
+    if (payload.signal !== undefined && payload.signal !== null) parts.push(`Signal: ${payload.signal}`);
+    if (payload.killed === true) parts.push("Process killed due to timeout");
+    if (payload.durationMs !== undefined) parts.push(`Duration: ${payload.durationMs}ms`);
+
+    appendDetail(parts, "Error", payload.error);
+    appendDetail(parts, "Stdout", payload.stdout);
+    appendDetail(parts, "Stderr", payload.stderr);
+    appendDetail(parts, "Output", payload.output);
+  } else {
+    appendDetail(parts, "Response body", rawBody);
+  }
+
+  return parts.join("\n");
+}
+
+async function readContainerRuntimeResponse(response: Response): Promise<{
+  payload: ContainerRuntimeResponse | null;
+  rawBody: string;
+}> {
+  const rawBody = await response.text();
+  if (!rawBody) return { payload: null, rawBody };
+
+  try {
+    return { payload: JSON.parse(rawBody) as ContainerRuntimeResponse, rawBody };
+  } catch {
+    return { payload: null, rawBody };
+  }
+}
 
 // Get container stub using Cloudflare's getContainer helper
 function getContainerStub(env: Env, id: string) {
@@ -130,6 +191,7 @@ export async function callContainerRuntime(
   endpoint: string,
   body: unknown,
   signal?: AbortSignal,
+  options: RuntimeCallOptions = {},
 ): Promise<ContainerRuntimeResponse> {
   const container = getContainerStub(env, containerId);
 
@@ -147,12 +209,14 @@ export async function callContainerRuntime(
     signal,
   });
 
-  const payload = (await response.json()) as ContainerRuntimeResponse;
+  const { payload, rawBody } = await readContainerRuntimeResponse(response);
 
-  if (!response.ok || payload?.ok === false) {
-    const errorMsg = payload?.error as string | undefined ||
-      `Container runtime call failed: ${response.status}`;
-    throw new Error(errorMsg);
+  if (!response.ok || !payload) {
+    throw new Error(buildContainerRuntimeFailureMessage(response, payload, rawBody));
+  }
+
+  if (payload.ok === false && !options.allowRuntimeFailure) {
+    throw new Error(buildContainerRuntimeFailureMessage(response, payload, rawBody));
   }
 
   return payload;
@@ -179,13 +243,13 @@ export async function getContainerHealth(
     signal,
   });
 
-  const payload = (await response.json()) as HealthResult;
+  const { payload, rawBody } = await readContainerRuntimeResponse(response);
 
-  if (!response.ok) {
-    throw new Error(`Container health check failed: ${response.status}`);
+  if (!response.ok || !payload) {
+    throw new Error(buildContainerRuntimeFailureMessage(response, payload, rawBody));
   }
 
-  return payload;
+  return payload as HealthResult;
 }
 
 // Container operation wrapper functions
@@ -214,7 +278,8 @@ export async function containerBash(
       timeoutMs: effectiveTimeout,
       maxOutputChars: maxOutputChars || 8000,
     },
-    signal
+    signal,
+    { allowRuntimeFailure: true }
   );
 
   return result as BashResult;

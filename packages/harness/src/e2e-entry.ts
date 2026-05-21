@@ -8,6 +8,7 @@ import { CodingContainer } from "./container/coding-container.js";
 import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
+import { containerBash, containerLs, getContainerHealth } from "./container/client.js";
 
 export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer };
 
@@ -75,6 +76,26 @@ export default {
         payload = await response.text();
       }
       return Response.json({ ok: response.ok, status: response.status, body: payload });
+    }
+
+    // Container test endpoints
+    if (path === "/__test/container-create" && request.method === "POST") {
+      const body = await request.json<{ containerId?: string }>();
+      const containerId = body.containerId || `e2e-test-${Date.now()}`;
+      const health = await getContainerHealth(env, containerId);
+      return Response.json({ ok: true, containerId, status: health.status });
+    }
+
+    if (path === "/__test/container-bash" && request.method === "POST") {
+      const body = await request.json<{ containerId: string; command: string; cwd?: string }>();
+      const result = await containerBash(env, body.containerId, body.command, body.cwd);
+      return Response.json({ ok: result.ok, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr });
+    }
+
+    if (path === "/__test/container-ls" && request.method === "POST") {
+      const body = await request.json<{ containerId: string; path?: string }>();
+      const result = await containerLs(env, body.containerId, body.path);
+      return Response.json({ ok: result.ok, entries: result.entries, entryCount: result.entryCount });
     }
 
     // Delegate to main handler for other endpoints

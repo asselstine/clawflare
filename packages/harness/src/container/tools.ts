@@ -289,7 +289,8 @@ export function createContainerCreateTool(
         );
         
         if (!cloneResult.ok) {
-          throw new Error(`Git clone failed: ${cloneResult.stderr || cloneResult.error || "Unknown error"}`);
+          const formatted = formatBashResult(cloneResult, 12000);
+          throw new Error(`Git clone failed:\n${formatted.text}`);
         }
       }
       

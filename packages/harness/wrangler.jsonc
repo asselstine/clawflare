@@ -4,7 +4,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "clawflare-harness",
   "compatibility_date": "2025-01-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
   "main": "src/index.ts",
 
   "minify": true,

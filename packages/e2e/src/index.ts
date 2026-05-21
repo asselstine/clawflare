@@ -139,7 +139,7 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
     $schema: "./node_modules/wrangler/config-schema.json",
     name: workerName,
     compatibility_date: "2025-01-01",
-    compatibility_flags: ["nodejs_compat"],
+    compatibility_flags: ["nodejs_compat", "enable_ctx_exports"],
     main: "src/e2e-entry.ts",
     minify: false,
     define: {
@@ -605,6 +605,39 @@ async function runTests(url: string, token: string): Promise<void> {
     } finally {
       ws.close();
     }
+  });
+
+  await runner.runTest("Container: create and run ls command", async () => {
+    const containerId = `e2e-container-${Date.now()}`;
+    
+    // Create container
+    const createResponse = await fetch(`${url}/__test/container-create`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ containerId }),
+    });
+    const createData = await createResponse.json() as { ok: boolean; containerId: string; status: string };
+    if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
+    if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+    
+    // Run ls command
+    const bashResponse = await fetch(`${url}/__test/container-bash`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ containerId, command: "ls -la", cwd: "/workspace" }),
+    });
+    const bashData = await bashResponse.json() as { ok: boolean; exitCode: number | null; stdout: string; stderr: string };
+    if (!bashData.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
+    if (bashData.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.exitCode}`);
+    if (!bashData.stdout.includes("total") || !bashData.stdout.includes("workspace")) {
+      // Container might list differently; just ensure we got some output
+      if (bashData.stdout.trim().length === 0 && bashData.stderr.trim().length === 0) {
+        throw new Error(`No output from ls command`);
+      }
+    }
+    
+    // Verify container respects the deployed compatibility by checking it works at all
+    // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
   });
 
   await runner.runTest("404 on unknown endpoint", async () => {
