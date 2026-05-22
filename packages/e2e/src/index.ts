@@ -851,8 +851,8 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   try {
     await rm(deployment.configPath, { force: true });
     console.log("   ✓ Temp config removed");
-  } catch {
-    // Ignore temp config cleanup failure.
+  } catch (error) {
+    console.error(`   ✗ Failed to remove temp config ${pathResolve(HARNESS_DIR, deployment.configPath)}:`, error instanceof Error ? error.message : String(error));
   }
   
   // Clean up old container images from the registry
