@@ -9,6 +9,7 @@ import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDataLayer } from "../data/index.js";
 import { executeDynamicWorker, USER_FUNCTION_CONTRACT } from "./dynamic-worker";
 import { createContainerTools } from "../container/tools.js";
+import type { ClawflareConfig } from "../config-api.js";
 
 // Tool parameter types
 interface StoreCodeParams {
@@ -86,6 +87,7 @@ export function defineTool(def: UserToolDefinition): ToolFactory {
 
 export interface ToolContext {
   sessionId?: string;
+  config?: ClawflareConfig;
 }
 
 /**
@@ -97,6 +99,11 @@ export interface ToolFactory {
   parameters: Record<string, unknown>;
   def: UserToolDefinition;
 }
+
+/**
+ * Tool factory function type for config-based tools
+ */
+export type ToolFactoryFn = (env: Env, ctx?: ExecutionContext, _toolCtx?: ToolContext) => AgentTool | AgentTool[];
 
 /**
  * Create AgentTool instances from user tool definitions.
@@ -155,21 +162,88 @@ export function createAgentToolsFromUserDefs(
   });
 }
 
-export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
-  const baseTools: AgentTool[] = [
+/**
+ * Create core built-in tools (store_code, execute_stored_code, execute_code, search)
+ */
+export function createCoreTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
+  return [
     createStoreCodeTool(env),
     createExecuteStoredCodeTool(env, ctx),
     createExecuteCodeTool(env, ctx),
     createSearchTool(env),
   ];
-  
-  // Add container tools if session ID is available
-  if (toolCtx?.sessionId) {
-    const containerTools = createContainerTools(env, { sessionId: toolCtx.sessionId });
-    return [...baseTools, ...containerTools];
+}
+
+/**
+ * Create container tools if session ID is available
+ */
+export function createContainerToolsIfAvailable(
+  env: Env,
+  toolCtx?: ToolContext
+): AgentTool[] {
+  if (!toolCtx?.sessionId) {
+    return [];
   }
+  return createContainerTools(env, { sessionId: toolCtx.sessionId });
+}
+
+/**
+ * Create tools from plugins in the config
+ */
+export function createPluginTools(
+  config: ClawflareConfig | undefined,
+  env: Env,
+  ctx?: ExecutionContext,
+  _toolCtx?: ToolContext
+): AgentTool[] {
+  if (!config?.plugins) {
+    return [];
+  }
+
+  const tools: AgentTool[] = [];
+  for (const plugin of config.plugins) {
+    if (plugin.registerTools) {
+      const result = plugin.registerTools(env, ctx);
+      const pluginTools = Array.isArray(result) ? result : [result];
+      tools.push(...pluginTools);
+    }
+  }
+  return tools;
+}
+
+/**
+ * Create user-defined tools from config
+ */
+export function createUserTools(
+  config: ClawflareConfig | undefined,
+  env: Env,
+  ctx?: ExecutionContext,
+  _toolCtx?: ToolContext
+): AgentTool[] {
+  if (!config?.tools) {
+    return [];
+  }
+
+  const tools: AgentTool[] = [];
+  for (const factory of config.tools) {
+    const result = factory(env, ctx);
+    const userTools = Array.isArray(result) ? result : [result];
+    tools.push(...userTools);
+  }
+  return tools;
+}
+
+/**
+ * Create all tools - the main entry point for tool creation.
+ * Combines core, container, plugin, and user tools.
+ */
+export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
+  const coreTools = createCoreTools(env, ctx);
+  const containerTools = createContainerToolsIfAvailable(env, toolCtx);
+  const pluginTools = createPluginTools(toolCtx?.config, env, ctx);
+  const userTools = createUserTools(toolCtx?.config, env, ctx);
   
-  return baseTools;
+  return [...coreTools, ...containerTools, ...pluginTools, ...userTools];
 }
 
 // Tool: Store code for later execution

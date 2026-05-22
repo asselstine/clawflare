@@ -4,6 +4,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { EgressHandler, EgressRegistry } from "@clawflare/egress-core";
 import type { Env } from "./internal-types/index.js";
+import type { ToolContext } from "./tools/index.js";
 import { handleHttpRequest } from "./http/router.js";
 import { createEgressRegistry as createBaseEgressRegistry } from "./egress/registry.js";
 
@@ -37,9 +38,9 @@ export interface SecretSpec {
 }
 
 /**
- * Tool factory function type
+ * Tool factory function type - supports optional tool context
  */
-export type ToolFactory = (env: Env, ctx?: ExecutionContext) => AgentTool | AgentTool[];
+export type ToolFactory = (env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext) => AgentTool | AgentTool[];
 
 /**
  * Egress handler factory function type
@@ -51,7 +52,7 @@ export type EgressHandlerFactory = () => EgressHandler | EgressHandler[];
  */
 export interface ClawflarePlugin {
   name: string;
-  registerTools?: (env: Env, ctx?: ExecutionContext) => AgentTool | AgentTool[];
+  registerTools?: (env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext) => AgentTool | AgentTool[];
   registerEgress?: () => EgressHandler | EgressHandler[];
 }
 

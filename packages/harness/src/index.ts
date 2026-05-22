@@ -100,15 +100,29 @@ export { normalizeBedrockBearerToken } from "./agent-config.js";
 // Export diagnostics
 export { logTiming, timingStart } from "./diagnostics.js";
 
-// Export tool factory
-export { createTools, defineTool, UserToolContext, UserToolDefinition } from "./tools/index.js";
+// Export tool factory and new config-driven tool creation
+export {
+  createTools,
+  defineTool,
+  UserToolContext,
+  UserToolDefinition,
+  ToolFactory as ToolFactoryDef,
+  ToolFactoryFn,
+  createCoreTools,
+  createContainerToolsIfAvailable,
+  createPluginTools,
+  createUserTools as createUserToolsFromDefs,
+} from "./tools/index.js";
+
+// Export tool context type
+export type { ToolContext } from "./tools/index.js";
 
 // Export configuration API
 export {
   defineClawflareConfig,
   normalizeConfig,
   createClawflareWorker,
-  createUserTools,
+  createUserTools as createUserToolsFromConfig,
   createEgressRegistryWithConfig,
   getRuntimeConfig,
 } from "./config-api.js";
