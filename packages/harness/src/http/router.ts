@@ -6,6 +6,7 @@ import { validateHarnessToken, validateHarnessConfigured } from "./auth.js";
 import { json, notFound } from "./responses.js";
 import { handleChat } from "./routes/chat.js";
 import { handleGetSession, handleCloseSession, handleListSessions } from "./routes/sessions.js";
+import { handleCreateSession } from "./routes/session-create.js";
 import { handleGetContext, handleNewContext } from "./routes/context.js";
 import { handleListTools } from "./routes/tools.js";
 import { handleGetInfo } from "./routes/info.js";
@@ -53,6 +54,11 @@ export async function handleHttpRequest(
   // /v1/chat - POST
   if (path === "/v1/chat" && request.method === "POST") {
     return handleChat(request, env);
+  }
+
+  // /v1/session - POST (create new session without prompt)
+  if (path === "/v1/session" && request.method === "POST") {
+    return handleCreateSession(request, env);
   }
 
   // /v1/session/:id - GET

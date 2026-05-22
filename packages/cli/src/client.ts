@@ -220,6 +220,21 @@ export class AgentClient {
     return data;
   }
 
+  async createSession(): Promise<ContextInfo> {
+    const data = await this.requestJson<ContextInfo>("/v1/session", {
+      method: "POST",
+    });
+    this.currentContextId = data.id;
+    return data;
+  }
+
+  async warmupSession(): Promise<void> {
+    // Create a throwaway session to warm up the workflow isolate
+    await this.requestJson<ContextInfo>("/v1/session", {
+      method: "POST",
+    });
+  }
+
   async createContext(parentId?: string): Promise<ContextInfo> {
     const data = await this.requestJson<ContextInfo>("/v1/context", {
       method: "POST",

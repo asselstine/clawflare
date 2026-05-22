@@ -568,6 +568,8 @@ export class ClawflareTUIApp {
     this.loadInitialData();
   }
 
+  private warmupPromise: Promise<void> | null = null;
+
   private async loadInitialData(): Promise<void> {
     this.setStatus("Connecting...", "yellow");
     try {
@@ -579,15 +581,29 @@ export class ClawflareTUIApp {
       this.serverInfo.model = serverInfo.model;
       this.serverInfo.contextTotal = serverInfo.contextWindow;
       
-      const ctx = await this.client.createContext();
+      // Create session and start background warmup
+      const ctx = await this.client.createSession();
       this.sessionId = ctx.id;
       this.messages = [];
       this.updateHeader();
       this.renderMessages();
       this.setStatus("Connected", "green");
+      
+      // Start warmup in the background - don't await it
+      this.warmupPromise = this.warmupSessionInBackground();
     } catch (e) {
       this.error = e instanceof Error ? e.message : "Failed to connect";
       this.setStatus(`Error: ${this.error}`, "red");
+    }
+  }
+
+  private async warmupSessionInBackground(): Promise<void> {
+    try {
+      // Fire warmup request - this creates a workflow that warms up the isolate
+      await this.client.warmupSession();
+    } catch (e) {
+      // Warmup failure shouldn't block the user - just log it
+      console.error("[warmup] Background warmup failed:", e);
     }
   }
 
@@ -1061,19 +1077,35 @@ export class ClawflareTUIApp {
     this.abortController = new AbortController();
     const requestAbortController = this.abortController;
 
-    // Fire off the session-based chat request
-    this.client.submitChat({
-      type: "prompt",
-      content: actualContent,
-      sessionId: this.sessionId,
-    }).then((submitted) => {
+    // Wait for warmup to complete (if it's still running), then send the prompt
+    const warmupPromise = this.warmupPromise;
+    this.warmupPromise = null; // Clear it so we don't wait again
+
+    const sendAfterWarmup = async (): Promise<void> => {
+      if (warmupPromise) {
+        try {
+          await warmupPromise;
+        } catch {
+          // Warmup failure shouldn't block the real prompt
+        }
+      }
+      
+      // Fire off the session-based chat request
+      const submitted = await this.client.submitChat({
+        type: "prompt",
+        content: actualContent,
+        sessionId: this.sessionId,
+      });
+      
       this.sessionId = submitted.sessionId;
       this.updateHeader();
       this.setStatus(`Session ${submitted.sessionId.slice(0, 8)}: processing...`, "yellow");
       
       // Start polling for events/messages
-      return this.pollSession(submitted.sessionId, requestAbortController.signal, submitted.eventCursor);
-    }).then(() => {
+      await this.pollSession(submitted.sessionId, requestAbortController.signal, submitted.eventCursor);
+    };
+
+    sendAfterWarmup().then(() => {
       this.setStatus("Complete", "green");
     }).catch((e) => {
       if (e instanceof Error && e.name === "AbortError" && requestAbortController.signal.aborted) {
