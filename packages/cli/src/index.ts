@@ -56,15 +56,18 @@ program
   .option("-e, --env <environment>", "Environment (production, staging)")
   .option("--print-config", "Print generated Wrangler config without deploying")
   .option("-f, --force", "Force recreation of resources")
+  .option("--account-id <id>", "Override Cloudflare account ID")
   .action(async (options: {
     env?: string;
     printConfig: boolean;
     force: boolean;
+    accountId?: string;
   }) => {
     await deployCommand({
       env: options.env,
       printConfig: options.printConfig,
       force: options.force,
+      accountId: options.accountId,
     });
   });
 

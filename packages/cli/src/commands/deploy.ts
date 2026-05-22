@@ -13,6 +13,12 @@ export interface DeployOptions {
   env?: string;
   printConfig?: boolean;
   force?: boolean;
+  accountId?: string;
+}
+
+interface CloudflareAccount {
+  id: string;
+  name: string;
 }
 
 interface StateFile {
@@ -86,29 +92,107 @@ async function prompt(question: string): Promise<string> {
   });
 }
 
-async function getCloudflareAccountId(): Promise<string | null> {
+async function promptSecret(name: string, description?: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  const desc = description ? ` (${description})` : "";
+  return new Promise((resolve) => {
+    // Use stderr for prompt to avoid mixing with output
+    process.stderr.write(`Enter value for ${name}${desc}: `);
+    rl.question("", (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
+
+async function getCloudflareAccounts(): Promise<CloudflareAccount[]> {
+  const accounts: CloudflareAccount[] = [];
+  
   try {
+    // First try wrangler whoami
     const result = execSync("wrangler whoami", { encoding: "utf-8" });
-    // Try to extract account ID from wrangler output
     const match = result.match(/Account ID\s+([a-f0-9]+)/i);
-    if (match) return match[1];
-    
-    // Try reading from .wrangler/config.json
-    const configPath = path.join(process.env.HOME || "", ".wrangler", "config.json");
-    try {
-      const configContent = await fs.readFile(configPath, "utf-8");
-      const config = JSON.parse(configContent);
-      // There might be multiple accounts, return the first one
-      if (config.accounts && config.accounts.length > 0) {
-        return config.accounts[0].id;
+    if (match) {
+      const id = match[1];
+      // Try to extract account name
+      const nameMatch = result.match(/Account Name\s+(.+)/i);
+      const name = nameMatch ? nameMatch[1].trim() : id;
+      accounts.push({ id, name });
+    }
+  } catch {
+    // Ignore errors from wrangler whoami
+  }
+
+  // Also try reading from .wrangler/config.json
+  const configPath = path.join(process.env.HOME || "", ".wrangler", "config.json");
+  try {
+    const configContent = await fs.readFile(configPath, "utf-8");
+    const config = JSON.parse(configContent);
+    if (config.accounts && Array.isArray(config.accounts)) {
+      for (const account of config.accounts) {
+        if (account.id && !accounts.find(a => a.id === account.id)) {
+          accounts.push({
+            id: account.id,
+            name: account.name || account.id,
+          });
+        }
       }
-    } catch {
-      // Ignore errors reading config
+    }
+  } catch {
+    // Ignore errors reading config
+  }
+
+  return accounts;
+}
+
+async function getCloudflareAccountId(options?: { forceAccountId?: string }): Promise<string | null> {
+  // If explicit account ID is provided, use it
+  if (options?.forceAccountId) {
+    return options.forceAccountId;
+  }
+
+  // Check environment variable
+  if (process.env.CLOUDFLARE_ACCOUNT_ID) {
+    return process.env.CLOUDFLARE_ACCOUNT_ID;
+  }
+
+  // Get all accounts
+  const accounts = await getCloudflareAccounts();
+  
+  if (accounts.length === 0) {
+    return null;
+  }
+  
+  if (accounts.length === 1) {
+    return accounts[0].id;
+  }
+
+  // Multiple accounts - return the first one with a message
+  console.log(`Multiple Cloudflare accounts found:`);
+  accounts.forEach((acc, i) => {
+    console.log(`  ${i + 1}. ${acc.name} (${acc.id})`);
+  });
+  console.log(`\nUsing account: ${accounts[0].name} (${accounts[0].id})`);
+  console.log(`To use a different account, set CLOUDFLARE_ACCOUNT_ID or use --account-id`);
+  
+  return accounts[0].id;
+}
+
+async function checkCloudflareAuth(): Promise<boolean> {
+  try {
+    // Check if we have API token in environment
+    if (process.env.CLOUDFLARE_API_TOKEN) {
+      return true;
     }
     
-    return null;
+    // Check if wrangler is authenticated
+    execSync("wrangler whoami", { stdio: "pipe" });
+    return true;
   } catch {
-    return null;
+    return false;
   }
 }
 
@@ -147,7 +231,7 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
     process.exit(1);
   }
 
-  console.log(`Deploying "${config.name}"...\n`);
+  console.log(`Deploying "${config.name}"${options.env ? ` [${options.env}]` : ""}...\n`);
 
   // Load or create state
   let state = await loadState(cwd) || { version: 1, projectName: config.name };
@@ -155,10 +239,17 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
 
   // Check Cloudflare auth
   console.log("Checking Cloudflare authentication...");
-  const accountId = await getCloudflareAccountId();
-  if (!accountId) {
+  const isAuthed = await checkCloudflareAuth();
+  if (!isAuthed) {
     console.error("Error: Not authenticated with Cloudflare");
     console.error("Run 'wrangler login' or set CLOUDFLARE_API_TOKEN");
+    process.exit(1);
+  }
+
+  const accountId = await getCloudflareAccountId({ forceAccountId: options.accountId });
+  if (!accountId) {
+    console.error("Error: Could not determine Cloudflare account ID");
+    console.error("Set CLOUDFLARE_ACCOUNT_ID or use --account-id");
     process.exit(1);
   }
   
@@ -169,8 +260,9 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
 
   // Create or use D1 database
   const dbName = options.env ? `${config.name}-${options.env}` : config.name;
+  const workerName = options.env ? `${config.name}-${options.env}` : config.name;
   state.cloudflare.d1DatabaseName = dbName;
-  state.cloudflare.workerName = dbName;
+  state.cloudflare.workerName = workerName;
 
   if (!state.cloudflare.d1DatabaseId || options.force) {
     console.log(`Creating D1 database "${dbName}"...`);
@@ -194,7 +286,7 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
     projectName: config.name,
     dbId: state.cloudflare.d1DatabaseId,
     dbName,
-    workerName: dbName,
+    workerName,
     accountId,
     compatibilityDate,
   });
@@ -222,34 +314,39 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
   }
 
   // Set secrets
-  console.log("Checking secrets...");
-  const envVars = process.env;
-  const secrets: Record<string, string> = {};
+  console.log("Checking and setting secrets...\n");
   
-  // Check for required secrets
-  if (envVars.CLAWFLARE_API_TOKEN) {
-    secrets["CLAWFLARE_API_TOKEN"] = envVars.CLAWFLARE_API_TOKEN;
-  }
-  if (envVars.ANTHROPIC_API_KEY) {
-    secrets["ANTHROPIC_API_KEY"] = envVars.ANTHROPIC_API_KEY;
-  }
-  if (envVars.AWS_BEARER_TOKEN_BEDROCK) {
-    secrets["AWS_BEARER_TOKEN_BEDROCK"] = envVars.AWS_BEARER_TOKEN_BEDROCK;
-  }
-  if (envVars.CF_API_TOKEN) {
-    secrets["CF_API_TOKEN"] = envVars.CF_API_TOKEN;
-  }
+  const isInteractive = process.stdin.isTTY;
+  
+  // Define required secrets
+  const secretDefs: Array<{ key: string; description?: string; required: boolean }> = [
+    { key: "CLAWFLARE_API_TOKEN", description: "API token for Clawflare authentication", required: true },
+    { key: "AWS_BEARER_TOKEN_BEDROCK", description: "AWS bearer token for Bedrock AI", required: false },
+    { key: "ANTHROPIC_API_KEY", description: "Anthropic API key for Claude", required: false },
+  ];
 
-  // Deploy secrets
-  for (const [key, value] of Object.entries(secrets)) {
-    console.log(`  Setting secret: ${key}`);
-    try {
-      execSync(
-        `echo "${value}" | wrangler secret put "${key}" --config "${wranglerPath}"`,
-        { stdio: ["pipe", "pipe", "pipe"] }
-      );
-    } catch {
-      // Secret might already exist
+  for (const def of secretDefs) {
+    let value = process.env[def.key];
+    
+    // If not in env and interactive, prompt
+    if (!value && isInteractive && def.required) {
+      console.log(`Secret ${def.key} is required.`);
+      value = await promptSecret(def.key, def.description);
+    }
+
+    if (value) {
+      console.log(`  Setting secret: ${def.key}`);
+      try {
+        execSync(
+          `echo "${value}" | wrangler secret put "${def.key}" --config "${wranglerPath}"`,
+          { stdio: ["pipe", "pipe", "pipe"] }
+        );
+      } catch {
+        // Secret might already exist
+        console.log(`    (already exists or error)`);
+      }
+    } else if (def.required) {
+      console.warn(`  Warning: Required secret ${def.key} not set`);
     }
   }
 
@@ -264,6 +361,7 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
 
   // Get deployment URL
   console.log("\nGetting deployment URL...");
+  let deploymentUrl: string | undefined;
   try {
     const result = execSync(
       `wrangler deployment list --config "${wranglerPath}" --json`,
@@ -271,22 +369,26 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
     );
     const deployments = JSON.parse(result) as Array<{ url: string }>;
     if (deployments.length > 0 && deployments[0].url) {
-      state.deployment = {
-        url: deployments[0].url,
-      };
-      console.log(`  URL: ${deployments[0].url}`);
+      deploymentUrl = deployments[0].url;
+      console.log(`  URL: ${deploymentUrl}`);
     }
   } catch {
     // Try alternative URL format
-    const url = `https://${dbName}.${accountId}.workers.dev`;
-    state.deployment = { url };
-    console.log(`  URL: ${url}`);
+    deploymentUrl = `https://${workerName}.${accountId}.workers.dev`;
+    console.log(`  URL: ${deploymentUrl} (inferred)`);
   }
 
-  // Save state
+  // Update state with deployment info
+  state.deployment = {
+    url: deploymentUrl,
+    lastDeployedAt: new Date().toISOString(),
+  };
   await saveState(cwd, state);
 
   console.log("\n✓ Deployment complete!");
+  if (deploymentUrl) {
+    console.log(`\nYour agent is available at: ${deploymentUrl}`);
+  }
   console.log(`\nNext steps:`);
   console.log(`  clawflare open`);
 }
