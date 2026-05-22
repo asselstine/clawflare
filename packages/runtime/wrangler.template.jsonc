@@ -2,7 +2,7 @@
 // DO NOT EDIT wrangler.jsonc directly - edit this file and run `pnpm generate:config`
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "clawflare-harness",
+  "name": "{{WORKER_NAME}}",
   "compatibility_date": "2025-01-01",
   "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
   "main": "src/index.ts",
@@ -16,7 +16,7 @@
   "services": [
     {
       "binding": "HTTP_GATEWAY",
-      "service": "clawflare-harness",
+      "service": "{{WORKER_NAME}}",
       "entrypoint": "HttpGateway"
     }
   ],
@@ -80,7 +80,7 @@
 
   "workflows": [
     {
-      "name": "clawflare-agent-workflow",
+      "name": "{{WORKFLOW_NAME}}",
       "binding": "AGENT_WORKFLOW",
       "class_name": "PersistentSessionWorkflow"
     }

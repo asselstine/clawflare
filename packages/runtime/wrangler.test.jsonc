@@ -1,7 +1,7 @@
-// wrangler.test.jsonc - Clawflare Harness test-only configuration
+// wrangler.test.jsonc - Clawflare Runtime test-only configuration
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "clawflare-harness-test",
+  "name": "clawflare-runtime-test",
   "compatibility_date": "2025-01-01",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/e2e-entry.ts",
@@ -15,7 +15,7 @@
   "services": [
     {
       "binding": "HTTP_GATEWAY",
-      "service": "clawflare-harness-test",
+      "service": "clawflare-runtime-test",
       "entrypoint": "HttpGateway"
     }
   ],

@@ -2,7 +2,7 @@
 // DO NOT EDIT wrangler.jsonc directly - edit this file and run `pnpm generate:config`
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "clawflare-harness",
+  "name": "clawflare-runtime",
   "compatibility_date": "2025-01-01",
   "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
   "main": "src/index.ts",
@@ -16,7 +16,7 @@
   "services": [
     {
       "binding": "HTTP_GATEWAY",
-      "service": "clawflare-harness",
+      "service": "clawflare-runtime",
       "entrypoint": "HttpGateway"
     }
   ],
@@ -40,8 +40,8 @@
     {
       "binding": "DB",
       "database_name": "clawflare",
-      "database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
-      "preview_database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
+      "database_id": "test-db-id",
+      "preview_database_id": "test-preview-db-id",
       "migrations_dir": "migrations"
     }
   ],

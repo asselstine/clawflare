@@ -11,6 +11,7 @@ import { generateWranglerConfig } from "./config.js";
 import {
   loadConfigFromCwd,
   getWorkerName,
+  getWorkflowName,
   getDatabaseName,
   getCompatibilityDate,
   getAllSecrets,
@@ -268,6 +269,7 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
   const config = loadedConfig.config;
   const projectName = config.name;
   const workerName = getWorkerName(config, options.env);
+  const workflowName = getWorkflowName(config, options.env);
   const dbName = getDatabaseName(config, options.env);
   const compatibilityDate = getCompatibilityDate(config);
 
@@ -350,6 +352,7 @@ export async function deployCommand(options: DeployOptions): Promise<void> {
     dbId,
     dbName,
     workerName,
+    workflowName,
     accountId,
     compatibilityDate,
   });

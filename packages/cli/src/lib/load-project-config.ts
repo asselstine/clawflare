@@ -7,6 +7,7 @@ import { execSync } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { getConfigRuntimeNames } from "@clawflare/runtime/runtime-names";
 
 export interface AiConfig {
   provider?: string;
@@ -16,6 +17,7 @@ export interface AiConfig {
 export interface CloudflareConfig {
   compatibilityDate?: string;
   workerName?: string;
+  workflowName?: string;
 }
 
 export interface SecretSpec {
@@ -180,6 +182,9 @@ export function validateConfig(config: unknown): asserts config is ClawflareConf
     if (cf.workerName !== undefined && typeof cf.workerName !== "string") {
       throw new ConfigValidationError("Config 'cloudflare.workerName' must be a string");
     }
+    if (cf.workflowName !== undefined && typeof cf.workflowName !== "string") {
+      throw new ConfigValidationError("Config 'cloudflare.workflowName' must be a string");
+    }
   }
 
   // secrets is optional array
@@ -211,8 +216,14 @@ export async function loadConfigFromCwd(): Promise<LoadedConfig> {
  * Get the effective worker name from config or project name
  */
 export function getWorkerName(config: ClawflareConfig, env?: string): string {
-  const baseName = config.cloudflare?.workerName || config.name;
-  return env ? `${baseName}-${env}` : baseName;
+  return getConfigRuntimeNames(config, env).workerName;
+}
+
+/**
+ * Get the effective workflow name from config or project name
+ */
+export function getWorkflowName(config: ClawflareConfig, env?: string): string {
+  return getConfigRuntimeNames(config, env).workflowName;
 }
 
 /**

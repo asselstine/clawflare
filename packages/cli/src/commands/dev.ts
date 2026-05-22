@@ -10,6 +10,7 @@ import { generateWranglerConfig } from "./config.js";
 import {
   loadConfigFromCwd,
   getWorkerName,
+  getWorkflowName,
   getCompatibilityDate,
   ConfigValidationError,
 } from "../lib/load-project-config.js";
@@ -100,6 +101,7 @@ export async function devCommand(options: DevOptions): Promise<void> {
   const config = loadedConfig.config;
   const projectName = config.name;
   const workerName = getWorkerName(config);
+  const workflowName = getWorkflowName(config);
   const compatibilityDate = getCompatibilityDate(config);
 
   console.log(`Starting Clawflare development server for "${projectName}"...\n`);
@@ -133,6 +135,7 @@ export async function devCommand(options: DevOptions): Promise<void> {
     projectName,
     dbName,
     workerName,
+    workflowName,
     compatibilityDate,
   });
   console.log(`  Config: ${wranglerPath}\n`);

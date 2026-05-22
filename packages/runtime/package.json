@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "default": "./dist/src/index.js"
+    },
+    "./runtime-names": {
+      "types": "./dist/src/runtime-names.d.ts",
+      "default": "./dist/src/runtime-names.js"
     }
   },
   "files": [
@@ -23,7 +27,7 @@
     "dev:raw": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "timing:analyze": "node scripts/analyze-timing.mjs",
-    "generate:config": "node scripts/generate-config.mjs",
+    "generate:config": "node --import=tsx scripts/generate-config.ts",
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

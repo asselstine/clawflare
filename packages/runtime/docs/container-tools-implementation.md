@@ -66,7 +66,7 @@ Added to `wrangler.jsonc`:
       "class_name": "CodingContainer",
       "image": "./container-runtime/Dockerfile",
       "max_instances": 10,
-      "instance_type": "dev"
+      "instance_type": "lite"
     }
   ],
   "durable_objects": {

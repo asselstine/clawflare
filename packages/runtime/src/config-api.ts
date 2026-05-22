@@ -7,6 +7,7 @@ import type { Env } from "./internal-types/index.js";
 import type { ToolContext } from "./tools/index.js";
 import { handleHttpRequest } from "./http/router.js";
 import { createEgressRegistry as createBaseEgressRegistry } from "./egress/registry.js";
+import { getConfigRuntimeNames } from "./runtime-names.js";
 
 // =============================================================================
 // Configuration Types
@@ -26,6 +27,7 @@ export interface AiConfig {
 export interface CloudflareConfig {
   compatibilityDate?: string;
   workerName?: string;
+  workflowName?: string;
 }
 
 /**
@@ -117,6 +119,8 @@ export function defineClawflareConfig(config: ClawflareConfig): ClawflareConfig 
  * Normalize and validate configuration
  */
 export function normalizeConfig(config: ClawflareConfig): Required<ClawflareConfig> {
+  const runtimeNames = getConfigRuntimeNames(config);
+
   return {
     name: config.name,
     ai: {
@@ -129,7 +133,8 @@ export function normalizeConfig(config: ClawflareConfig): Required<ClawflareConf
     secrets: config.secrets ?? [],
     cloudflare: {
       compatibilityDate: config.cloudflare?.compatibilityDate ?? "2025-01-01",
-      workerName: config.cloudflare?.workerName ?? config.name,
+      workerName: runtimeNames.workerName,
+      workflowName: runtimeNames.workflowName,
     },
   };
 }

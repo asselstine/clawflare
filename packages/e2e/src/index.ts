@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli";
+import { DEFAULT_RUNTIME_NAMES as runtimeNames } from "../../runtime/src/runtime-names.js";
 
 const TEST_TOKEN = "test-token-12345";
 const HARNESS_DIR = pathResolve(process.cwd(), "..", "runtime");
@@ -211,7 +212,7 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
         class_name: "CodingContainer",
         image: "./container-runtime/Dockerfile",
         max_instances: 5,
-        instance_type: "dev",
+        instance_type: "lite",
       },
     ],
     d1_databases: [
@@ -256,9 +257,9 @@ async function deployRemote(): Promise<RemoteDeployment> {
   // Container applications persist after Worker deletion and can't be deleted,
   // so reusing the same Worker name causes deployment failures.
   const runId = randomUUID().slice(0, 8);
-  const workerName = `clawflare-harness-e2e-${runId}`;
-  const workflowName = `clawflare-agent-workflow-e2e-${runId}`;
-  const d1Name = `clawflare-e2e-${runId}`;
+  const workerName = `${runtimeNames.e2eWorkerPrefix}-${runId}`;
+  const workflowName = `${runtimeNames.e2eWorkflowPrefix}-${runId}`;
+  const d1Name = `${runtimeNames.e2eDatabasePrefix}-${runId}`;
   let configPath = "";
 
   console.log("🚀 Creating remote E2E deployment...");
@@ -766,48 +767,114 @@ Environment variables:
   CLOUDFLARE_API_TOKEN or CF_API_TOKEN  Wrangler authentication token
 
 The test suite will:
-  1. Deploy a unique remote Worker named clawflare-harness-e2e-<id>
+  1. Deploy a unique remote Worker named ${runtimeNames.e2eWorkerPrefix}-<id>
   2. Tag the Worker version as e2e
   3. Run API tests against the workers.dev URL
   4. Delete the Worker and temp config unless --keep-alive is used
 `);
 }
 
-async function cleanupOldContainerImages(): Promise<void> {
+async function cleanupOldContainerImages(currentWorkerName?: string): Promise<void> {
   try {
     console.log("   Cleaning up old E2E container images...");
-    
-    // List container images and find E2E ones
+
     const listOutput = await runWrangler(["containers", "images", "list", "--json"], { capture: true });
-    const images = JSON.parse(listOutput) as Array<{ repository: string; tag: string; created: string }>;
-    
-    // Filter for E2E images (they contain "clawflare-harness-e2e" in the name)
-    const e2eImages = images.filter(img => img.repository.includes("clawflare-harness-e2e"));
-    
+    const images = JSON.parse(listOutput) as unknown;
+
+    if (!Array.isArray(images)) {
+      throw new Error(`Unexpected containers image list output: ${listOutput}`);
+    }
+
+    const legacyE2ePrefix = "clawflare-harness-e2e";
+    const currentImageNamePrefix = currentWorkerName ? `${currentWorkerName}-` : null;
+
+    const imageGroups = images.filter((image): image is { name: string; tags: string[] } => (
+      typeof image === "object" &&
+      image !== null &&
+      typeof (image as { name?: unknown }).name === "string" &&
+      Array.isArray((image as { tags?: unknown }).tags)
+    ));
+
+    if (imageGroups.length === images.length) {
+      const staleGroups = imageGroups.filter((image) =>
+        image.name.includes(legacyE2ePrefix) ||
+        (currentImageNamePrefix !== null && image.name.startsWith(currentImageNamePrefix))
+      );
+
+      if (staleGroups.length === 0) {
+        console.log("   No E2E container images to clean up");
+        return;
+      }
+
+      for (const image of staleGroups) {
+        for (const tag of image.tags) {
+          const imageRef = `${image.name}:${tag}`;
+          try {
+            await runWrangler(["containers", "images", "delete", imageRef], { capture: true });
+            console.log(`     ✓ Deleted ${imageRef}`);
+          } catch {
+            console.log(`     ✗ Failed to delete ${imageRef}`);
+          }
+        }
+      }
+
+      const undeletedCurrentImages = imageGroups.filter((image) =>
+        image.name.includes(runtimeNames.e2eWorkerPrefix) &&
+        !staleGroups.some((staleImage) => staleImage.name === image.name)
+      );
+
+      if (undeletedCurrentImages.length > 0) {
+        console.log(
+          `   Note: Wrangler only returned image names/tags, so skipped pruning ${undeletedCurrentImages.length} other ${runtimeNames.e2eWorkerPrefix} image(s).`
+        );
+      }
+
+      return;
+    }
+
+    const legacyImages = images.filter((image): image is { repository: string; tag: string; created: string } => (
+      typeof image === "object" &&
+      image !== null &&
+      typeof (image as { repository?: unknown }).repository === "string" &&
+      typeof (image as { tag?: unknown }).tag === "string" &&
+      typeof (image as { created?: unknown }).created === "string"
+    ));
+
+    if (legacyImages.length !== images.length) {
+      throw new Error(`Unsupported containers image list schema: ${listOutput}`);
+    }
+
+    const e2eImages = legacyImages.filter((img) => img.repository.includes(runtimeNames.e2eWorkerPrefix));
+
     if (e2eImages.length === 0) {
       console.log("   No E2E container images to clean up");
       return;
     }
-    
-    // Sort by creation time (newest first) and keep the 5 most recent
+
     e2eImages.sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
     const imagesToDelete = e2eImages.slice(5);
-    
+
     if (imagesToDelete.length === 0) {
       console.log(`   Keeping ${e2eImages.length} most recent E2E images`);
       return;
     }
-    
+
     for (const img of imagesToDelete) {
+      const imageRef = `${img.repository}:${img.tag}`;
       try {
-        await runWrangler(["containers", "images", "delete", `${img.repository}:${img.tag}`], { capture: true });
-        console.log(`     ✓ Deleted ${img.repository}:${img.tag}`);
+        await runWrangler(["containers", "images", "delete", imageRef], { capture: true });
+        console.log(`     ✓ Deleted ${imageRef}`);
       } catch {
-        console.log(`     ✗ Failed to delete ${img.repository}:${img.tag}`);
+        console.log(`     ✗ Failed to delete ${imageRef}`);
       }
     }
   } catch (error) {
-    console.log("   Note: Container image cleanup skipped (may require newer Wrangler version)");
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`   Note: Container image cleanup skipped: ${message}`);
+    if (error instanceof Error && error.stack) {
+      console.log(error.stack.split("\n").map((line) => `   ${line}`).join("\n"));
+    }
+    console.log("   This may require a newer Wrangler version or different Wrangler containers CLI support.");
   }
 }
 
@@ -856,7 +923,7 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   }
   
   // Clean up old container images from the registry
-  await cleanupOldContainerImages();
+  await cleanupOldContainerImages(deployment.workerName);
 }
 
 async function main(): Promise<void> {

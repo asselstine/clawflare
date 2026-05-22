@@ -9,6 +9,7 @@ import * as path from "path";
 import {
   loadConfigFromCwd,
   getWorkerName,
+  getWorkflowName,
   getDatabaseName,
   getCompatibilityDate,
   ConfigValidationError,
@@ -69,6 +70,7 @@ export interface WranglerConfigGeneratorOptions {
   dbName: string;
   dbPreviewId?: string;
   workerName?: string;
+  workflowName?: string;
   accountId?: string;
   compatibilityDate?: string;
   aiProvider?: string;
@@ -88,6 +90,7 @@ export async function generateWranglerConfig(
     dbName,
     dbPreviewId,
     workerName = projectName,
+    workflowName = `${workerName}-workflow`,
     compatibilityDate = "2025-01-01",
     aiProvider = "amazon-bedrock",
     aiModel = "minimax.minimax-m2.5",
@@ -156,7 +159,7 @@ export async function generateWranglerConfig(
     ],
     workflows: [
       {
-        name: "clawflare-agent-workflow",
+        name: workflowName,
         binding: "AGENT_WORKFLOW",
         class_name: "PersistentSessionWorkflow",
       },
@@ -269,6 +272,7 @@ export async function configGenerateCommand(options: ConfigGenerateOptions): Pro
 
   // Determine names using config-derived functions
   const workerName = getWorkerName(config, options.env);
+  const workflowName = getWorkflowName(config, options.env);
   const dbName = getDatabaseName(config, options.env);
   const compatibilityDate = getCompatibilityDate(config);
   const dbId = state.cloudflare?.d1DatabaseId;
@@ -283,6 +287,7 @@ export async function configGenerateCommand(options: ConfigGenerateOptions): Pro
     dbName,
     dbPreviewId,
     workerName,
+    workflowName,
     accountId: accountId || undefined,
     compatibilityDate,
     aiProvider: config.ai?.provider,
@@ -293,6 +298,7 @@ export async function configGenerateCommand(options: ConfigGenerateOptions): Pro
   console.log(`✓ Generated: ${outputPath}`);
   console.log(`\nDatabase: ${dbName}`);
   console.log(`Worker: ${workerName}`);
+  console.log(`Workflow: ${workflowName}`);
   if (dbId) {
     console.log(`Database ID: ${dbId}`);
   } else {
@@ -329,6 +335,7 @@ export async function configPrintCommand(options: ConfigGenerateOptions): Promis
 
   // Determine names using config-derived functions
   const workerName = getWorkerName(config, options.env);
+  const workflowName = getWorkflowName(config, options.env);
   const dbName = getDatabaseName(config, options.env);
   const compatibilityDate = getCompatibilityDate(config);
   const dbId = state.cloudflare?.d1DatabaseId;
@@ -343,6 +350,7 @@ export async function configPrintCommand(options: ConfigGenerateOptions): Promis
     dbName,
     dbPreviewId,
     workerName,
+    workflowName,
     accountId: accountId || undefined,
     compatibilityDate,
     aiProvider: config.ai?.provider,
