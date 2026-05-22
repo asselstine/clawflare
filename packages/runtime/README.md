@@ -1,12 +1,20 @@
-# Clawflare Harness
+# Clawflare Runtime
 
-The core Clawflare agent harness runs in a Cloudflare Worker and is powered by `@earendil-works/pi-agent-core`.
+`@clawflare/runtime` is the Cloudflare Worker runtime for Clawflare agents. It provides the Worker entrypoint, Durable Object bindings, workflow integration, data layer, HTTP routes, WebSocket session handling, and runtime extension APIs.
 
 ## Quick Start
 
+From the repository root:
+
 ```bash
-cd packages/harness
 pnpm install
+pnpm --filter @clawflare/runtime dev
+```
+
+Or from the runtime package directory:
+
+```bash
+cd packages/runtime
 pnpm dev
 ```
 

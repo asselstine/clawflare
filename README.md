@@ -125,7 +125,7 @@ See `examples/` folder for complete working projects:
 clawflare/
 ├── packages/
 │   ├── cli/                # Published as "clawflare"
-│   ├── harness/            # Published as "@clawflare/runtime"
+│   ├── runtime/            # Published as "@clawflare/runtime"
 │   ├── egress-core/        # Published as "@clawflare/egress-core"
 │   ├── github/             # Published as "@clawflare/github"
 │   ├── cloudflare/         # Published as "@clawflare/cloudflare"
@@ -163,7 +163,7 @@ pnpm typecheck
 pnpm --filter @clawflare/runtime test
 
 # Run E2E tests
-pnpm test
+pnpm test:e2e
 ```
 
 ### Monorepo Commands
@@ -192,21 +192,24 @@ Requires Cloudflare Containers feature.
 
 ```bash
 # Build container image
-cd packages/harness/container-runtime
+cd packages/runtime/container-runtime
 docker build -t clawflare-container .
 ```
 
 ## Testing
 
 ```bash
-# Run E2E tests (creates temp Worker and D1)
+# Run all package tests
 pnpm test
 
+# Run E2E tests (creates temporary Worker and D1 resources)
+pnpm test:e2e
+
 # Keep resources after testing (for debugging)
-pnpm test -- --keep-alive
+pnpm test:e2e -- --keep-alive
 
 # Interactive TUI testing
-pnpm test:ui
+pnpm test:e2e:ui
 ```
 
 ## License

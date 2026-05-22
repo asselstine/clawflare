@@ -6,7 +6,7 @@
 
 ## Package Structure
 
-### 1. `packages/harness/` - Core Cloudflare Worker
+### 1. `packages/runtime/` - Core Cloudflare Worker
 
 **Entry Points & Routing:**
 - `src/index.ts` - Main Worker fetch handler, routing, auth, WebSocket upgrade
@@ -115,7 +115,7 @@
 
 ## Environment Configuration
 
-Harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as defaults. Production deploys require real D1 database IDs in `packages/harness/wrangler.jsonc` or an environment-specific Wrangler config.
+Harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as defaults. Production deploys require real D1 database IDs in `packages/runtime/wrangler.jsonc` or an environment-specific Wrangler config.
 
 | Variable | Purpose |
 |----------|---------|

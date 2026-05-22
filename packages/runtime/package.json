@@ -2,6 +2,7 @@
   "name": "@clawflare/runtime",
   "version": "0.1.0",
   "description": "Clawflare Agent runtime - runs in Cloudflare Workers with pi-agent-core",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
