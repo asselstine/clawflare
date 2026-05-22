@@ -5,6 +5,7 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
+import { fileURLToPath } from "url";
 
 interface InitOptions {
   template?: string;
@@ -14,75 +15,81 @@ interface InitOptions {
   model?: string;
 }
 
-const MINIMAL_TEMPLATE = {
-  "clawflare.config.ts": `import { defineClawflareConfig } from "@clawflare/runtime";
+const AVAILABLE_TEMPLATES = ["minimal", "github", "cloudflare", "full"];
 
-export default defineClawflareConfig({
-  name: "{{PROJECT_NAME}}",
-  ai: {
-    provider: "{{AI_PROVIDER}}",
-    model: "{{AI_MODEL}}",
-  },
-});
-`,
-  "src/index.ts": `import config from "../clawflare.config";
-import { createClawflareWorker } from "@clawflare/runtime";
+/**
+ * Get the path to the templates directory
+ */
+function getTemplatesDir(): string {
+  // When running from compiled dist/, __dirname equivalent
+  const currentFilePath = fileURLToPath(import.meta.url);
+  const currentDir = path.dirname(currentFilePath);
+  // Go up from src/commands/ to package root
+  const packageRoot = path.resolve(currentDir, "..", "..");
+  return path.join(packageRoot, "templates");
+}
 
-export default createClawflareWorker(config);
-`,
-  "src/tools.ts": `import { defineTool } from "@clawflare/runtime";
+/**
+ * Read a template file from the templates directory
+ */
+async function readTemplateFile(templateDir: string, filePath: string): Promise<string> {
+  const fullPath = path.join(templateDir, filePath);
+  return await fs.readFile(fullPath, "utf-8");
+}
 
-// Define your custom tools here
-// Example:
-// export const tools = [
-//   defineTool({
-//     name: "hello",
-//     description: "Say hello",
-//     parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"] },
-//     execute: async ({ name }) => ({ message: \`Hello, \${name}!\` }),
-//   }),
-// ];
+/**
+ * Recursively get all files in a directory
+ */
+async function getFilesRecursively(dir: string, baseDir: string = dir): Promise<{ relativePath: string; content: string }[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const files: { relativePath: string; content: string }[] = [];
 
-export const tools = [];
-`,
-  "src/egress.ts": `import { defineEgressHandler } from "@clawflare/egress-core";
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relativePath = path.relative(baseDir, fullPath);
 
-// Define your custom egress handlers here
-// Example:
-// export const egressHandlers = [
-//   defineEgressHandler({
-//     name: "example",
-//     domains: ["api.example.com"],
-//     async handles(request) {
-//       return new URL(request.url).hostname === "api.example.com";
-//     },
-//     async fetch(request, ctx) {
-//       return fetch(request);
-//     },
-//   }),
-// ];
+    if (entry.isDirectory()) {
+      const subFiles = await getFilesRecursively(fullPath, baseDir);
+      files.push(...subFiles);
+    } else {
+      const content = await fs.readFile(fullPath, "utf-8");
+      files.push({ relativePath, content });
+    }
+  }
 
-export const egressHandlers = [];
-`,
-  ".env.example": `# Clawflare environment variables
-# Copy this file to .env and fill in your values
+  return files;
+}
 
-# API Token for your Clawflare deployment
-CLAWFLARE_API_TOKEN=your_token_here
+/**
+ * Copy template files from the templates directory
+ */
+async function copyTemplateFiles(
+  templateName: string,
+  projectDir: string,
+  variables: Record<string, string>
+): Promise<void> {
+  const templatesDir = getTemplatesDir();
+  const templateDir = path.join(templatesDir, templateName);
 
-# AI Provider API Keys (depending on your config)
-# ANTHROPIC_API_KEY=your_key_here
-# AWS_BEARER_TOKEN_BEDROCK=your_token_here
-`,
-  ".gitignore": `node_modules/
-dist/
-.env
-.dev.vars
-.clawflare/state.json
-.clawflare/wrangler.jsonc
-*.log
-`,
-};
+  // Check if template exists
+  try {
+    await fs.access(templateDir);
+  } catch {
+    throw new Error(
+      `Template "${templateName}" not found. Available templates: ${AVAILABLE_TEMPLATES.join(", ")}`
+    );
+  }
+
+  // Get all template files
+  const templateFiles = await getFilesRecursively(templateDir);
+
+  // Write each file with variable substitution
+  for (const { relativePath, content } of templateFiles) {
+    const fullPath = path.join(projectDir, relativePath);
+    await fs.mkdir(path.dirname(fullPath), { recursive: true });
+    await fs.writeFile(fullPath, renderTemplate(content, variables));
+  }
+}
 
 function getPackageJson(projectName: string): string {
   return JSON.stringify(
@@ -161,6 +168,15 @@ export async function initCommand(
     process.exit(1);
   }
 
+  // Validate template
+  const template = options.template || "minimal";
+  if (!AVAILABLE_TEMPLATES.includes(template)) {
+    console.error(
+      `Error: Template "${template}" not found. Available templates: ${AVAILABLE_TEMPLATES.join(", ")}`
+    );
+    process.exit(1);
+  }
+
   // Check if directory already exists
   try {
     await fs.access(projectDir);
@@ -170,11 +186,10 @@ export async function initCommand(
     // Directory doesn't exist, good
   }
 
-  console.log(`Creating Clawflare project "${projectName}"...`);
+  console.log(`Creating Clawflare project "${projectName}" using template "${template}"...`);
 
   // Create directories
   await fs.mkdir(projectDir, { recursive: true });
-  await fs.mkdir(path.join(projectDir, "src"), { recursive: true });
   await fs.mkdir(path.join(projectDir, ".clawflare"), { recursive: true });
   await fs.mkdir(path.join(projectDir, "migrations"), { recursive: true });
 
@@ -185,12 +200,8 @@ export async function initCommand(
     AI_MODEL: options.model || "minimax.minimax-m2.5",
   };
 
-  // Write template files
-  for (const [filePath, content] of Object.entries(MINIMAL_TEMPLATE)) {
-    const fullPath = path.join(projectDir, filePath);
-    await fs.mkdir(path.dirname(fullPath), { recursive: true });
-    await fs.writeFile(fullPath, renderTemplate(content, variables));
-  }
+  // Copy template files
+  await copyTemplateFiles(template, projectDir, variables);
 
   // Write package.json
   await fs.writeFile(path.join(projectDir, "package.json"), getPackageJson(projectName));
