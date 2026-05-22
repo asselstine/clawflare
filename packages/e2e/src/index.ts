@@ -802,18 +802,27 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
 
   try {
     await runWrangler(["delete", deployment.workerName, "--force"]);
+    console.log("   ✓ Worker deleted");
   } catch (error) {
-    console.error(`   Failed to delete Worker ${deployment.workerName}:`, error instanceof Error ? error.message : String(error));
+    console.error(`   ✗ Failed to delete Worker ${deployment.workerName}:`, error instanceof Error ? error.message : String(error));
   }
+
+  // Note: Container images in registry.cloudflare.com may persist after Worker deletion.
+  // Cloudflare periodically garbage-collects unused container images.
+  // The running container instances are destroyed above, but the images in the
+  // registry are managed separately and cleaned up asynchronously.
+  console.log("   Note: Container images in registry may persist until Cloudflare garbage collection");
 
   try {
     await runWrangler(["d1", "delete", deployment.d1Name, "--skip-confirmation"]);
+    console.log("   ✓ D1 database deleted");
   } catch (error) {
-    console.error(`   Failed to delete D1 database ${deployment.d1Name}:`, error instanceof Error ? error.message : String(error));
+    console.error(`   ✗ Failed to delete D1 database ${deployment.d1Name}:`, error instanceof Error ? error.message : String(error));
   }
 
   try {
     await rm(deployment.configPath, { force: true });
+    console.log("   ✓ Temp config removed");
   } catch {
     // Ignore temp config cleanup failure.
   }
