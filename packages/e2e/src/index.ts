@@ -9,6 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli";
@@ -251,75 +252,50 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
 }
 
 async function deployRemote(): Promise<RemoteDeployment> {
-  // Try to deploy with base name first, then with incrementing suffixes on conflict.
-  // This allows container image reuse - the image name is derived from the worker name,
-  // so using consistent names means the image gets overwritten instead of accumulating.
-  const baseWorkerName = "clawflare-harness-e2e";
-  const baseWorkflowName = "clawflare-agent-workflow-e2e";
-  const baseD1Name = "clawflare-e2e";
-  
+  // Use unique worker names to avoid container application conflicts.
+  // Container applications persist after Worker deletion and can't be deleted,
+  // so reusing the same Worker name causes deployment failures.
+  const runId = randomUUID().slice(0, 8);
+  const workerName = `clawflare-harness-e2e-${runId}`;
+  const workflowName = `clawflare-agent-workflow-e2e-${runId}`;
+  const d1Name = `clawflare-e2e-${runId}`;
+  let configPath = "";
+
   console.log("🚀 Creating remote E2E deployment...");
+  console.log(`   Worker: ${workerName}`);
+  console.log(`   Workflow: ${workflowName}`);
+  console.log(`   D1: ${d1Name}`);
 
-  for (let attempt = 0; attempt < 10; attempt++) {
-    const suffix = attempt === 0 ? "" : `-${attempt}`;
-    const workerName = `${baseWorkerName}${suffix}`;
-    const workflowName = `${baseWorkflowName}${suffix}`;
-    const d1Name = `${baseD1Name}${suffix}`;
-    let configPath = "";
-    
-    try {
-      console.log(`   Trying: ${workerName}`);
-      
-      // Try to create D1 database
-      const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
-      const d1DatabaseId = extractD1DatabaseId(d1Output);
-      
-      // Write config and apply migrations
-      configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
-      await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
+  try {
+    const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
+    const d1DatabaseId = extractD1DatabaseId(d1Output);
+    configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+    await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
 
-      // Deploy worker - this will UPDATE an existing worker if present
-      // or create a new one if not. If it fails, it's likely a conflict.
-      const deployOutput = await runWrangler(
-        [
-          "deploy",
-          "--config",
-          configPath,
-          "--tag",
-          "e2e",
-          "--message",
-          `Clawflare E2E test deployment`,
-        ],
-        { capture: true }
-      );
-      const url = extractWorkerUrl(deployOutput, workerName);
+    const deployOutput = await runWrangler(
+      [
+        "deploy",
+        "--config",
+        configPath,
+        "--tag",
+        "e2e",
+        "--message",
+        `Clawflare E2E test deployment ${runId}`,
+      ],
+      { capture: true }
+    );
+    const url = extractWorkerUrl(deployOutput, workerName);
 
-      console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
-      return { workerName, url, configPath, d1Name };
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      
-      // Clean up failed attempt
-      await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
-      await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
-      if (configPath) {
-        await rm(configPath, { force: true }).catch(() => undefined);
-      }
-      
-      // If this is a resource conflict (worker or DB already exists), try next suffix
-      if (errorMsg.includes("already exists") || errorMsg.includes("already taken") || errorMsg.includes("conflict")) {
-        if (attempt < 9) {
-          console.log(`   Resource conflict, trying suffix -${attempt + 1}...`);
-          continue;
-        }
-      }
-      
-      // Otherwise, this is a real error - rethrow
-      throw error;
+    console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
+    return { workerName, url, configPath, d1Name };
+  } catch (error) {
+    await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
+    await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
+    if (configPath) {
+      await rm(configPath, { force: true }).catch(() => undefined);
     }
+    throw error;
   }
-  
-  throw new Error("Could not deploy E2E resources after 10 attempts");
 }
 
 async function waitForServer(url: string, maxAttempts = 60): Promise<boolean> {
@@ -797,6 +773,44 @@ The test suite will:
 `);
 }
 
+async function cleanupOldContainerImages(): Promise<void> {
+  try {
+    console.log("   Cleaning up old E2E container images...");
+    
+    // List container images and find E2E ones
+    const listOutput = await runWrangler(["containers", "images", "list", "--json"], { capture: true });
+    const images = JSON.parse(listOutput) as Array<{ repository: string; tag: string; created: string }>;
+    
+    // Filter for E2E images (they contain "clawflare-harness-e2e" in the name)
+    const e2eImages = images.filter(img => img.repository.includes("clawflare-harness-e2e"));
+    
+    if (e2eImages.length === 0) {
+      console.log("   No E2E container images to clean up");
+      return;
+    }
+    
+    // Sort by creation time (newest first) and keep the 5 most recent
+    e2eImages.sort((a, b) => new Date(b.created).getTime() - new Date(a.created).getTime());
+    const imagesToDelete = e2eImages.slice(5);
+    
+    if (imagesToDelete.length === 0) {
+      console.log(`   Keeping ${e2eImages.length} most recent E2E images`);
+      return;
+    }
+    
+    for (const img of imagesToDelete) {
+      try {
+        await runWrangler(["containers", "images", "delete", `${img.repository}:${img.tag}`], { capture: true });
+        console.log(`     ✓ Deleted ${img.repository}:${img.tag}`);
+      } catch {
+        console.log(`     ✗ Failed to delete ${img.repository}:${img.tag}`);
+      }
+    }
+  } catch (error) {
+    console.log("   Note: Container image cleanup skipped (may require newer Wrangler version)");
+  }
+}
+
 async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keepAlive: boolean): Promise<void> {
   if (!deployment) return;
 
@@ -840,6 +854,9 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   } catch {
     // Ignore temp config cleanup failure.
   }
+  
+  // Clean up old container images from the registry
+  await cleanupOldContainerImages();
 }
 
 async function main(): Promise<void> {
