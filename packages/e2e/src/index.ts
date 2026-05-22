@@ -9,7 +9,6 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli";
@@ -252,47 +251,75 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
 }
 
 async function deployRemote(): Promise<RemoteDeployment> {
-  const runId = randomUUID().slice(0, 8);
-  const workerName = `clawflare-harness-e2e-${runId}`;
-  const workflowName = `clawflare-agent-workflow-e2e-${runId}`;
-  const d1Name = `clawflare-e2e-${runId}`;
-  let configPath = "";
-
+  // Try to deploy with base name first, then with incrementing suffixes on conflict.
+  // This allows container image reuse - the image name is derived from the worker name,
+  // so using consistent names means the image gets overwritten instead of accumulating.
+  const baseWorkerName = "clawflare-harness-e2e";
+  const baseWorkflowName = "clawflare-agent-workflow-e2e";
+  const baseD1Name = "clawflare-e2e";
+  
   console.log("🚀 Creating remote E2E deployment...");
-  console.log(`   Worker: ${workerName}`);
-  console.log(`   Workflow: ${workflowName}`);
-  console.log(`   D1: ${d1Name}`);
 
-  try {
-    const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
-    const d1DatabaseId = extractD1DatabaseId(d1Output);
-    configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
-    await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const suffix = attempt === 0 ? "" : `-${attempt}`;
+    const workerName = `${baseWorkerName}${suffix}`;
+    const workflowName = `${baseWorkflowName}${suffix}`;
+    const d1Name = `${baseD1Name}${suffix}`;
+    let configPath = "";
+    
+    try {
+      console.log(`   Trying: ${workerName}`);
+      
+      // Try to create D1 database
+      const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
+      const d1DatabaseId = extractD1DatabaseId(d1Output);
+      
+      // Write config and apply migrations
+      configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+      await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
 
-    const deployOutput = await runWrangler(
-      [
-        "deploy",
-        "--config",
-        configPath,
-        "--tag",
-        "e2e",
-        "--message",
-        `Clawflare E2E test deployment ${runId}`,
-      ],
-      { capture: true }
-    );
-    const url = extractWorkerUrl(deployOutput, workerName);
+      // Deploy worker - this will UPDATE an existing worker if present
+      // or create a new one if not. If it fails, it's likely a conflict.
+      const deployOutput = await runWrangler(
+        [
+          "deploy",
+          "--config",
+          configPath,
+          "--tag",
+          "e2e",
+          "--message",
+          `Clawflare E2E test deployment`,
+        ],
+        { capture: true }
+      );
+      const url = extractWorkerUrl(deployOutput, workerName);
 
-    console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
-    return { workerName, url, configPath, d1Name };
-  } catch (error) {
-    await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
-    await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
-    if (configPath) {
-      await rm(configPath, { force: true }).catch(() => undefined);
+      console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
+      return { workerName, url, configPath, d1Name };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      
+      // Clean up failed attempt
+      await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
+      await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
+      if (configPath) {
+        await rm(configPath, { force: true }).catch(() => undefined);
+      }
+      
+      // If this is a resource conflict (worker or DB already exists), try next suffix
+      if (errorMsg.includes("already exists") || errorMsg.includes("already taken") || errorMsg.includes("conflict")) {
+        if (attempt < 9) {
+          console.log(`   Resource conflict, trying suffix -${attempt + 1}...`);
+          continue;
+        }
+      }
+      
+      // Otherwise, this is a real error - rethrow
+      throw error;
     }
-    throw error;
   }
+  
+  throw new Error("Could not deploy E2E resources after 10 attempts");
 }
 
 async function waitForServer(url: string, maxAttempts = 60): Promise<boolean> {
