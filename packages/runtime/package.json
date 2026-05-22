@@ -1,7 +1,7 @@
 {
   "name": "@clawflare/runtime",
   "version": "0.1.0",
-  "description": "Clawflare Agent harness - runs in Cloudflare Workers with pi-agent-core",
+  "description": "Clawflare Agent runtime - runs in Cloudflare Workers with pi-agent-core",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

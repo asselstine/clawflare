@@ -15,7 +15,7 @@ import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli";
 
 const TEST_TOKEN = "test-token-12345";
-const HARNESS_DIR = pathResolve(process.cwd(), "..", "harness");
+const HARNESS_DIR = pathResolve(process.cwd(), "..", "runtime");
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
 
 interface RemoteDeployment {
@@ -706,9 +706,9 @@ async function runTests(url: string, token: string): Promise<void> {
       if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
 
       const cloneCommand = [
-        "rm -rf /workspace/clawflare",
-        "git clone --depth 1 --filter=blob:none https://github.com/asselstine/clawflare.git /workspace/clawflare",
-        "test -f /workspace/clawflare/package.json",
+        "rm -rf /workspace/test-clone",
+        "git clone --depth 1 https://github.com/asselstine/clawflare.git /workspace/test-clone",
+        "ls -la /workspace/test-clone/",
       ].join(" && ");
 
       const bashResponse = await fetch(`${url}/__test/container-bash`, {
