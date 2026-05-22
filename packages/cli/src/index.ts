@@ -1,107 +1,122 @@
+#!/usr/bin/env node
 /**
- * Clawflare CLI - TUI Client
- * 
- * A terminal UI interface for the Clawflare harness.
+ * Clawflare CLI
+ * A terminal UI interface for the Clawflare agent harness.
  */
 
-import { pathToFileURL } from "node:url";
+import { Command } from "commander";
 import { config } from "dotenv";
-import { AgentClient } from "./client.js";
-import { createTUI } from "./tui-app.js";
+import {
+  initCommand,
+  deployCommand,
+  openCommand,
+  devCommand,
+  doctorCommand,
+  statusCommand,
+} from "./commands/index.js";
 
-// Load .env file from project root
-config({ path: ["../../.env", "../.env", ".env"] });
+// Load .env file from current directory
+config({ path: ".env" });
 
-// Re-export
-export { AgentClient, createTUI };
-export * from "./client.js";
+const program = new Command()
+  .name("clawflare")
+  .description("Clawflare CLI - AI agent harness for Cloudflare Workers")
+  .version("0.1.0");
 
-// Backward compatibility: runCli function
-export async function runCli(url: string, token: string): Promise<void> {
-  const client = new AgentClient(url, token);
-  const app = createTUI(client);
-  app.start();
-}
+// init command
+program
+  .command("init <name>")
+  .description("Create a new Clawflare project")
+  .option("-t, --template <template>", "Template to use (minimal, github, cloudflare, full)", "minimal")
+  .option("-p, --package-manager <pm>", "Package manager (npm, pnpm, yarn)")
+  .option("--no-install", "Skip dependency installation")
+  .option("--provider <provider>", "AI provider (amazon-bedrock, anthropic, openai)", "amazon-bedrock")
+  .option("--model <model>", "AI model")
+  .action(async (name: string, options: {
+    template: string;
+    packageManager?: string;
+    install: boolean;
+    provider: string;
+    model?: string;
+  }) => {
+    await initCommand(name, {
+      template: options.template,
+      packageManager: options.packageManager as "npm" | "pnpm" | "yarn" | undefined,
+      noInstall: !options.install,
+      provider: options.provider,
+      model: options.model,
+    });
+  });
 
-// Handle uncaught errors
-process.on("uncaughtException", (err) => {
-  console.error("Uncaught error:", err);
-  process.exit(1);
-});
+// deploy command
+program
+  .command("deploy")
+  .description("Deploy the project to Cloudflare")
+  .option("-e, --env <environment>", "Environment (production, staging)")
+  .option("--print-config", "Print generated Wrangler config without deploying")
+  .option("-f, --force", "Force recreation of resources")
+  .action(async (options: {
+    env?: string;
+    printConfig: boolean;
+    force: boolean;
+  }) => {
+    await deployCommand({
+      env: options.env,
+      printConfig: options.printConfig,
+      force: options.force,
+    });
+  });
 
-process.on("unhandledRejection", (reason) => {
-  console.error("Unhandled rejection:", reason);
-  process.exit(1);
-});
+// open command
+program
+  .command("open")
+  .description("Open the TUI for your agent")
+  .option("--host <url>", "Harness URL (overrides state)")
+  .option("--token <token>", "API token (overrides env)")
+  .option("--local", "Connect to local development server")
+  .action(async (options: {
+    host?: string;
+    token?: string;
+    local: boolean;
+  }) => {
+    await openCommand({
+      host: options.host,
+      token: options.token,
+      local: options.local,
+    });
+  });
 
-// Parse command line arguments
-function parseArgs(): { host: string; token: string } {
-  const args = process.argv.slice(2);
-  
-  let host: string | null = null;
-  let token: string | null = null;
-  
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    
-    if (arg === "--host" && i + 1 < args.length) {
-      host = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--host=")) {
-      host = arg.slice(7);
-    } else if (arg === "--token" && i + 1 < args.length) {
-      token = args[i + 1];
-      i++;
-    } else if (arg.startsWith("--token=")) {
-      token = arg.slice(8);
-    } else if (arg === "-h" || arg === "--help") {
-      console.log(`
-Clawflare CLI
+// dev command
+program
+  .command("dev")
+  .description("Start local development server")
+  .option("-p, --port <port>", "Port to run on", parseInt)
+  .option("--local", "Use local mode")
+  .action(async (options: {
+    port?: number;
+    local: boolean;
+  }) => {
+    await devCommand({
+      port: options.port,
+      local: options.local,
+    });
+  });
 
-Usage:
-  pnpm cli [options]
+// doctor command
+program
+  .command("doctor")
+  .description("Check project health and configuration")
+  .action(async () => {
+    await doctorCommand();
+  });
 
-Options:
-  --host <url>    Harness URL (default: http://localhost:8787)
-  --token <token> API token (or use CLAWFLARE_API_TOKEN env var)
-  -h, --help      Show this help message
+// status command
+program
+  .command("status")
+  .description("Show deployment status")
+  .action(async () => {
+    await statusCommand();
+  });
 
-Examples:
-  pnpm cli --host http://localhost:8787 --token xxx
-  pnpm cli --host https://clawflare-harness.brendan-410.workers.dev
-`);
-      process.exit(0);
-    }
-  }
-  
-  // Fall back to environment variables
-  if (!host) {
-    host = process.env.CLAWFLARE_URL || "http://localhost:8787";
-  }
-  if (!token) {
-    token = process.env.CLAWFLARE_API_TOKEN || "";
-  }
-  
-  return { host, token };
-}
-
-function isDirectExecution(): boolean {
-  const entrypoint = process.argv[1];
-  return !!entrypoint && import.meta.url === pathToFileURL(entrypoint).href;
-}
-
-// Main entry point
-if (isDirectExecution()) {
-  const { host, token } = parseArgs();
-
-  if (!token) {
-    console.error("Error: CLAWFLARE_API_TOKEN required");
-    console.error("Usage: --token <token> or CLAWFLARE_API_TOKEN env var");
-    console.error("Run with -h for help");
-    process.exit(1);
-  }
-
-  const client = new AgentClient(host, token);
-  const app = createTUI(client);
-  app.start();
-}
+// Parse arguments
+program.parse();

@@ -15,7 +15,7 @@
     "clean": "rm -f src/index.js tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@clawflare/cli": "workspace:*",
+    "clawflare": "workspace:*",
     "tsx": "^4.19.0"
   },
   "devDependencies": {
