@@ -51,8 +51,108 @@ function validateName(name: string): void {
   }
 }
 
+/**
+ * Context passed to user-defined tools
+ */
+export interface UserToolContext {
+  env: Env;
+  ctx?: ExecutionContext;
+  sessionId?: string;
+  logger: Console;
+}
+
+/**
+ * Tool definition for user-defined tools
+ */
+export interface UserToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  execute: (params: unknown, context: UserToolContext) => Promise<unknown> | unknown;
+}
+
+/**
+ * Define a custom tool using a simple API.
+ * This wraps the lower-level AgentTool interface for easier use.
+ */
+export function defineTool(def: UserToolDefinition): ToolFactory {
+  return {
+    name: def.name,
+    description: def.description,
+    parameters: def.parameters,
+    def,
+  };
+}
+
 export interface ToolContext {
   sessionId?: string;
+}
+
+/**
+ * Internal factory representation for user tools
+ */
+export interface ToolFactory {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  def: UserToolDefinition;
+}
+
+/**
+ * Create AgentTool instances from user tool definitions.
+ * This is used internally to convert user tools to runtime tools.
+ */
+export function createAgentToolsFromUserDefs(
+  toolFactories: ToolFactory[],
+  env: Env,
+  ctx?: ExecutionContext,
+  toolCtx?: ToolContext
+): AgentTool[] {
+  const context: UserToolContext = {
+    env,
+    ctx,
+    sessionId: toolCtx?.sessionId,
+    logger: console,
+  };
+
+  return toolFactories.map((factory): AgentTool => {
+    const schema = factory.parameters as TSchema;
+    
+    return {
+      name: factory.name,
+      description: factory.description,
+      label: factory.name,
+      parameters: schema,
+      execute: async (
+        _toolCallId: string,
+        params: Static<TSchema>
+      ): Promise<AgentToolResult<unknown>> => {
+        const result = await factory.def.execute(params, context);
+        
+        // Handle result normalization
+        if (result === undefined || result === null) {
+          return {
+            content: [{ type: "text", text: "" }],
+            details: {},
+          };
+        }
+        
+        // If result is already a string, use it directly
+        if (typeof result === "string") {
+          return {
+            content: [{ type: "text", text: result }],
+            details: { result },
+          };
+        }
+        
+        // Otherwise, serialize as JSON
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          details: { result },
+        };
+      },
+    };
+  });
 }
 
 export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {

@@ -101,7 +101,38 @@ export { normalizeBedrockBearerToken } from "./agent-config.js";
 export { logTiming, timingStart } from "./diagnostics.js";
 
 // Export tool factory
-export { createTools } from "./tools/index.js";
+export { createTools, defineTool, UserToolContext, UserToolDefinition } from "./tools/index.js";
+
+// Export configuration API
+export {
+  defineClawflareConfig,
+  normalizeConfig,
+  createClawflareWorker,
+  createUserTools,
+  createEgressRegistryWithConfig,
+  getRuntimeConfig,
+} from "./config-api.js";
+
+// Export config types
+export type {
+  ClawflareConfig,
+  AiConfig,
+  CloudflareConfig,
+  SecretSpec,
+  ToolFactory,
+  EgressHandlerFactory,
+  ClawflarePlugin,
+  ClawflareWorker,
+  DefineEgressHandlerConfig,
+} from "./config-api.js";
+
+// Re-export egress core types for user convenience
+export type {
+  EgressHandler,
+  EgressContext,
+} from "@clawflare/egress-core";
+
+export { defineHttpEgressHandler } from "@clawflare/egress-core";
 
 // Main Cloudflare Worker export
 export default {

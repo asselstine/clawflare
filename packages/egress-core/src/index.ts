@@ -103,3 +103,51 @@ export function defineHttpEgressHandler<Env = unknown>(
     },
   };
 }
+
+// =============================================================================
+// Simplified Egress Handler Factory
+// =============================================================================
+
+/**
+ * Human-friendly configuration for creating an egress handler.
+ * This provides a simpler API than the full EgressHandler interface.
+ */
+export interface DefineEgressHandlerConfig<Env = unknown> {
+  name: string;
+  description: string;
+  domains: string[];
+  /**
+   * Check if this handler should handle the request.
+   * If not provided, uses domain matching.
+   */
+  handles?: (request: Request, context: EgressContext<Env>) => boolean | Promise<boolean>;
+  /**
+   * Fetch the request. Required for HTTP handlers.
+   */
+  fetch: (request: Request, context: EgressContext<Env>) => Promise<Response>;
+}
+
+/**
+ * Define a custom egress handler with a simpler API.
+ * This wraps the lower-level EgressHandler interface for easier use.
+ */
+export function defineEgressHandler<Env = unknown>(
+  config: DefineEgressHandlerConfig<Env>
+): EgressHandler<Env> {
+  return {
+    name: config.name,
+    description: config.description,
+    domains: config.domains,
+
+    handles(request: Request, context: EgressContext<Env>): boolean | Promise<boolean> {
+      if (config.handles) {
+        return config.handles(request, context);
+      }
+      // Default: domain matching
+      const hostname = new URL(request.url).hostname;
+      return config.domains.some((domain) => hostnameMatchesDomain(hostname, domain));
+    },
+
+    fetch: config.fetch,
+  };
+}
