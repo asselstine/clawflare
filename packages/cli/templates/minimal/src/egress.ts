@@ -23,4 +23,4 @@ import { defineEgressHandler } from "@clawflare/runtime";
 //   }),
 // ];
 
-export const egressHandlers = []; const egressHandlers = [];
+export const egressHandlers = [];
