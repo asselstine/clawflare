@@ -1,4 +1,8 @@
-import { defineHttpEgressHandler, type HttpEgressHandlerContext } from "@clawflare/egress-core";
+import {
+  defineHttpEgressHandler,
+  type HttpEgressHandlerContext,
+  type EgressHandler,
+} from "@clawflare/egress-core";
 
 export const domains = ["api.cloudflare.com"];
 
@@ -25,4 +29,18 @@ export const cloudflareHandler = defineHttpEgressHandler<CloudflareEnv>({
 
 export function registerEgressHandlers(registry: { register: (handler: typeof cloudflareHandler) => void }): void {
   registry.register(cloudflareHandler);
+}
+
+/**
+ * Cloudflare plugin for Clawflare.
+ * Adds Cloudflare API egress handling with automatic authentication.
+ */
+export function cloudflare(): {
+  name: string;
+  registerEgress: () => EgressHandler;
+} {
+  return {
+    name: "cloudflare",
+    registerEgress: () => cloudflareHandler,
+  };
 }

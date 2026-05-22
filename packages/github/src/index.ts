@@ -1,4 +1,8 @@
-import { defineHttpEgressHandler, type HttpEgressHandlerContext } from "@clawflare/egress-core";
+import {
+  defineHttpEgressHandler,
+  type HttpEgressHandlerContext,
+  type EgressHandler,
+} from "@clawflare/egress-core";
 
 export const domains = ["api.github.com", "github.com", "raw.githubusercontent.com", "codeload.github.com"];
 
@@ -151,4 +155,18 @@ export const githubHandler = {
 
 export function registerEgressHandlers(registry: { register: (handler: typeof githubHandler) => void }): void {
   registry.register(githubHandler);
+}
+
+/**
+ * GitHub plugin for Clawflare.
+ * Adds GitHub API egress handling with automatic authentication.
+ */
+export function github(): {
+  name: string;
+  registerEgress: () => EgressHandler;
+} {
+  return {
+    name: "github",
+    registerEgress: () => githubHandler,
+  };
 }

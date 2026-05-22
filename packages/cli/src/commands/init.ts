@@ -91,7 +91,20 @@ async function copyTemplateFiles(
   }
 }
 
-function getPackageJson(projectName: string): string {
+function getPackageJson(projectName: string, template: string): string {
+  const dependencies: Record<string, string> = {
+    "@clawflare/runtime": "^0.1.0",
+    "@clawflare/egress-core": "^0.1.0",
+  };
+
+  // Add plugin dependencies based on template
+  if (template === "github" || template === "full") {
+    dependencies["@clawflare/github"] = "^0.1.0";
+  }
+  if (template === "cloudflare" || template === "full") {
+    dependencies["@clawflare/cloudflare"] = "^0.1.0";
+  }
+
   return JSON.stringify(
     {
       name: projectName,
@@ -104,10 +117,7 @@ function getPackageJson(projectName: string): string {
         open: "clawflare open",
         typecheck: "tsc --noEmit",
       },
-      dependencies: {
-        "@clawflare/runtime": "^0.1.0",
-        "@clawflare/egress-core": "^0.1.0",
-      },
+      dependencies,
       devDependencies: {
         typescript: "^5.6.0",
         wrangler: "^4.0.0",
@@ -203,8 +213,8 @@ export async function initCommand(
   // Copy template files
   await copyTemplateFiles(template, projectDir, variables);
 
-  // Write package.json
-  await fs.writeFile(path.join(projectDir, "package.json"), getPackageJson(projectName));
+  // Write package.json with template-specific dependencies
+  await fs.writeFile(path.join(projectDir, "package.json"), getPackageJson(projectName, template));
 
   // Write tsconfig.json
   await fs.writeFile(path.join(projectDir, "tsconfig.json"), getTsConfig());
