@@ -32,6 +32,9 @@ interface TestResult {
   duration: number;
 }
 
+// Track created containers for cleanup
+const createdContainers: string[] = [];
+
 class TestRunner {
   private results: TestResult[] = [];
 
@@ -88,6 +91,11 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
 }
 
 async function destroyTestContainer(url: string, token: string, containerId: string): Promise<void> {
+  // Track for potential cleanup later
+  if (!createdContainers.includes(containerId)) {
+    createdContainers.push(containerId);
+  }
+  
   try {
     const response = await fetch(`${url}/__test/container-destroy`, {
       method: "POST",
@@ -101,6 +109,30 @@ async function destroyTestContainer(url: string, token: string, containerId: str
   } catch (error) {
     console.error(`Failed to destroy container ${containerId}:`, error instanceof Error ? error.message : String(error));
   }
+}
+
+async function cleanupAllContainers(url: string, token: string): Promise<void> {
+  if (createdContainers.length === 0) return;
+  
+  console.log(`   Cleaning up ${createdContainers.length} tracked containers...`);
+  const cleanupPromises = createdContainers.map(async (containerId) => {
+    try {
+      const response = await fetch(`${url}/__test/container-destroy`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ containerId }),
+      });
+      const data = await readJsonResponse<{ ok?: boolean }>(response);
+      if (data.ok) {
+        console.log(`     ✓ Destroyed container: ${containerId.slice(0, 30)}...`);
+      }
+    } catch {
+      // Container might already be destroyed or Worker might be unreachable
+    }
+  });
+  
+  await Promise.all(cleanupPromises);
+  createdContainers.length = 0; // Clear the array
 }
 
 function runWrangler(args: string[], options: { capture?: boolean } = {}): Promise<string> {
@@ -763,6 +795,10 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   }
 
   console.log("\n🧹 Tearing down remote E2E resources...");
+
+  // Clean up containers BEFORE deleting the Worker - this is critical
+  // because container.destroy() needs the Worker to be running
+  await cleanupAllContainers(deployment.url, TEST_TOKEN);
 
   try {
     await runWrangler(["delete", deployment.workerName, "--force"]);
