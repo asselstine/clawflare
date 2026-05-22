@@ -291,7 +291,7 @@ async function runTests(url: string, token: string): Promise<void> {
   // Add extra delay for Cloudflare edge propagation to complete
   // Different edge locations may propagate at different times
   console.log("⏳ Waiting for edge propagation...");
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  await new Promise(resolve => setTimeout(resolve, 5000));
   console.log("✅ Starting tests\n");
 
   await runner.runTest("Health check - unauthenticated", async () => {
