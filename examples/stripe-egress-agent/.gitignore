@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.dev.vars
+
+# Clawflare
+.clawflare/state.json
+.clawflare/wrangler.jsonc
+
+# Build
+dist/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+{
+  "name": "stripe-egress-agent",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "clawflare dev",
+    "deploy": "clawflare deploy",
+    "open": "clawflare open",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@clawflare/runtime": "^0.1.0",
+    "@clawflare/egress-core": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}
