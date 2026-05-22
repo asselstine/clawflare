@@ -7,11 +7,12 @@
 import { Command } from "commander";
 import { config } from "dotenv";
 import {
-  initCommand,
+  configCommand,
   deployCommand,
-  openCommand,
   devCommand,
   doctorCommand,
+  initCommand,
+  openCommand,
   statusCommand,
 } from "./commands/index.js";
 
@@ -116,6 +117,38 @@ program
   .description("Show deployment status")
   .action(async () => {
     await statusCommand();
+  });
+
+// config command
+const configCmd = program
+  .command("config")
+  .description("Configuration management");
+
+configCmd
+  .command("generate")
+  .description("Generate Wrangler configuration")
+  .option("-e, --env <environment>", "Environment (production, staging)")
+  .option("-o, --output <path>", "Output file path")
+  .action(async (options: {
+    env?: string;
+    output?: string;
+  }) => {
+    await configCommand("generate", {
+      env: options.env,
+      output: options.output,
+    });
+  });
+
+configCmd
+  .command("print")
+  .description("Print Wrangler configuration")
+  .option("-e, --env <environment>", "Environment (production, staging)")
+  .action(async (options: {
+    env?: string;
+  }) => {
+    await configCommand("print", {
+      env: options.env,
+    });
   });
 
 // Parse arguments
