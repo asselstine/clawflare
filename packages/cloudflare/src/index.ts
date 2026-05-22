@@ -22,7 +22,7 @@ export const cloudflareHandler = defineHttpEgressHandler<CloudflareEnv>({
   description: metadata.description,
   domains,
 
-  async decorateHeaders(headers, _request: Request, context: HttpEgressHandlerContext<CloudflareEnv>): Promise<void> {
+  async decorateHeaders(headers: Headers, _request: Request, context: HttpEgressHandlerContext<CloudflareEnv>): Promise<void> {
     headers.set("Authorization", `Bearer ${context.env.CLOUDFLARE_API_TOKEN}`);
   },
 });

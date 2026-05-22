@@ -148,7 +148,7 @@ export type {
   HttpEgressHandlerContext,
 } from "@clawflare/egress-core";
 
-export { defineHttpEgressHandler, defineEgressHandler } from "@clawflare/egress-core";
+export { defineHttpEgressHandler as defineEgressHandler, defineHttpEgressHandler } from "@clawflare/egress-core";
 
 // Main Cloudflare Worker export
 export default {

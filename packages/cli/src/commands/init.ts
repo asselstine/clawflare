@@ -6,6 +6,7 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { execSync } from "child_process";
 
 interface InitOptions {
   template?: string;
@@ -278,11 +279,28 @@ See https://github.com/earendil-works/clawflare for full documentation.
   
   if (!options.noInstall) {
     const pm = options.packageManager || "npm";
-    console.log(`  ${pm} install`);
+    
+    // Actually install dependencies
+    console.log(`\nInstalling dependencies with ${pm}...`);
+    try {
+      execSync(`${pm} install`, { 
+        cwd: projectDir, 
+        stdio: "inherit",
+        env: { ...process.env, FORCE_COLOR: "1" }
+      });
+      console.log("✓ Dependencies installed\n");
+    } catch (error) {
+      console.error(`\n✗ Failed to install dependencies with ${pm}`);
+      console.error("You can try installing manually:");
+      console.error(`  cd ${projectName}`);
+      console.error(`  ${pm} install`);
+    }
+    
     console.log("  clawflare deploy");
     console.log("  clawflare open");
   } else {
     console.log("  # Install dependencies manually");
+    console.log(`  ${options.packageManager || "npm"} install`);
     console.log("  clawflare deploy");
     console.log("  clawflare open");
   }

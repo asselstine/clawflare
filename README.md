@@ -160,7 +160,7 @@ pnpm build
 pnpm typecheck
 
 # Run tests
-pnpm --filter @clawflare/harness test
+pnpm --filter @clawflare/runtime test
 
 # Run E2E tests
 pnpm test
@@ -170,7 +170,7 @@ pnpm test
 
 ```bash
 # Build package
-pnpm --filter @clawflare/harness build
+pnpm --filter @clawflare/runtime build
 
 # Run dev server
 pnpm dev
@@ -179,11 +179,11 @@ pnpm dev
 pnpm deploy:prod
 
 # Run harness tests
-pnpm --filter @clawflare/harness test
+pnpm --filter @clawflare/runtime test
 
 # Apply D1 migrations
-pnpm --filter @clawflare/harness db:migrations:apply:local
-pnpm --filter @clawflare/harness db:migrations:apply:remote
+pnpm --filter @clawflare/runtime db:migrations:apply:local
+pnpm --filter @clawflare/runtime db:migrations:apply:remote
 ```
 
 ### Container Workspace

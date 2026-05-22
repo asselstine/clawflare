@@ -129,11 +129,11 @@ Harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as defaults. Productio
 
 ## CI/CD
 
-No CI/CD defined. Use `pnpm typecheck`, `pnpm --filter @clawflare/harness test`, `pnpm build`, and `pnpm test` for validation; use `pnpm deploy:prod` for production deployment.
+No CI/CD defined. Use `pnpm typecheck`, `pnpm --filter @clawflare/runtime test`, `pnpm build`, and `pnpm test` for validation; use `pnpm deploy:prod` for production deployment.
 
 ## Testing
 
-- `pnpm --filter @clawflare/harness test` - Run harness unit tests, including D1 migration/repository concurrency tests
+- `pnpm --filter @clawflare/runtime test` - Run harness unit tests, including D1 migration/repository concurrency tests
 - `pnpm test` - Run remote E2E tests (deploys test Worker, creates D1 DB, applies migrations, runs tests, tears down)
 - `pnpm test -- --keep-alive` - Keep test Worker/D1 resources after tests for debugging
 - `pnpm cli` - Launch TUI for local development
@@ -165,16 +165,16 @@ pnpm build
 pnpm typecheck
 
 # Run harness unit tests
-pnpm --filter @clawflare/harness test
+pnpm --filter @clawflare/runtime test
 
 # Run E2E tests
 pnpm test
 
 # Apply local D1 migrations
-pnpm --filter @clawflare/harness db:migrations:apply:local
+pnpm --filter @clawflare/runtime db:migrations:apply:local
 
 # Apply remote D1 migrations
-pnpm --filter @clawflare/harness db:migrations:apply:remote
+pnpm --filter @clawflare/runtime db:migrations:apply:remote
 
 # Deploy to production
 pnpm deploy:prod

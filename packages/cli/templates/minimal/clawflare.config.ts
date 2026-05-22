@@ -1,4 +1,5 @@
 import { defineClawflareConfig } from "@clawflare/runtime";
+import { tools } from "./src/tools";
 import { egressHandlers } from "./src/egress";
 
 export default defineClawflareConfig({
@@ -7,6 +8,9 @@ export default defineClawflareConfig({
     provider: "{{AI_PROVIDER}}",
     model: "{{AI_MODEL}}",
   },
+  tools: [
+    () => tools,
+  ],
   egressHandlers: [
     () => egressHandlers,
   ],

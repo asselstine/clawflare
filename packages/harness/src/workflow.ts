@@ -8,6 +8,7 @@ import { buildAgentComponents } from "./agent-config.js";
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
 import { createTools } from "./tools/index.js";
 import { logTiming, timingStart } from "./diagnostics.js";
+import { getRuntimeConfig } from "./config-api.js";
 
 const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web service. Your core tools allow you to execute code, and egress handlers afford authorized fetches from HTTP APIs. When using code execution tools, provide JavaScript as an ES module with a default exported async function: export default async function(input, env) { ... }. Return values or write to console.log for any output that should be visible; do not infer or invent results that are absent from tool output.
 
@@ -121,7 +122,11 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
   const componentsStart = timingStart();
   const components = await buildAgentComponents(env);
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
-  const tools = createTools(env, undefined, { sessionId });
+  
+  // Get runtime config from module-level singleton
+  const runtimeConfig = getRuntimeConfig();
+  const tools = createTools(env, undefined, { sessionId, config: runtimeConfig });
+  
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
     model: components.model.id,
     provider: components.model.provider,

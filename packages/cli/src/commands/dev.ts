@@ -7,6 +7,12 @@ import { execSync, spawn } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
 import { generateWranglerConfig } from "./config.js";
+import {
+  loadConfigFromCwd,
+  getWorkerName,
+  getCompatibilityDate,
+  ConfigValidationError,
+} from "../lib/load-project-config.js";
 
 interface DevOptions {
   port?: number;
@@ -15,8 +21,8 @@ interface DevOptions {
 
 interface StateFile {
   version: number;
-  projectName?: string;
-  cloudflare?: {
+  projectName: string;
+  cloudflare: {
     accountId?: string;
     workerName?: string;
     d1DatabaseName?: string;
@@ -44,44 +50,32 @@ async function saveState(projectDir: string, state: StateFile): Promise<void> {
   await fs.writeFile(statePath, JSON.stringify(state, null, 2));
 }
 
-async function loadConfig(projectDir: string): Promise<{ name: string; cloudflare?: { compatibilityDate?: string } } | null> {
-  try {
-    const configPath = path.join(projectDir, "clawflare.config.ts");
-    await fs.access(configPath);
-    const pkgPath = path.join(projectDir, "package.json");
-    const pkgContent = await fs.readFile(pkgPath, "utf-8");
-    const pkg = JSON.parse(pkgContent);
-    return { name: pkg.name };
-  } catch {
-    return null;
-  }
-}
-
 async function getLocalD1DatabaseName(projectName: string): Promise<string> {
   return `${projectName}-local`;
 }
 
 async function ensureLocalD1Database(dbName: string): Promise<void> {
   try {
-    // Check if database exists by listing
     const output = execSync("wrangler d1 list --json", { encoding: "utf-8" });
     const databases = JSON.parse(output) as Array<{ name: string; uuid: string }>;
     const exists = databases.some((db) => db.name === dbName);
-    
+
     if (!exists) {
       console.log(`Creating local D1 database "${dbName}"...`);
       execSync(`wrangler d1 create "${dbName}" --json`, { stdio: "pipe" });
-      console.log(`  Created database\n`);
+      console.log("  Created database\n");
     }
   } catch {
     // Database may already exist, that's fine
   }
 }
 
-async function applyLocalMigrations(dbName: string): Promise<void> {
+async function applyLocalMigrations(dbName: string, configPath: string): Promise<void> {
   try {
     console.log("Applying local D1 migrations...");
-    execSync(`wrangler d1 migrations apply "${dbName}" --local`, { stdio: "inherit" });
+    execSync(`wrangler d1 migrations apply "${dbName}" --local --config "${configPath}"`, {
+      stdio: "inherit",
+    });
     console.log("  Migrations applied\n");
   } catch (error) {
     console.warn(`  Warning: Could not apply migrations: ${error}`);
@@ -90,54 +84,67 @@ async function applyLocalMigrations(dbName: string): Promise<void> {
 
 export async function devCommand(options: DevOptions): Promise<void> {
   const cwd = process.cwd();
-  
-  // Check for project structure
-  const config = await loadConfig(cwd);
-  if (!config) {
-    console.error("Error: No Clawflare project found in current directory");
-    console.error("Run 'clawflare init <name>' to create a new project");
-    process.exit(1);
+
+  // Load real config
+  let loadedConfig;
+  try {
+    loadedConfig = await loadConfigFromCwd();
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
   }
 
-  console.log(`Starting Clawflare development server for "${config.name}"...\n`);
+  const config = loadedConfig.config;
+  const projectName = config.name;
+  const workerName = getWorkerName(config);
+  const compatibilityDate = getCompatibilityDate(config);
 
-  // Load or create state
-  let state = await loadState(cwd) || { version: 1, projectName: config.name };
-  state.projectName = config.name;
-  
-  if (!state.cloudflare) state.cloudflare = {};
+  console.log(`Starting Clawflare development server for "${projectName}"...\n`);
+
+  // Load or create state with full structure
+  let state: StateFile;
+  const existingState = await loadState(cwd);
+  if (existingState) {
+    state = existingState;
+  } else {
+    state = {
+      version: 1,
+      projectName,
+      cloudflare: {},
+    };
+  }
+  state.projectName = projectName;
 
   // Set up local D1 database
-  const dbName = await getLocalD1DatabaseName(config.name);
+  const dbName = await getLocalD1DatabaseName(projectName);
   await ensureLocalD1Database(dbName);
-  
+
   state.cloudflare.d1DatabaseName = dbName;
   await saveState(cwd, state);
 
-  // Generate Wrangler config if it doesn't exist
+  // Always regenerate Wrangler config for dev (inputs may have changed)
+  console.log("Generating Wrangler configuration...");
   const wranglerPath = path.join(cwd, ".clawflare", "wrangler.jsonc");
-  try {
-    await fs.access(wranglerPath);
-  } catch {
-    console.log("Generating Wrangler configuration...");
-    await generateWranglerConfig({
-      projectDir: cwd,
-      projectName: config.name,
-      dbName,
-      workerName: config.name,
-      compatibilityDate: config.cloudflare?.compatibilityDate || "2025-01-01",
-    });
-    console.log(`  Config: ${wranglerPath}\n`);
-  }
+  await generateWranglerConfig({
+    projectDir: cwd,
+    projectName,
+    dbName,
+    workerName,
+    compatibilityDate,
+  });
+  console.log(`  Config: ${wranglerPath}\n`);
 
   // Apply migrations
-  await applyLocalMigrations(dbName);
+  await applyLocalMigrations(dbName, wranglerPath);
 
   console.log("Starting Wrangler dev server...\n");
 
   // Build args for wrangler dev
   const args = ["dev", "--config", wranglerPath];
-  
+
   if (options.port) {
     args.push("--port", options.port.toString());
   }

@@ -16,7 +16,7 @@ import type {
   ChatRequest,
   SessionListResponse,
   SessionSummary,
-} from "@clawflare/harness";
+} from "@clawflare/runtime";
 
 export type {
   AgentMessage,

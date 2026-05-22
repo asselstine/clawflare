@@ -70,6 +70,38 @@ export interface ClawflareConfig {
 }
 
 // =============================================================================
+// Global Runtime State (Module-Level Singleton)
+// =============================================================================
+
+// Module-level storage for runtime configuration
+// This works because all code (Worker, DO, Workflow) runs in the same bundle/isolate
+let activeConfig: ClawflareConfig | undefined;
+let activeNormalizedConfig: Required<ClawflareConfig> | undefined;
+
+/**
+ * Set the runtime configuration. Called once when the Worker is initialized.
+ * This stores config in module-level variables accessible from DOs and Workflows.
+ */
+export function setRuntimeConfig(config: ClawflareConfig): void {
+  activeConfig = config;
+  activeNormalizedConfig = normalizeConfig(config);
+}
+
+/**
+ * Get the current runtime configuration (from any execution context)
+ */
+export function getRuntimeConfig(): ClawflareConfig | undefined {
+  return activeConfig;
+}
+
+/**
+ * Get the normalized runtime configuration
+ */
+export function getNormalizedRuntimeConfig(): Required<ClawflareConfig> | undefined {
+  return activeNormalizedConfig;
+}
+
+// =============================================================================
 // Config Factory
 // =============================================================================
 
@@ -206,30 +238,19 @@ export interface ClawflareWorker {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response>;
 }
 
-// Runtime state storage (per-isolation via WeakMap)
-interface RuntimeState {
-  config: ClawflareConfig;
-  normalizedConfig: Required<ClawflareConfig>;
-}
-
-const runtimeState = new WeakMap<ExecutionContext, RuntimeState>();
-
 /**
  * Create a Clawflare Worker from configuration.
  * This is the main entry point for user projects.
  */
 export function createClawflareWorker(config: ClawflareConfig): ClawflareWorker {
-  const normalizedConfig = normalizeConfig(config);
+  // Store config in module-level singleton so it's accessible from DOs and Workflows
+  setRuntimeConfig(config);
+
+  // Ensure normalized config is available
+  void normalizeConfig(config);
 
   return {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-      // Store config in execution context for access during request handling
-      const state: RuntimeState = {
-        config,
-        normalizedConfig,
-      };
-      runtimeState.set(ctx, state);
-
       // Apply config overrides to env if needed
       const envRecord = env as unknown as Record<string, string>;
       if (config.ai?.provider && !envRecord.AI_PROVIDER) {
@@ -243,14 +264,6 @@ export function createClawflareWorker(config: ClawflareConfig): ClawflareWorker 
       return handleHttpRequest(request, env, ctx);
     },
   };
-}
-
-/**
- * Get the current runtime configuration from execution context
- */
-export function getRuntimeConfig(ctx: ExecutionContext): ClawflareConfig | undefined {
-  const state = runtimeState.get(ctx);
-  return state?.config;
 }
 
 // =============================================================================

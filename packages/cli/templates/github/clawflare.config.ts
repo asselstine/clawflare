@@ -1,5 +1,6 @@
 import { defineClawflareConfig } from "@clawflare/runtime";
 import { github } from "@clawflare/github";
+import { tools } from "./src/tools";
 import { egressHandlers } from "./src/egress";
 
 export default defineClawflareConfig({
@@ -10,6 +11,9 @@ export default defineClawflareConfig({
   },
   plugins: [
     github(),
+  ],
+  tools: [
+    () => tools,
   ],
   egressHandlers: [
     () => egressHandlers,

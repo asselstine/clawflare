@@ -1,15 +1,24 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../internal-types/index.js";
 import { getDataLayer } from "../data/index.js";
-import { createEgressRegistry } from "./registry.js";
+import { createEgressRegistry as createBaseEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
+import { getRuntimeConfig, createEgressRegistryWithConfig } from "../config-api.js";
 
 export async function routeOutboundRequest(
   env: Env,
   request: Request,
   requestId?: string
 ): Promise<Response> {
-  const registry = createEgressRegistry<Env>();
+  // Use config-driven registry if runtime config is available, otherwise fallback to base
+  let registry;
+  const runtimeConfig = getRuntimeConfig();
+  if (runtimeConfig) {
+    registry = createEgressRegistryWithConfig(runtimeConfig);
+  } else {
+    registry = createBaseEgressRegistry<Env>();
+  }
+  
   const data = getDataLayer(env);
   const metadata = await data.egressHandlers.list(true);
 

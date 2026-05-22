@@ -6,6 +6,13 @@
 import { execSync } from "child_process";
 import * as fs from "fs/promises";
 import * as path from "path";
+import {
+  loadConfigFromCwd,
+  getWorkerName,
+  getDatabaseName,
+  getCompatibilityDate,
+  ConfigValidationError,
+} from "../lib/load-project-config.js";
 
 export interface WranglerConfig {
   name: string;
@@ -137,39 +144,21 @@ interface ConfigGenerateOptions {
   output?: string;
 }
 
-interface ClawflareConfigFromProject {
-  name: string;
-  ai?: {
-    provider?: string;
-    model?: string;
-  };
-  cloudflare?: {
-    compatibilityDate?: string;
-    workerName?: string;
-  };
+interface CloudflareState {
+  accountId?: string;
+  d1DatabaseId?: string;
 }
 
-async function loadConfig(projectDir: string): Promise<ClawflareConfigFromProject | null> {
-  try {
-    // Try to read clawflare.config.ts by evaluating it (simplified)
-    const configPath = path.join(projectDir, "clawflare.config.ts");
-    await fs.access(configPath);
-    
-    // For now, extract from package.json
-    const pkgPath = path.join(projectDir, "package.json");
-    const pkgContent = await fs.readFile(pkgPath, "utf-8");
-    const pkg = JSON.parse(pkgContent);
-    return { name: pkg.name };
-  } catch {
-    return null;
-  }
+interface StateFile {
+  version: number;
+  cloudflare?: CloudflareState;
 }
 
-async function loadState(projectDir: string): Promise<Record<string, unknown> | null> {
+async function loadState(projectDir: string): Promise<StateFile | null> {
   try {
     const statePath = path.join(projectDir, ".clawflare", "state.json");
     const content = await fs.readFile(statePath, "utf-8");
-    return JSON.parse(content);
+    return JSON.parse(content) as StateFile;
   } catch {
     return null;
   }
@@ -181,16 +170,11 @@ async function getCloudflareAccountId(): Promise<string | null> {
     const match = result.match(/Account ID\s+([a-f0-9]+)/i);
     if (match) return match[1];
 
-    // Try reading from .wrangler/config.json
     const configPath = path.join(process.env.HOME || "", ".wrangler", "config.json");
-    try {
-      const configContent = await fs.readFile(configPath, "utf-8");
-      const config = JSON.parse(configContent);
-      if (config.accounts && config.accounts.length > 0) {
-        return config.accounts[0].id;
-      }
-    } catch {
-      // Ignore errors reading config
+    const configContent = await fs.readFile(configPath, "utf-8");
+    const config = JSON.parse(configContent);
+    if (config.accounts && config.accounts.length > 0) {
+      return config.accounts[0].id;
     }
 
     return null;
@@ -205,39 +189,45 @@ async function getCloudflareAccountId(): Promise<string | null> {
 export async function configGenerateCommand(options: ConfigGenerateOptions): Promise<void> {
   const cwd = process.cwd();
 
-  // Check for project structure
-  const config = await loadConfig(cwd);
-  if (!config) {
-    console.error("Error: No Clawflare project found in current directory");
-    console.error("Run 'clawflare init <name>' to create a new project");
-    process.exit(1);
+  // Load real config
+  let loadedConfig;
+  try {
+    loadedConfig = await loadConfigFromCwd();
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
   }
+
+  const config = loadedConfig.config;
 
   console.log(`Generating Wrangler config for "${config.name}"...`);
 
-  // Load state
-  const state = await loadState(cwd) || { version: 1 };
+  // Load state with proper typing
+  const emptyState: StateFile = { version: 1, cloudflare: {} };
+  const state: StateFile = (await loadState(cwd)) || emptyState;
 
   // Get account ID
   const accountId = await getCloudflareAccountId();
-  if (!state.cloudflare) {
-    (state as Record<string, unknown>).cloudflare = {};
-  }
   if (accountId) {
-    ((state as Record<string, unknown>).cloudflare as Record<string, unknown>).accountId = accountId;
+    if (!state.cloudflare) state.cloudflare = {};
+    state.cloudflare.accountId = accountId;
   }
 
-  // Determine names
-  const dbName = options.env ? `${config.name}-${options.env}` : config.name;
-  const workerName = options.env ? `${config.name}-${options.env}` : config.name;
-  const dbId = (state.cloudflare as Record<string, unknown>)?.d1DatabaseId as string | undefined;
+  // Determine names using config-derived functions
+  const workerName = getWorkerName(config, options.env);
+  const dbName = getDatabaseName(config, options.env);
+  const compatibilityDate = getCompatibilityDate(config);
+  const dbId = state.cloudflare?.d1DatabaseId;
+
+  // Honor --output option
+  const outputPath = options.output || path.join(cwd, ".clawflare", "wrangler.jsonc");
 
   // Generate config
-  const outputPath = options.output || path.join(cwd, ".clawflare", "wrangler.jsonc");
-  const compatibilityDate = config.cloudflare?.compatibilityDate || "2025-01-01";
-
-  const configPath = await generateWranglerConfig({
-    projectDir: cwd,
+  await generateWranglerConfig({
+    projectDir: path.dirname(outputPath),
     projectName: config.name,
     dbId,
     dbName,
@@ -246,7 +236,18 @@ export async function configGenerateCommand(options: ConfigGenerateOptions): Pro
     compatibilityDate,
   });
 
-  console.log(`✓ Generated: ${configPath}`);
+  if (options.output) {
+    // If custom output path, we need to copy/modify
+    const tempPath = path.join(cwd, ".clawflare", "wrangler.jsonc");
+    if (tempPath !== outputPath) {
+      const content = await fs.readFile(tempPath, "utf-8");
+      await fs.writeFile(outputPath, content);
+      await fs.unlink(tempPath);
+    }
+  }
+
+  const finalPath = options.output || path.join(cwd, ".clawflare", "wrangler.jsonc");
+  console.log(`✓ Generated: ${finalPath}`);
   console.log(`\nDatabase: ${dbName}`);
   console.log(`Worker: ${workerName}`);
   if (dbId) {
@@ -262,25 +263,32 @@ export async function configGenerateCommand(options: ConfigGenerateOptions): Pro
 export async function configPrintCommand(options: ConfigGenerateOptions): Promise<void> {
   const cwd = process.cwd();
 
-  // Check for project structure
-  const config = await loadConfig(cwd);
-  if (!config) {
-    console.error("Error: No Clawflare project found in current directory");
-    console.error("Run 'clawflare init <name>' to create a new project");
-    process.exit(1);
+  // Load real config
+  let loadedConfig;
+  try {
+    loadedConfig = await loadConfigFromCwd();
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      console.error(`Error: ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
   }
 
-  // Load state
-  const state = await loadState(cwd) || { version: 1 };
+  const config = loadedConfig.config;
+
+  // Load state with proper typing
+  const emptyState: StateFile = { version: 1, cloudflare: {} };
+  const state: StateFile = (await loadState(cwd)) || emptyState;
 
   // Get account ID
   const accountId = await getCloudflareAccountId();
 
-  // Determine names
-  const dbName = options.env ? `${config.name}-${options.env}` : config.name;
-  const workerName = options.env ? `${config.name}-${options.env}` : config.name;
-  const dbId = (state.cloudflare as Record<string, unknown>)?.d1DatabaseId as string | undefined;
-  const compatibilityDate = config.cloudflare?.compatibilityDate || "2025-01-01";
+  // Determine names using config-derived functions
+  const workerName = getWorkerName(config, options.env);
+  const dbName = getDatabaseName(config, options.env);
+  const compatibilityDate = getCompatibilityDate(config);
+  const dbId = state.cloudflare?.d1DatabaseId;
 
   // Generate config (to temp path)
   await fs.mkdir(path.join(cwd, ".clawflare"), { recursive: true });
