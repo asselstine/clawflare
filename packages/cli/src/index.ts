@@ -12,6 +12,7 @@ import {
   devCommand,
   doctorCommand,
   initCommand,
+  logsCommand,
   openCommand,
   statusCommand,
 } from "./commands/index.js";
@@ -120,6 +121,31 @@ program
   .description("Show deployment status")
   .action(async () => {
     await statusCommand();
+  });
+
+// logs command
+program
+  .command("logs")
+  .description("Stream logs from the deployed Worker")
+  .option("-e, --env <environment>", "Environment (production, staging, local)")
+  .option("-f, --follow", "Follow logs in real-time (default: true)", true)
+  .option("--format <format>", "Output format (json, pretty)", "pretty")
+  .option("-n, --limit <number>", "Limit the number of log entries", parseInt)
+  .option("--since <time>", "Show logs since (e.g., 10m, 1h)")
+  .action(async (options: {
+    env?: string;
+    follow: boolean;
+    format: "json" | "pretty";
+    limit?: number;
+    since?: string;
+  }) => {
+    await logsCommand({
+      env: options.env,
+      follow: options.follow,
+      format: options.format,
+      limit: options.limit,
+      since: options.since,
+    });
   });
 
 // config command

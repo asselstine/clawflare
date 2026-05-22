@@ -10,3 +10,4 @@ export { doctorCommand } from "./doctor.js";
 export { statusCommand } from "./status.js";
 export { configCommand, generateWranglerConfig } from "./config.js";
 export type { WranglerConfig, WranglerConfigGeneratorOptions } from "./config.js";
+export { logsCommand } from "./logs.js";
