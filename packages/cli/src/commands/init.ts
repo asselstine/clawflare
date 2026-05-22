@@ -269,7 +269,7 @@ A Clawflare agent project.
 
 ## Documentation
 
-See https://github.com/earendil-works/clawflare for full documentation.
+See https://github.com/asselstine/clawflare for full documentation.
 `;
   await fs.writeFile(path.join(projectDir, "README.md"), readme);
 

@@ -2,6 +2,7 @@
   "name": "@clawflare/egress-core",
   "version": "0.1.0",
   "description": "Shared egress handler types and registry for Clawflare",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

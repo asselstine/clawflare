@@ -2,6 +2,7 @@
   "name": "clawflare",
   "version": "0.1.0",
   "description": "Clawflare CLI - AI agent harness for Cloudflare Workers",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "bin": {
@@ -45,6 +46,7 @@
     "vitest": "^3.0.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0",
+    "pnpm": ">=9.0.0"
   }
 }
