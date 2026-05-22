@@ -140,7 +140,7 @@ export type {
   DefineEgressHandlerConfig,
 } from "./config-api.js";
 
-// Re-export egress core types and factories for user convenience
+// Re-export egress core types for user convenience
 export type {
   EgressHandler,
   EgressContext,
@@ -148,7 +148,11 @@ export type {
   HttpEgressHandlerContext,
 } from "@clawflare/egress-core";
 
-export { defineHttpEgressHandler as defineEgressHandler, defineHttpEgressHandler } from "@clawflare/egress-core";
+// Export both egress handler helpers for user convenience
+export {
+  defineEgressHandler,
+  defineHttpEgressHandler,
+} from "@clawflare/egress-core";
 
 // Main Cloudflare Worker export
 export default {

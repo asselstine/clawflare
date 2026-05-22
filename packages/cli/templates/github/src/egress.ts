@@ -1,10 +1,11 @@
 import { defineEgressHandler } from "@clawflare/runtime";
+import type { EgressHandler } from "@clawflare/runtime";
 
 // Define your custom egress handlers here
-// See https://github.com/earendil-works/clawflare for documentation
+// See https://github.com/asselstine/clawflare for documentation
 
 // Example custom egress handler:
-// export const egressHandlers = [
+// export const egressHandlers: EgressHandler[] = [
 //   defineEgressHandler({
 //     name: "stripe",
 //     description: "Stripe API access with automatic authentication",
@@ -23,4 +24,4 @@ import { defineEgressHandler } from "@clawflare/runtime";
 //   }),
 // ];
 
-export const egressHandlers = [];
+export const egressHandlers: EgressHandler[] = [];

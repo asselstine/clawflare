@@ -212,24 +212,69 @@ export function createPluginTools(
 }
 
 /**
- * Create user-defined tools from config
+ * Type guard to check if something is a ToolFactory (defineTool result)
+ */
+function isToolFactory(item: unknown): item is ToolFactory {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    "name" in item &&
+    "description" in item &&
+    "parameters" in item &&
+    "def" in item
+  );
+}
+
+/**
+ * Type guard to check if an item is an AgentTool
+ */
+function isAgentTool(item: unknown): item is AgentTool {
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    "name" in item &&
+    "description" in item &&
+    "parameters" in item &&
+    "execute" in item
+  );
+}
+
+/**
+ * Create user-defined tools from config.
+ * Handles both defineTool() results and advanced AgentTool factories.
  */
 export function createUserTools(
   config: ClawflareConfig | undefined,
   env: Env,
   ctx?: ExecutionContext,
-  _toolCtx?: ToolContext
+  toolCtx?: ToolContext
 ): AgentTool[] {
   if (!config?.tools) {
     return [];
   }
 
   const tools: AgentTool[] = [];
+
   for (const factory of config.tools) {
-    const result = factory(env, ctx);
-    const userTools = Array.isArray(result) ? result : [result];
-    tools.push(...userTools);
+    const result = factory(env, ctx, toolCtx);
+
+    // Handle array results
+    const items = Array.isArray(result) ? result : [result];
+
+    for (const item of items) {
+      // If it's a ToolFactory (from defineTool), convert it to AgentTools
+      if (isToolFactory(item)) {
+        const agentTools = createAgentToolsFromUserDefs([item], env, ctx, toolCtx);
+        tools.push(...agentTools);
+      }
+      // If it's already an AgentTool, use it directly
+      else if (isAgentTool(item)) {
+        tools.push(item);
+      }
+      // Otherwise, skip with a warning (can't happen in valid code)
+    }
   }
+
   return tools;
 }
 

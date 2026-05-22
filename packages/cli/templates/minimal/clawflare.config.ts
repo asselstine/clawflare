@@ -8,10 +8,6 @@ export default defineClawflareConfig({
     provider: "{{AI_PROVIDER}}",
     model: "{{AI_MODEL}}",
   },
-  tools: [
-    () => tools,
-  ],
-  egressHandlers: [
-    () => egressHandlers,
-  ],
+  tools: tools.length > 0 ? [() => tools] : [],
+  egressHandlers: egressHandlers.length > 0 ? [() => egressHandlers] : [],
 });

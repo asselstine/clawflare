@@ -12,10 +12,6 @@ export default defineClawflareConfig({
   plugins: [
     github(),
   ],
-  tools: [
-    () => tools,
-  ],
-  egressHandlers: [
-    () => egressHandlers,
-  ],
+  tools: tools.length > 0 ? [() => tools] : [],
+  egressHandlers: egressHandlers.length > 0 ? [() => egressHandlers] : [],
 });

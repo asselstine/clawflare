@@ -14,12 +14,8 @@ export default defineClawflareConfig({
     github(),
     cloudflare(),
   ],
-  tools: [
-    () => tools,
-  ],
-  egressHandlers: [
-    () => egressHandlers,
-  ],
+  tools: tools.length > 0 ? [() => tools] : [],
+  egressHandlers: egressHandlers.length > 0 ? [() => egressHandlers] : [],
   secrets: [
     {
       name: "GITHUB_TOKEN",
@@ -31,3 +27,5 @@ export default defineClawflareConfig({
       required: false,
       description: "Cloudflare API token for Cloudflare API access",
     },
+  ],
+});
