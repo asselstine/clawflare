@@ -4,10 +4,11 @@ import type { Env } from "./internal-types/index.js";
 import type { DataLayer, NewSessionEvent, SessionInputEvent } from "./data/index.js";
 import { getDataLayer } from "./data/index.js";
 import { Agent, createEmptyAgentSession, type AgentSessionState, type NextStepInfo } from "./agent.js";
-import { buildAgentComponents } from "./agent-config.js";
+import { buildAgentComponents, buildAgentComponentsFromResolved } from "./agent-config.js";
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
 import { createTools } from "./tools/index.js";
 import { logTiming, timingStart } from "./diagnostics.js";
+import { resolveModelConnectionForSession } from "./model-connection-service.js";
 
 const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web service. Your core tools allow you to execute code, and egress handlers afford authorized fetches from HTTP APIs. When using code execution tools, provide JavaScript as an ES module with a default exported async function: export default async function(input, env) { ... }. Return values or write to console.log for any output that should be visible; do not infer or invent results that are absent from tool output.
 
@@ -125,13 +126,21 @@ async function getSessionWorkspaceId(env: Env, sessionId: string): Promise<strin
 
 async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> {
   const componentsStart = timingStart();
-  const components = await buildAgentComponents(env);
-  const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
   
   // Fetch workspace ID for session to scope tool operations
   const workspaceId = await getSessionWorkspaceId(env, sessionId);
   
-  // Create tools with workspace context - Phase 6 added workspace scoping
+  // Resolve model connection from session
+  const resolvedModel = await resolveModelConnectionForSession(env, sessionId);
+  
+  // Build agent components - prefer session model, fallback to env
+  const components = resolvedModel
+    ? await buildAgentComponentsFromResolved(env, resolvedModel)
+    : await buildAgentComponents(env);
+  
+  const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
+  
+  // Create tools with workspace context
   const tools = createTools(env, undefined, { sessionId, workspaceId });
   
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
@@ -140,6 +149,7 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
     toolCount: tools.length,
     mockAI: shouldUseMockAI(env),
     workspaceId,
+    modelConnectionId: resolvedModel?.id,
   });
 
   return new Agent({
@@ -158,11 +168,20 @@ async function loadAgentSession(
 ): Promise<AgentSessionState> {
   const dataLayer = getDataLayer(env);
   const loadStart = timingStart();
-  const components = await buildAgentComponents(env);
+  
+  // Resolve model connection from session
+  const resolvedModel = await resolveModelConnectionForSession(env, sessionId);
+  
+  // Build agent components - prefer session model, fallback to env
+  const components = resolvedModel
+    ? await buildAgentComponentsFromResolved(env, resolvedModel)
+    : await buildAgentComponents(env);
+    
   const stored = await dataLayer.runtime.getWorkflowSession(sessionId);
   logTiming(env, sessionId, "workflow.session.loaded", loadStart, {
     hasStoredSession: Boolean(stored),
     storedSessionValid: isAgentSessionState(stored),
+    modelConnectionId: resolvedModel?.id,
   });
 
   if (isAgentSessionState(stored)) {

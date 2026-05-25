@@ -69,6 +69,13 @@ export interface Env {
   AWS_REGION?: string;
   AWS_PROFILE?: string;
 
+  // Cloudflare Secret Store for model connection secrets
+  // Using unknown as placeholder until exact binding type is confirmed
+  MODEL_SECRET_STORE?: unknown;
+
+  // Allow env-based model secrets in development
+  CLAWFLARE_ALLOW_ENV_MODEL_SECRETS?: string;
+
   // Optional provider API keys for non-default AI providers
   ANTHROPIC_OAUTH_TOKEN?: string;
   ANTHROPIC_API_KEY?: string;

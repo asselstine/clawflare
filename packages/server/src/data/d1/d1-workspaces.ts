@@ -17,7 +17,7 @@ export class D1WorkspaceRepository implements WorkspaceRepository {
     const row = await this.db
       .prepare(
         `
-        SELECT id, slug, name, description, created_at, updated_at
+        SELECT id, slug, name, description, created_at, updated_at, default_model_connection_id
         FROM workspaces
         WHERE id = ?
       `
@@ -32,7 +32,7 @@ export class D1WorkspaceRepository implements WorkspaceRepository {
     const row = await this.db
       .prepare(
         `
-        SELECT id, slug, name, description, created_at, updated_at
+        SELECT id, slug, name, description, created_at, updated_at, default_model_connection_id
         FROM workspaces
         WHERE slug = ?
       `
@@ -51,8 +51,8 @@ export class D1WorkspaceRepository implements WorkspaceRepository {
     await this.db
       .prepare(
         `
-        INSERT INTO workspaces (id, slug, name, description, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO workspaces (id, slug, name, description, created_at, updated_at, default_model_connection_id)
+        VALUES (?, ?, ?, ?, ?, ?, NULL)
       `
       )
       .bind(workspace.id, workspace.slug, workspace.name, workspace.description ?? null, now, now)
@@ -60,6 +60,7 @@ export class D1WorkspaceRepository implements WorkspaceRepository {
 
     return {
       ...workspace,
+      defaultModelConnectionId: undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -69,7 +70,7 @@ export class D1WorkspaceRepository implements WorkspaceRepository {
     const result = await this.db
       .prepare(
         `
-        SELECT w.id, w.slug, w.name, w.description, w.created_at, w.updated_at
+        SELECT w.id, w.slug, w.name, w.description, w.created_at, w.updated_at, w.default_model_connection_id
         FROM workspaces w
         INNER JOIN workspace_memberships m ON m.workspace_id = w.id
         WHERE m.user_id = ?

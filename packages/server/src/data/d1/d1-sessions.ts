@@ -28,9 +28,10 @@ export class D1SessionRepository implements SessionRepository {
         `
         INSERT INTO sessions (
           id, workspace_id, workflow_id, status, next_event_cursor,
-          updated_at, error_message, max_queue_size, idle_timeout
+          updated_at, error_message, max_queue_size, idle_timeout,
+          model_connection_id, model_provider, model_name
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           workspace_id = excluded.workspace_id,
           workflow_id = excluded.workflow_id,
@@ -39,7 +40,10 @@ export class D1SessionRepository implements SessionRepository {
           updated_at = excluded.updated_at,
           error_message = excluded.error_message,
           max_queue_size = excluded.max_queue_size,
-          idle_timeout = excluded.idle_timeout
+          idle_timeout = excluded.idle_timeout,
+          model_connection_id = COALESCE(excluded.model_connection_id, sessions.model_connection_id),
+          model_provider = COALESCE(excluded.model_provider, sessions.model_provider),
+          model_name = COALESCE(excluded.model_name, sessions.model_name)
       `
       )
       .bind(
@@ -51,7 +55,10 @@ export class D1SessionRepository implements SessionRepository {
         session.updatedAt || now,
         session.errorMessage ?? null,
         session.maxQueueSize ?? 100,
-        session.idleTimeout ?? null
+        session.idleTimeout ?? null,
+        session.modelConnectionId ?? null,
+        session.modelProvider ?? null,
+        session.modelName ?? null
       )
       .run();
 
@@ -77,7 +84,8 @@ export class D1SessionRepository implements SessionRepository {
         `
         SELECT 
           id, workspace_id, workflow_id, status, next_event_cursor,
-          updated_at, error_message, max_queue_size, idle_timeout
+          updated_at, error_message, max_queue_size, idle_timeout,
+          model_connection_id, model_provider, model_name
         FROM sessions
         WHERE id = ?
       `
@@ -97,7 +105,8 @@ export class D1SessionRepository implements SessionRepository {
         `
         SELECT 
           id, workspace_id, workflow_id, status, next_event_cursor,
-          updated_at, error_message, max_queue_size, idle_timeout
+          updated_at, error_message, max_queue_size, idle_timeout,
+          model_connection_id, model_provider, model_name
         FROM sessions
         WHERE id = ? AND workspace_id = ?
       `
@@ -169,6 +178,7 @@ export class D1SessionRepository implements SessionRepository {
         SELECT 
           s.id, s.workspace_id, s.workflow_id, s.status, s.next_event_cursor,
           s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
+          s.model_connection_id, s.model_provider, s.model_name,
           COUNT(e.sequence) AS event_count,
           COALESCE(MAX(r.active), 0) AS active
         FROM sessions s
@@ -185,6 +195,7 @@ export class D1SessionRepository implements SessionRepository {
         SELECT 
           s.id, s.workspace_id, s.workflow_id, s.status, s.next_event_cursor,
           s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
+          s.model_connection_id, s.model_provider, s.model_name,
           COUNT(e.sequence) AS event_count,
           COALESCE(MAX(r.active), 0) AS active
         FROM sessions s

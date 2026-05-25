@@ -9,6 +9,7 @@ import type {
   Workspace,
   WorkspaceMembership,
   User,
+  ModelConnection,
 } from "../interfaces.js";
 import type { SessionStatus, SessionEvent } from "../../types.js";
 
@@ -31,6 +32,7 @@ export interface WorkspaceRow {
   description: string | null;
   created_at: number;
   updated_at: number;
+  default_model_connection_id: string | null;
 }
 
 export interface WorkspaceMembershipRow {
@@ -51,6 +53,9 @@ export interface SessionRow {
   error_message: string | null;
   max_queue_size: number;
   idle_timeout: string | null;
+  model_connection_id: string | null;
+  model_provider: string | null;
+  model_name: string | null;
 }
 
 // Extended row type including event count from JOIN
@@ -107,6 +112,23 @@ export interface EgressHandlerRow {
 }
 
 // =============================================================================
+// Model Connection Row Types
+// =============================================================================
+
+export interface ModelConnectionRow {
+  id: string;
+  workspace_id: string;
+  display_name: string | null;
+  provider: string;
+  model_name: string;
+  secret_refs_json: string;
+  config_json: string;
+  created_at: number;
+  updated_at: number;
+  deleted_at: number | null;
+}
+
+// =============================================================================
 // User Mappers
 // =============================================================================
 
@@ -130,6 +152,7 @@ export function mapWorkspaceRow(row: WorkspaceRow): Workspace {
     slug: row.slug,
     name: row.name,
     description: row.description ?? undefined,
+    defaultModelConnectionId: row.default_model_connection_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -160,6 +183,9 @@ export function mapSessionRow(row: SessionRow): SessionMetadataState {
     errorMessage: row.error_message ?? undefined,
     maxQueueSize: row.max_queue_size,
     idleTimeout: row.idle_timeout ?? undefined,
+    modelConnectionId: row.model_connection_id ?? undefined,
+    modelProvider: row.model_provider ?? undefined,
+    modelName: row.model_name ?? undefined,
   };
 }
 
@@ -186,6 +212,9 @@ export function mapSessionSummaryRowWithCount(row: SessionWithCountRow): Session
     messageCount: row.event_count ?? 0,
     updatedAt: row.updated_at,
     isActive: row.active !== undefined ? Boolean(row.active) : status === "idle" || status === "processing",
+    modelConnectionId: row.model_connection_id ?? undefined,
+    modelProvider: row.model_provider ?? undefined,
+    modelName: row.model_name ?? undefined,
   };
 }
 
@@ -257,5 +286,35 @@ export function mapRuntimeRow(row: RuntimeRow): {
     workflowSession: row.workflow_session_json ? (JSON.parse(row.workflow_session_json) as unknown) : null,
     snapshot: row.snapshot_json ? (JSON.parse(row.snapshot_json) as unknown) : null,
     updatedAt: row.updated_at,
+  };
+}
+
+// =============================================================================
+// Model Connection Mappers
+// =============================================================================
+
+/**
+ * Safe JSON parser - returns default value on error
+ */
+function safeJsonParse<T>(json: string, defaultValue: T): T {
+  try {
+    return JSON.parse(json) as T;
+  } catch {
+    return defaultValue;
+  }
+}
+
+export function mapModelConnectionRow(row: ModelConnectionRow): ModelConnection {
+  return {
+    id: row.id,
+    workspaceId: row.workspace_id,
+    displayName: row.display_name ?? undefined,
+    provider: row.provider,
+    modelName: row.model_name,
+    secretRefs: safeJsonParse(row.secret_refs_json, {}),
+    config: safeJsonParse(row.config_json, {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at ?? undefined,
   };
 }

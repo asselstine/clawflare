@@ -16,6 +16,9 @@ import type {
   ChatRequest,
   SessionListResponse,
   SessionSummary,
+  ModelConnection,
+  ModelConnectionListResponse,
+  CreateModelConnectionRequest,
 } from "./types.js";
 
 export type {
@@ -26,6 +29,9 @@ export type {
   ChatRequest,
   SessionListResponse,
   SessionSummary,
+  ModelConnection,
+  ModelConnectionListResponse,
+  CreateModelConnectionRequest,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -286,6 +292,52 @@ export class AgentClient {
 
     const path = `/v1/cf_debug${query.toString() ? `?${query.toString()}` : ""}`;
     return this.requestJson<unknown>(path);
+  }
+
+  // Model Connection API
+  async listModelConnections(): Promise<ModelConnectionListResponse> {
+    return this.requestJson<ModelConnectionListResponse>("/v1/model-connections");
+  }
+
+  async createModelConnection(input: CreateModelConnectionRequest): Promise<ModelConnection> {
+    const data = await this.requestJson<{ modelConnection: ModelConnection }>("/v1/model-connections", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return data.modelConnection;
+  }
+
+  async updateModelConnection(
+    id: string,
+    input: Partial<CreateModelConnectionRequest>
+  ): Promise<ModelConnection> {
+    const data = await this.requestJson<{ modelConnection: ModelConnection }>(
+      `/v1/model-connections/${id}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }
+    );
+    return data.modelConnection;
+  }
+
+  async deleteModelConnection(id: string): Promise<{ ok: boolean }> {
+    return this.requestJson<{ ok: boolean }>(`/v1/model-connections/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  async setDefaultModelConnection(id: string | null): Promise<{
+    ok: boolean;
+    defaultModelConnectionId?: string;
+  }> {
+    return this.requestJson<{ ok: boolean; defaultModelConnectionId?: string }>(
+      "/v1/workspace/default-model-connection",
+      {
+        method: "PUT",
+        body: JSON.stringify({ modelConnectionId: id }),
+      }
+    );
   }
 }
 

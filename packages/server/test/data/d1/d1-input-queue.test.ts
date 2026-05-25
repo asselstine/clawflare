@@ -29,7 +29,10 @@ function allMigrationStatements(): string[] {
     "0001_initial_data_layer.sql",
     "0002_add_session_counters.sql",
     "0003_add_workspace_scoping.sql",
-    "0004_complete_workspace_migration.sql"
+    "0004_complete_workspace_migration.sql",
+    "0005_add_auth_tables.sql",
+    "0006_complete_auth_schema.sql",
+    "0007_model_connections.sql"
   ];
   return files.flatMap((file) => migrationStatements(file));
 }

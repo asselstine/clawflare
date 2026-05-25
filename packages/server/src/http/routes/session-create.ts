@@ -4,10 +4,11 @@
 
 import type { Env } from "../../internal-types/index.js";
 import type { SessionMetadataState } from "../../data/index.js";
-import { json } from "../responses.js";
+import { json, badRequest } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
+import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
 
 /**
  * Create a new empty session with workflow
@@ -21,7 +22,10 @@ export async function handleCreateSession(
   const requestStart = timingStart();
 
   try {
-    const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
+    const body = (await request.json().catch(() => ({}))) as {
+      sessionId?: string;
+      modelConnectionId?: string;
+    };
     const sessionId = body.sessionId || crypto.randomUUID();
     const workflowId = crypto.randomUUID();
     // Use workspace from request context
@@ -29,7 +33,21 @@ export async function handleCreateSession(
 
     const data = getDataLayer(env);
 
-    // Initialize session state with workspace
+    // Resolve model connection for the session
+    const resolvedModel = await resolveModelConnectionForNewSession(
+      env,
+      workspaceId,
+      body.modelConnectionId
+    );
+
+    // If explicit model requested but not found, return error
+    if (body.modelConnectionId && !resolvedModel) {
+      return badRequest(
+        `Model connection "${body.modelConnectionId}" not found or not available`
+      );
+    }
+
+    // Initialize session state with workspace and model info
     const initialState: SessionMetadataState = {
       id: sessionId,
       workspaceId,
@@ -39,6 +57,9 @@ export async function handleCreateSession(
       updatedAt: Date.now(),
       maxQueueSize: 100,
       idleTimeout: "7 days",
+      modelConnectionId: resolvedModel?.id,
+      modelProvider: resolvedModel?.provider,
+      modelName: resolvedModel?.modelName,
     };
     await data.sessions.save(initialState);
     logTiming(env, sessionId, "session.create.saved", requestStart);
@@ -50,12 +71,29 @@ export async function handleCreateSession(
     });
     logTiming(env, sessionId, "session.create.workflow_done", requestStart);
 
-    return json({
+    const response: {
+      id: string;
+      workspaceId: string;
+      messages: [];
+      createdAt: number;
+      modelConnection?: { id: string; provider: string; modelName: string };
+    } = {
       id: sessionId,
       workspaceId,
       messages: [],
       createdAt: initialState.updatedAt,
-    });
+    };
+
+    // Include model connection info if available
+    if (resolvedModel) {
+      response.modelConnection = {
+        id: resolvedModel.id,
+        provider: resolvedModel.provider,
+        modelName: resolvedModel.modelName,
+      };
+    }
+
+    return json(response);
   } catch (error) {
     logTiming(env, "unknown", "session.create.error", requestStart, {
       error: error instanceof Error ? error.message : String(error),

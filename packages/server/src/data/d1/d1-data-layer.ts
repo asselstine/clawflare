@@ -10,6 +10,7 @@ import { D1StoredCodeRepository } from "./d1-stored-code.js";
 import { D1EgressHandlerRepository } from "./d1-egress-handlers.js";
 import { D1SnapshotRepository } from "./d1-snapshots.js";
 import { D1WorkspaceRepository } from "./d1-workspaces.js";
+import { D1ModelConnectionRepository } from "./d1-model-connections.js";
 
 /**
  * Create a DataLayer backed by D1
@@ -27,6 +28,7 @@ export function createD1DataLayer(db: D1Database): DataLayer {
     egressHandlers,
     workspaces: new D1WorkspaceRepository(db),
     snapshots: new D1SnapshotRepository(db),
+    modelConnections: new D1ModelConnectionRepository(db),
 
     async search(workspaceId: string, query: string, limit: number): Promise<SearchResults> {
       const [storedCodeResults, egressResults] = await Promise.all([
@@ -54,4 +56,5 @@ export {
   D1EgressHandlerRepository,
   D1SnapshotRepository,
   D1WorkspaceRepository,
+  D1ModelConnectionRepository,
 };

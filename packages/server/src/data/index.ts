@@ -37,6 +37,13 @@ export type {
   WorkspaceMembership,
   WorkspaceRole,
 
+  // Model connection types
+  ModelConnection,
+  ModelProvider,
+  CreateModelConnectionParams,
+  UpdateModelConnectionParams,
+  ModelConnectionRepository,
+
   // Repository interfaces
   SessionRepository,
   SessionEventRepository,
@@ -76,6 +83,7 @@ export {
   D1EgressHandlerRepository,
   D1SnapshotRepository,
   D1WorkspaceRepository,
+  D1ModelConnectionRepository,
 } from "./d1/d1-data-layer.js";
 
 // =============================================================================
@@ -93,6 +101,7 @@ export type {
   RuntimeRow,
   StoredCodeRow,
   EgressHandlerRow,
+  ModelConnectionRow,
 } from "./d1/row-mappers.js";
 
 export {
@@ -106,6 +115,7 @@ export {
   mapStoredCodeRow,
   mapEgressHandlerRow,
   mapRuntimeRow,
+  mapModelConnectionRow,
 } from "./d1/row-mappers.js";
 
 // =============================================================================

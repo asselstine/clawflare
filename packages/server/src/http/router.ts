@@ -11,6 +11,14 @@ import { handleListTools } from "./routes/tools.js";
 import { handleGetInfo } from "./routes/info.js";
 import { handleCfDebug } from "./routes/debug.js";
 import {
+  handleListModelConnections,
+  handleCreateModelConnection,
+  handleGetModelConnection,
+  handleUpdateModelConnection,
+  handleDeleteModelConnection,
+  handleSetDefaultModelConnection,
+} from "./routes/model-connections.js";
+import {
   handleDeviceAuthStart,
   handleDeviceAuthPoll,
   handleDeviceVerify,
@@ -149,6 +157,12 @@ export async function handleHttpRequest(
     { pattern: /^\/v1\/tools$/, method: "GET" },
     { pattern: /^\/v1\/info$/, method: "GET" },
     { pattern: /^\/v1\/cf_debug$/, method: "GET" },
+    { pattern: /^\/v1\/model-connections$/, method: "GET" },
+    { pattern: /^\/v1\/model-connections$/, method: "POST" },
+    { pattern: /^\/v1\/model-connections\/[^\/]+$/, method: "GET" },
+    { pattern: /^\/v1\/model-connections\/[^\/]+$/, method: "PATCH" },
+    { pattern: /^\/v1\/model-connections\/[^\/]+$/, method: "DELETE" },
+    { pattern: /^\/v1\/workspace\/default-model-connection$/, method: "PUT" },
     { pattern: /^\/ws$/, method: "GET" },
   ];
 
@@ -243,6 +257,39 @@ export async function handleHttpRequest(
   // /v1/cf_debug - GET
   if (path === "/v1/cf_debug" && request.method === "GET") {
     return handleCfDebug(env, url, requestContext);
+  }
+
+  // /v1/model-connections - GET
+  if (path === "/v1/model-connections" && request.method === "GET") {
+    return handleListModelConnections(request, env, requestContext);
+  }
+
+  // /v1/model-connections - POST
+  if (path === "/v1/model-connections" && request.method === "POST") {
+    return handleCreateModelConnection(request, env, requestContext);
+  }
+
+  // /v1/model-connections/:id - GET
+  if (path.match(/^\/v1\/model-connections\/[^\/]+$/) && request.method === "GET") {
+    const id = path.replace("/v1/model-connections/", "");
+    return handleGetModelConnection(request, env, requestContext, id);
+  }
+
+  // /v1/model-connections/:id - PATCH
+  if (path.match(/^\/v1\/model-connections\/[^\/]+$/) && request.method === "PATCH") {
+    const id = path.replace("/v1/model-connections/", "");
+    return handleUpdateModelConnection(request, env, requestContext, id);
+  }
+
+  // /v1/model-connections/:id - DELETE
+  if (path.match(/^\/v1\/model-connections\/[^\/]+$/) && request.method === "DELETE") {
+    const id = path.replace("/v1/model-connections/", "");
+    return handleDeleteModelConnection(request, env, requestContext, id);
+  }
+
+  // /v1/workspace/default-model-connection - PUT
+  if (path === "/v1/workspace/default-model-connection" && request.method === "PUT") {
+    return handleSetDefaultModelConnection(request, env, requestContext);
   }
 
   // 404 for unmatched routes

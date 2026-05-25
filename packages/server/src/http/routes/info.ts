@@ -4,9 +4,10 @@
 import type { Env } from "../../internal-types/index.js";
 import { json, serverError } from "../responses.js";
 import { normalizeBedrockBearerToken } from "../../agent-config.js";
+import { getSupportedProviders } from "../../model-providers.js";
 
 /**
- * Get server info (provider, model, context window)
+ * Get server info (provider, model, context window, model connection support)
  */
 export async function handleGetInfo(env: Env): Promise<Response> {
   try {
@@ -21,6 +22,8 @@ export async function handleGetInfo(env: Env): Promise<Response> {
       model,
       contextWindow,
       mockAi: env.MOCK_AI,
+      supportsWorkspaceModelConnections: true,
+      supportedProviders: getSupportedProviders(),
       bedrockAuth: {
         configured: normalizedBedrockToken.length > 0,
         rawLength: rawBedrockToken.length,

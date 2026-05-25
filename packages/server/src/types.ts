@@ -73,6 +73,7 @@ export interface ChatRequest {
   content?: string;
   sessionId?: string;
   maxTurns?: number;
+  modelConnectionId?: string;
 }
 
 /**
@@ -105,4 +106,31 @@ export interface ToolDefinition {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+}
+
+// =============================================================================
+// Model Connection Types
+// =============================================================================
+
+/**
+ * Model Connection - public API response (no secrets)
+ */
+export interface ModelConnection {
+  id: string;
+  workspaceId: string;
+  displayName?: string;
+  provider: string;
+  modelName: string;
+  configuredSecrets: string[];
+  requiredSecrets: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Model Connection List Response
+ */
+export interface ModelConnectionListResponse {
+  modelConnections: ModelConnection[];
+  defaultModelConnectionId?: string;
 }

@@ -43,6 +43,11 @@ export type {
   SnapshotRepository,
   DataLayer,
   Datastore,
+  // Model connection types
+  ModelProvider,
+  CreateModelConnectionParams,
+  UpdateModelConnectionParams,
+  ModelConnectionRepository,
 } from "./data/index.js";
 
 // Export data layer errors
@@ -157,6 +162,46 @@ export {
   defineEgressHandler,
   defineHttpEgressHandler,
 } from "@clawflare/egress-core";
+
+// Export model connection types
+export type {
+  ModelConnection,
+  ModelConnectionListResponse,
+} from "./types.js";
+
+// Export model connection service
+export {
+  createModelConnection,
+  updateModelConnection,
+  deleteModelConnection,
+  resolveModelConnection,
+  listModelConnections,
+  resolveModelConnectionForSession,
+  resolveModelConnectionForNewSession,
+  type ResolvedModelConnection,
+  type CreateModelConnectionResult,
+} from "./model-connection-service.js";
+
+// Export model provider utilities
+export {
+  getProviderDefinition,
+  getSupportedProviders,
+  isProviderSupported,
+  validateModelConnectionInput,
+  requiredSecretsForProvider,
+  optionalSecretsForProvider,
+  defaultModelForProvider,
+  redactModelConnection,
+  redactModelConnections,
+  type PublicModelConnection,
+} from "./model-providers.js";
+
+// Export secret store adapter
+export {
+  createSecretStore,
+  getSecretStore,
+  type SecretStoreAdapter,
+} from "./secret-store.js";
 
 // Main Cloudflare Worker export
 export default {

@@ -8,6 +8,7 @@ import { json, badRequest, gone, tooManyRequests, serverError } from "../respons
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
+import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
 
 /**
  * Handle session-based chat submission
@@ -32,7 +33,6 @@ export async function handleChat(
     const maxTurns = body.maxTurns;
     sessionIdVar = body.sessionId || crypto.randomUUID();
     const sessionId: string = sessionIdVar;
-    // Use workspace from request context
     const workspaceId = requestContext.workspace.id;
 
     logTiming(env, sessionId, "chat.request.parsed", requestStart, {
@@ -48,9 +48,25 @@ export async function handleChat(
       : null;
 
     if (existingSession) {
+      // Check if trying to change model on existing session
+      if (body.modelConnectionId !== undefined) {
+        if (body.modelConnectionId !== existingSession.modelConnectionId) {
+          return badRequest(
+            "Cannot change model connection for existing session. Create a new session instead."
+          );
+        }
+      }
       return handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession, requestStart);
     } else {
-      return handleNewSession(env, sessionId, workspaceId, content, maxTurns, requestStart);
+      return handleNewSession(
+        env,
+        sessionId,
+        workspaceId,
+        content,
+        maxTurns,
+        body.modelConnectionId,
+        requestStart
+      );
     }
   } catch (error) {
     logTiming(env, sessionIdVar, "chat.request.error", requestStart, {
@@ -137,15 +153,30 @@ async function handleNewSession(
   workspaceId: string,
   content: string,
   maxTurns: number | undefined,
+  modelConnectionId: string | undefined,
   requestStart: number
 ): Promise<Response> {
   logTiming(env, sessionId, "chat.workflow.create.start", requestStart);
   const data = getDataLayer(env);
 
+  // Resolve model connection for the new session
+  const resolvedModel = await resolveModelConnectionForNewSession(
+    env,
+    workspaceId,
+    modelConnectionId
+  );
+
+  // If explicit model requested but not found, return error
+  if (modelConnectionId && !resolvedModel) {
+    return badRequest(
+      `Model connection "${modelConnectionId}" not found or not configured`
+    );
+  }
+
   const initialEventCursor = await data.events.latestCursor(sessionId);
   const workflowId = crypto.randomUUID();
 
-  // Initialize session state with workspace
+  // Initialize session state with workspace and model info
   const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
     workspaceId,
@@ -155,6 +186,9 @@ async function handleNewSession(
     updatedAt: Date.now(),
     maxQueueSize: 100,
     idleTimeout: "7 days",
+    modelConnectionId: resolvedModel?.id,
+    modelProvider: resolvedModel?.provider,
+    modelName: resolvedModel?.modelName,
   };
   await data.sessions.save(initialState);
   logTiming(env, sessionId, "chat.session_state.saved", requestStart);
@@ -180,12 +214,27 @@ async function handleNewSession(
     payload: { type: "wake" },
   });
 
-  const response = {
+  const response: {
+    sessionId: string;
+    workspaceId: string;
+    eventCursor: string;
+    isNewSession: true;
+    modelConnection?: { id: string; provider: string; modelName: string };
+  } = {
     sessionId,
     workspaceId,
     eventCursor: initialState.nextEventCursor,
     isNewSession: true,
   };
+
+  // Include model connection info if available
+  if (resolvedModel) {
+    response.modelConnection = {
+      id: resolvedModel.id,
+      provider: resolvedModel.provider,
+      modelName: resolvedModel.modelName,
+    };
+  }
 
   logTiming(env, sessionId, "chat.response.returning", requestStart);
   return json(response);
