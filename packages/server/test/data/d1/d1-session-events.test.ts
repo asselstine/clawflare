@@ -9,15 +9,28 @@ import { D1SessionEventRepository } from "../../../src/data/d1/d1-session-events
 import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const MIGRATION_PATH = join(__dirname, "../../../migrations/0001_initial_data_layer.sql");
+const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
 
-function migrationStatements(): string[] {
-  return readFileSync(MIGRATION_PATH, "utf-8")
+// Default workspace for testing - Phase 6 adds workspace scoping
+const DEFAULT_WORKSPACE_ID = "test-workspace";
+
+function migrationStatements(migrationFile: string): string[] {
+  return readFileSync(join(MIGRATIONS_DIR, migrationFile), "utf-8")
     .replace(/^--.*$/gm, "")
     .replace(/^PRAGMA\s+foreign_keys\s*=\s*ON;$/gim, "")
     .split(";")
     .map((statement) => statement.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+}
+
+function allMigrationStatements(): string[] {
+  const files = [
+    "0001_initial_data_layer.sql",
+    "0002_add_session_counters.sql",
+    "0003_add_workspace_scoping.sql",
+    "0004_complete_workspace_migration.sql"
+  ];
+  return files.flatMap((file) => migrationStatements(file));
 }
 
 async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void> }> {
@@ -27,7 +40,7 @@ async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void
     d1Databases: ["DB"],
   });
   const db = await mf.getD1Database("DB");
-  for (const statement of migrationStatements()) {
+  for (const statement of allMigrationStatements()) {
     await db.exec(`${statement};`);
   }
   return { db, dispose: () => mf.dispose() };
@@ -36,6 +49,7 @@ async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void
 async function createSession(db: D1Database, sessionId = "session-1"): Promise<void> {
   await new D1SessionRepository(db).save({
     id: sessionId,
+    workspaceId: DEFAULT_WORKSPACE_ID, // Phase 6: workspace scoping
     workflowId: "workflow-1",
     status: "idle",
     nextEventCursor: "0",

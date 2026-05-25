@@ -1,7 +1,7 @@
 // Sessions Route Handler - /v1/session/* and /v1/sessions
 // Handles session polling, closing, and listing
 
-import type { SessionInputEvent, SessionMetadataState } from "../../data/index.js";
+import type { SessionInputEvent, SessionMetadataState, SessionListFilter } from "../../data/index.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { json, notFound, badRequest, serverError } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
@@ -9,6 +9,7 @@ import { getDataLayer } from "../../data/index.js";
 import type { Env } from "../../internal-types/index.js";
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_WORKSPACE_ID = "default-workspace";
 
 /**
  * Get session state - polls for messages and events
@@ -16,13 +17,19 @@ const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 export async function handleGetSession(
   sessionId: string,
   url: URL,
-  env: Env
+  env: Env,
+  workspaceId?: string
 ): Promise<Response> {
   const pollStart = timingStart();
   const data = getDataLayer(env);
+  // Use provided workspace or default
+  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
 
   try {
-    const sessionState = await data.sessions.findById(sessionId);
+    // Find session scoped to workspace
+    const sessionState = effectiveWorkspaceId 
+      ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
+      : await data.sessions.findById(sessionId);
 
     if (!sessionState) {
       logTiming(env, sessionId, "session.poll.not_found", pollStart);
@@ -54,6 +61,7 @@ export async function handleGetSession(
       eventCount: events.length,
       nextCursor: nextCursor.slice(0, 8),
       sinceCursor,
+      workspaceId: effectiveWorkspaceId,
     });
 
     const workflowSession = await data.runtime.getWorkflowSession(sessionId) as
@@ -67,6 +75,7 @@ export async function handleGetSession(
       events,
       nextEventCursor: nextCursor,
       errorMessage: sessionState.errorMessage,
+      workspaceId: sessionState.workspaceId,
     };
 
     return json(response);
@@ -82,11 +91,17 @@ export async function handleGetSession(
 /**
  * Close a session - sends close event to workflow
  */
-export async function handleCloseSession(sessionId: string, env: Env): Promise<Response> {
+export async function handleCloseSession(sessionId: string, env: Env, workspaceId?: string): Promise<Response> {
   const data = getDataLayer(env);
+  // Use provided workspace or default
+  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
 
   try {
-    const session = await data.sessions.findById(sessionId);
+    // Find session scoped to workspace
+    const session = effectiveWorkspaceId
+      ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
+      : await data.sessions.findById(sessionId);
+      
     if (!session) {
       return notFound("Session");
     }
@@ -113,7 +128,7 @@ export async function handleCloseSession(sessionId: string, env: Env): Promise<R
     await data.sessions.markClosed(sessionId, "user");
     await data.runtime.setActive(sessionId, false);
 
-    return json({ ok: true, sessionId, status: "closed" });
+    return json({ ok: true, sessionId, status: "closed", workspaceId: effectiveWorkspaceId });
   } catch (error) {
     console.error("[handleCloseSession] Error:", error);
     return serverError(error instanceof Error ? error.message : "Unknown error");
@@ -123,8 +138,10 @@ export async function handleCloseSession(sessionId: string, env: Env): Promise<R
 /**
  * List sessions - returns active and recent sessions using D1
  */
-export async function handleListSessions(url: URL, env: Env): Promise<Response> {
+export async function handleListSessions(url: URL, env: Env, workspaceId?: string): Promise<Response> {
   const data = getDataLayer(env);
+  // Use provided workspace or default
+  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
 
   try {
     // Parse query parameters
@@ -135,7 +152,11 @@ export async function handleListSessions(url: URL, env: Env): Promise<Response> 
     // If specific session ID provided, return that one
     const sessionId = url.searchParams.get("sessionId");
     if (sessionId) {
-      const state = await data.sessions.findById(sessionId);
+      // Scoped to workspace
+      const state = effectiveWorkspaceId
+        ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
+        : await data.sessions.findById(sessionId);
+        
       if (state) {
         const [messageCount, isActive] = await Promise.all([
           data.events.count(sessionId),
@@ -157,16 +178,16 @@ export async function handleListSessions(url: URL, env: Env): Promise<Response> 
       return json({ sessions: [], total: 0 });
     }
 
-    // List sessions from D1
-    const sessions = await data.sessions.list({
+    // List sessions from D1 scoped to workspace
+    const filter: SessionListFilter = {
+      workspaceId: effectiveWorkspaceId,
       status: statusFilter as "all" | SessionStatus,
       limit,
       offset,
-    });
-
-    const total = await data.sessions.count({
-      status: statusFilter as "all" | SessionStatus,
-    });
+    };
+    
+    const sessions = await data.sessions.list(filter);
+    const total = await data.sessions.count(filter);
 
     const response: SessionListResponse = { sessions, total };
     return json(response);

@@ -3,10 +3,13 @@
 
 import type { Env } from "../../internal-types/index.js";
 import type { ChatRequest } from "../../types.js";
-import type { SessionInputEvent, SessionMetadataState } from "../../data/index.js";
+import type { SessionInputEvent } from "../../data/index.js";
 import { json, badRequest, gone, tooManyRequests, serverError } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
+
+// Default workspace for sessions until full auth is in place
+const DEFAULT_WORKSPACE_ID = "default-workspace";
 
 /**
  * Handle session-based chat submission
@@ -27,20 +30,23 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
     const maxTurns = body.maxTurns;
     sessionIdVar = body.sessionId || crypto.randomUUID();
     const sessionId: string = sessionIdVar;
+    // Use provided workspaceId or default - Phase 6 adds workspace scoping
+    const workspaceId = (body as unknown as { workspaceId?: string }).workspaceId || DEFAULT_WORKSPACE_ID;
 
     logTiming(env, sessionId, "chat.request.parsed", requestStart, {
       hasExistingSession: Boolean(body.sessionId),
       promptLength: content.length,
       action: body.sessionId ? "sendEvent" : "createWorkflow",
+      workspaceId,
     });
 
     const data = getDataLayer(env);
     const existingSession = body.sessionId ? await data.sessions.findById(body.sessionId) : null;
 
     if (existingSession) {
-      return handleExistingSession(env, sessionId, content, maxTurns, existingSession, requestStart);
+      return handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession, requestStart);
     } else {
-      return handleNewSession(env, sessionId, content, maxTurns, requestStart);
+      return handleNewSession(env, sessionId, workspaceId, content, maxTurns, requestStart);
     }
   } catch (error) {
     logTiming(env, sessionIdVar, "chat.request.error", requestStart, {
@@ -57,9 +63,10 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
 async function handleExistingSession(
   env: Env,
   sessionId: string,
+  workspaceId: string,
   content: string,
   maxTurns: number | undefined,
-  existingSession: SessionMetadataState,
+  existingSession: import("../../data/index.js").SessionMetadataState,
   requestStart: number
 ): Promise<Response> {
   logTiming(env, sessionId, "chat.sendEvent.start", requestStart);
@@ -108,6 +115,7 @@ async function handleExistingSession(
 
   const response = {
     sessionId,
+    workspaceId,
     eventCursor: freshEventCursor,
     isNewSession: false,
   };
@@ -122,6 +130,7 @@ async function handleExistingSession(
 async function handleNewSession(
   env: Env,
   sessionId: string,
+  workspaceId: string,
   content: string,
   maxTurns: number | undefined,
   requestStart: number
@@ -132,9 +141,10 @@ async function handleNewSession(
   const initialEventCursor = await data.events.latestCursor(sessionId);
   const workflowId = crypto.randomUUID();
 
-  // Initialize session state
-  const initialState = {
+  // Initialize session state with workspace
+  const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
+    workspaceId,
     workflowId,
     status: "processing" as const,
     nextEventCursor: initialEventCursor,
@@ -168,6 +178,7 @@ async function handleNewSession(
 
   const response = {
     sessionId,
+    workspaceId,
     eventCursor: initialState.nextEventCursor,
     isNewSession: true,
   };

@@ -7,6 +7,49 @@ import type { SessionEvent, SessionStatus } from "../types.js";
 export type { SessionEvent, SessionStatus } from "../types.js";
 
 // =============================================================================
+// Workspace Types
+// =============================================================================
+
+/**
+ * Workspace entity
+ */
+export interface Workspace {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * User entity
+ */
+export interface User {
+  id: string;
+  email: string;
+  displayName?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * Workspace membership role
+ */
+export type WorkspaceRole = "owner" | "admin" | "member" | "viewer";
+
+/**
+ * Workspace membership
+ */
+export interface WorkspaceMembership {
+  workspaceId: string;
+  userId: string;
+  role: WorkspaceRole;
+  joinedAt: number;
+  updatedAt: number;
+}
+
+// =============================================================================
 // Session Types
 // =============================================================================
 
@@ -15,6 +58,7 @@ export type { SessionEvent, SessionStatus } from "../types.js";
  */
 export interface SessionMetadataState {
   id: string;
+  workspaceId: string;
   workflowId: string;
   status: SessionStatus;
   nextEventCursor: string;
@@ -29,6 +73,7 @@ export interface SessionMetadataState {
  */
 export interface SessionSummary {
   id: string;
+  workspaceId: string;
   workflowId: string;
   status: SessionStatus;
   messageCount: number;
@@ -40,6 +85,7 @@ export interface SessionSummary {
  * Filter for session listing
  */
 export interface SessionListFilter {
+  workspaceId: string;
   status?: SessionStatus | "all";
   limit?: number;
   offset?: number;
@@ -111,9 +157,10 @@ export interface DequeueResult {
 // =============================================================================
 
 /**
- * Stored code entry
+ * Stored code entry - workspace scoped
  */
 export interface StoredCodeEntry {
+  workspaceId: string;
   name: string;
   code: string;
   description?: string;
@@ -126,6 +173,7 @@ export interface StoredCodeEntry {
  * Parameters for upserting stored code
  */
 export interface UpsertStoredCodeParams {
+  workspaceId: string;
   name: string;
   code: string;
   description?: string;
@@ -137,9 +185,10 @@ export interface UpsertStoredCodeParams {
 // =============================================================================
 
 /**
- * Egress handler metadata
+ * Egress handler metadata - workspace scoped
  */
 export interface EgressHandlerMetadata {
+  workspaceId: string;
   name: string;
   description: string;
   domains: string[];
@@ -152,6 +201,7 @@ export interface EgressHandlerMetadata {
  * Parameters for upserting egress handler
  */
 export interface UpsertEgressHandlerParams {
+  workspaceId: string;
   name: string;
   description: string;
   domains: string[];
@@ -170,8 +220,11 @@ export interface SessionRepository {
   /** Save or update session metadata */
   save(session: SessionMetadataState): Promise<void>;
 
-  /** Find session by ID */
+  /** Find session by ID - must belong to workspace */
   findById(sessionId: string): Promise<SessionMetadataState | null>;
+
+  /** Find session by ID scoped to workspace */
+  findByIdInWorkspace(workspaceId: string, sessionId: string): Promise<SessionMetadataState | null>;
 
   /** Mark session as failed with error message */
   markError(sessionId: string, message: string): Promise<void>;
@@ -182,10 +235,10 @@ export interface SessionRepository {
     reason: "user" | "timeout" | "error"
   ): Promise<void>;
 
-  /** List sessions with optional filtering */
+  /** List sessions with optional filtering - workspace scoped */
   list(filter: SessionListFilter): Promise<SessionSummary[]>;
 
-  /** Count sessions matching filter */
+  /** Count sessions matching filter - workspace scoped */
   count(filter: SessionListFilter): Promise<number>;
 }
 
@@ -266,37 +319,66 @@ export interface SessionRuntimeRepository {
 }
 
 /**
- * Stored code repository - manages reusable code
+ * Stored code repository - manages reusable code, workspace scoped
  */
 export interface StoredCodeRepository {
-  /** Upsert a code entry */
-  upsert(entry: UpsertStoredCodeParams): Promise<void>;
+  /** Upsert a code entry in a workspace */
+  upsert(params: UpsertStoredCodeParams): Promise<void>;
 
-  /** Get code by name */
-  get(name: string): Promise<StoredCodeEntry | null>;
+  /** Get code by name within a workspace */
+  get(workspaceId: string, name: string): Promise<StoredCodeEntry | null>;
 
-  /** List stored code entries */
-  list(limit?: number): Promise<StoredCodeEntry[]>;
+  /** List stored code entries in a workspace */
+  list(workspaceId: string, limit?: number): Promise<StoredCodeEntry[]>;
 
-  /** Search stored code */
-  search(query: string, limit: number): Promise<StoredCodeEntry[]>;
+  /** Search stored code within a workspace */
+  search(workspaceId: string, query: string, limit: number): Promise<StoredCodeEntry[]>;
 }
 
 /**
- * Egress handler repository - manages egress handler metadata
+ * Egress handler repository - manages egress handler metadata, workspace scoped
  */
 export interface EgressHandlerRepository {
-  /** Upsert an egress handler */
-  upsert(entry: UpsertEgressHandlerParams): Promise<void>;
+  /** Upsert an egress handler in a workspace */
+  upsert(params: UpsertEgressHandlerParams): Promise<void>;
 
-  /** Get handler by name */
-  get(name: string): Promise<EgressHandlerMetadata | null>;
+  /** Get handler by name within a workspace */
+  get(workspaceId: string, name: string): Promise<EgressHandlerMetadata | null>;
 
-  /** List egress handlers */
-  list(enabledOnly?: boolean): Promise<EgressHandlerMetadata[]>;
+  /** List egress handlers in a workspace */
+  list(workspaceId: string, enabledOnly?: boolean): Promise<EgressHandlerMetadata[]>;
 
-  /** Search egress handlers */
-  search(query: string, limit: number): Promise<EgressHandlerMetadata[]>;
+  /** Search egress handlers within a workspace */
+  search(workspaceId: string, query: string, limit: number): Promise<EgressHandlerMetadata[]>;
+}
+
+/**
+ * Workspace repository - manages workspaces and memberships
+ */
+export interface WorkspaceRepository {
+  /** Get workspace by ID */
+  getById(id: string): Promise<Workspace | null>;
+
+  /** Get workspace by slug */
+  getBySlug(slug: string): Promise<Workspace | null>;
+
+  /** Create new workspace */
+  create(workspace: Omit<Workspace, "createdAt" | "updatedAt">): Promise<Workspace>;
+
+  /** List workspaces for a user */
+  listForUser(userId: string): Promise<Workspace[]>;
+
+  /** Check if user is member of workspace */
+  isMember(workspaceId: string, userId: string): Promise<boolean>;
+
+  /** Get user's role in workspace */
+  getUserRole(workspaceId: string, userId: string): Promise<WorkspaceRole | null>;
+
+  /** Add user to workspace */
+  addMembership(membership: Omit<WorkspaceMembership, "joinedAt" | "updatedAt">): Promise<void>;
+
+  /** Remove user from workspace */
+  removeMembership(workspaceId: string, userId: string): Promise<void>;
 }
 
 /**
@@ -335,10 +417,11 @@ export interface DataLayer {
   runtime: SessionRuntimeRepository;
   storedCode: StoredCodeRepository;
   egressHandlers: EgressHandlerRepository;
+  workspaces: WorkspaceRepository;
   snapshots: SnapshotRepository;
 
-  /** Search across all collections */
-  search(query: string, limit: number): Promise<SearchResults>;
+  /** Search across stored code and egress handlers in a workspace */
+  search(workspaceId: string, query: string, limit: number): Promise<SearchResults>;
 }
 
 // =============================================================================
@@ -351,7 +434,7 @@ export interface DataLayer {
  */
 export interface Datastore {
   upsertStoredCode(entry: UpsertStoredCodeParams): Promise<void>;
-  getStoredCode(name: string): Promise<StoredCodeEntry | null>;
-  listEgressHandlers(enabledOnly: boolean): Promise<EgressHandlerMetadata[]>;
-  search(collection: string, query: string, limit: number): Promise<SearchResults>;
+  getStoredCode(workspaceId: string, name: string): Promise<StoredCodeEntry | null>;
+  listEgressHandlers(workspaceId: string, enabledOnly: boolean): Promise<EgressHandlerMetadata[]>;
+  search(workspaceId: string, query: string, limit: number): Promise<SearchResults>;
 }

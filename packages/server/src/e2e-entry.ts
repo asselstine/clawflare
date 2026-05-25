@@ -49,13 +49,19 @@ export default {
 
     if (path === "/__test/store-code" && request.method === "POST") {
       const body = await request.json<{ name: string; code: string; description?: string; tags?: string[] }>();
-      await getDataLayer(env).storedCode.upsert(body);
+      await getDataLayer(env).storedCode.upsert({
+        workspaceId: "default-workspace",
+        name: body.name,
+        code: body.code,
+        description: body.description,
+        tags: body.tags,
+      });
       return Response.json({ ok: true });
     }
 
     if (path === "/__test/search" && request.method === "GET") {
       const query = url.searchParams.get("q") || "*";
-      const results = await getDataLayer(env).search(query, 20);
+      const results = await getDataLayer(env).search("default-workspace", query, 20);
       return Response.json({
         ok: true,
         results: {
@@ -67,7 +73,7 @@ export default {
 
     if (path === "/__test/execute-stored-code" && request.method === "POST") {
       const body = await request.json<{ name: string; input?: unknown }>();
-      const entry = await getDataLayer(env).storedCode.get(body.name);
+      const entry = await getDataLayer(env).storedCode.get("default-workspace", body.name);
       if (!entry) return Response.json({ ok: false, error: "Code not found" }, { status: 404 });
       return Response.json(await executeDynamicWorker(env, ctx, entry.code, body.input));
     }

@@ -18,6 +18,7 @@ export type SessionStatus =
  */
 export interface SessionMetadataState {
   id: string;
+  workspaceId: string;
   workflowId: string;
   status: SessionStatus;
   nextEventCursor: string;

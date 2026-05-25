@@ -56,17 +56,24 @@ function validateName(name: string): void {
  */
 export interface ToolContext {
   sessionId?: string;
+  workspaceId?: string;
 }
 
 /**
  * Create core built-in tools (store_code, execute_stored_code, execute_code, search)
  */
-function createCoreTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
+function createCoreTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
+  const workspaceId = toolCtx?.workspaceId;
+  if (!workspaceId) {
+    // Fallback: tools will error if no workspace context - this is intentional
+    // for the transition period before full workspace auth is in place
+    console.warn("[tools] No workspaceId in ToolContext - using default");
+  }
   return [
-    createStoreCodeTool(env),
-    createExecuteStoredCodeTool(env, ctx),
-    createExecuteCodeTool(env, ctx),
-    createSearchTool(env),
+    createStoreCodeTool(env, ctx, toolCtx),
+    createExecuteStoredCodeTool(env, ctx, toolCtx),
+    createExecuteCodeTool(env, ctx, toolCtx),
+    createSearchTool(env, ctx, toolCtx),
   ];
 }
 
@@ -90,14 +97,19 @@ export function createContainerToolsIfAvailable(
  * de-packaging refactoring.
  */
 export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
-  const coreTools = createCoreTools(env, ctx);
+  const coreTools = createCoreTools(env, ctx, toolCtx);
   const containerTools = createContainerToolsIfAvailable(env, toolCtx);
   
   return [...coreTools, ...containerTools];
 }
 
+// Default workspace for backward compatibility during transition
+const DEFAULT_WORKSPACE_ID = "default-workspace";
+
 // Tool: Store code for later execution
-function createStoreCodeTool(env: Env): AgentTool {
+function createStoreCodeTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool {
+  const workspaceId = toolCtx?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+
   return {
     name: "store_code",
     description:
@@ -119,6 +131,7 @@ function createStoreCodeTool(env: Env): AgentTool {
 
       const data = getDataLayer(env);
       await data.storedCode.upsert({
+        workspaceId,
         name: p.name,
         description: p.description || "",
         code: p.code,
@@ -126,14 +139,16 @@ function createStoreCodeTool(env: Env): AgentTool {
 
       return {
         content: [{ type: "text", text: `Stored code "${p.name}".` }],
-        details: { name: p.name, description: p.description },
+        details: { name: p.name, description: p.description, workspaceId },
       };
     },
   };
 }
 
 // Tool: Execute previously stored code
-function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
+function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool {
+  const workspaceId = toolCtx?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+
   return {
     name: "execute_stored_code",
     description:
@@ -159,10 +174,10 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
       validateName(p.name);
 
       const data = getDataLayer(env);
-      const stored = await data.storedCode.get(p.name);
+      const stored = await data.storedCode.get(workspaceId, p.name);
 
       if (!stored) {
-        throw new Error(`Code "${p.name}" not found. Use store_code to save it first.`);
+        throw new Error(`Code "${p.name}" not found in workspace. Use store_code to save it first.`);
       }
 
       const result = await executeDynamicWorker(env, ctx, stored.code, p.input);
@@ -176,7 +191,7 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext): AgentToo
 }
 
 // Tool: Execute code inline
-function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
+function createExecuteCodeTool(env: Env, ctx?: ExecutionContext, _toolCtx?: ToolContext): AgentTool {
   return {
     name: "execute_code",
     description:
@@ -207,7 +222,9 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext): AgentTool {
 }
 
 // Tool: Search stored code and egress handlers
-function createSearchTool(env: Env): AgentTool {
+function createSearchTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool {
+  const workspaceId = toolCtx?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+
   return {
     name: "search",
     description:
@@ -243,16 +260,16 @@ function createSearchTool(env: Env): AgentTool {
 
       if (collection === "stored_code") {
         results = {
-          storedCode: await data.storedCode.search(p.query ?? "*", limit),
+          storedCode: await data.storedCode.search(workspaceId, p.query ?? "*", limit),
           egressHandlers: [],
         };
       } else if (collection === "egress_handlers") {
         results = {
           storedCode: [],
-          egressHandlers: await data.egressHandlers.search(p.query ?? "*", limit),
+          egressHandlers: await data.egressHandlers.search(workspaceId, p.query ?? "*", limit),
         };
       } else {
-        results = await data.search(p.query ?? "*", limit);
+        results = await data.search(workspaceId, p.query ?? "*", limit);
       }
 
       const lines: string[] = [];
@@ -282,7 +299,7 @@ function createSearchTool(env: Env): AgentTool {
 
       return {
         content: [{ type: "text", text: lines.join("\n") }],
-        details: results,
+        details: { ...results, workspaceId },
       };
     },
   };

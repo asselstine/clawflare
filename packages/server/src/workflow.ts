@@ -117,19 +117,29 @@ async function appendErrorEvent(
   ]);
 }
 
+async function getSessionWorkspaceId(env: Env, sessionId: string): Promise<string> {
+  const dataLayer = getDataLayer(env);
+  const session = await dataLayer.sessions.findById(sessionId);
+  return session?.workspaceId ?? "default-workspace";
+}
+
 async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> {
   const componentsStart = timingStart();
   const components = await buildAgentComponents(env);
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
   
-  // Create tools without config - Phase 4 removed config-driven tools
-  const tools = createTools(env, undefined, { sessionId });
+  // Fetch workspace ID for session to scope tool operations
+  const workspaceId = await getSessionWorkspaceId(env, sessionId);
+  
+  // Create tools with workspace context - Phase 6 added workspace scoping
+  const tools = createTools(env, undefined, { sessionId, workspaceId });
   
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
     model: components.model.id,
     provider: components.model.provider,
     toolCount: tools.length,
     mockAI: shouldUseMockAI(env),
+    workspaceId,
   });
 
   return new Agent({
@@ -177,13 +187,19 @@ async function saveSessionMetadata(
   status: "processing" | "idle" | "error",
   errorMessage?: string,
 ): Promise<void> {
+  // Get existing session to preserve workspaceId
+  const existingSession = await dataLayer.sessions.findById(sessionId);
+  
   await dataLayer.sessions.save({
     id: sessionId,
+    workspaceId: existingSession?.workspaceId ?? "default-workspace",
     workflowId: (await dataLayer.runtime.getWorkflowId(sessionId)) ?? "",
     status,
     nextEventCursor: await dataLayer.events.latestCursor(sessionId),
     updatedAt: Date.now(),
     errorMessage,
+    maxQueueSize: existingSession?.maxQueueSize ?? 100,
+    idleTimeout: existingSession?.idleTimeout ?? "7 days",
   });
 }
 

@@ -8,6 +8,9 @@ import { json } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 
+// Default workspace for sessions until full auth is in place
+const DEFAULT_WORKSPACE_ID = "default-workspace";
+
 /**
  * Create a new empty session with workflow
  * Returns session ID immediately; workflow is created but idle
@@ -16,15 +19,18 @@ export async function handleCreateSession(request: Request, env: Env): Promise<R
   const requestStart = timingStart();
 
   try {
-    const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
+    const body = (await request.json().catch(() => ({}))) as { sessionId?: string; workspaceId?: string };
     const sessionId = body.sessionId || crypto.randomUUID();
     const workflowId = crypto.randomUUID();
+    // Use provided workspaceId or default - Phase 6 adds workspace scoping
+    const workspaceId = body.workspaceId || DEFAULT_WORKSPACE_ID;
 
     const data = getDataLayer(env);
 
-    // Initialize session state
+    // Initialize session state with workspace
     const initialState: SessionMetadataState = {
       id: sessionId,
+      workspaceId,
       workflowId,
       status: "idle" as const,
       nextEventCursor: await data.events.latestCursor(sessionId),
@@ -44,6 +50,7 @@ export async function handleCreateSession(request: Request, env: Env): Promise<R
 
     return json({
       id: sessionId,
+      workspaceId,
       messages: [],
       createdAt: initialState.updatedAt,
     });

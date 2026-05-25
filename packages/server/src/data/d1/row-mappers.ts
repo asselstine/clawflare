@@ -6,6 +6,9 @@ import type {
   SessionSummary,
   StoredCodeEntry,
   EgressHandlerMetadata,
+  Workspace,
+  WorkspaceMembership,
+  User,
 } from "../interfaces.js";
 import type { SessionStatus, SessionEvent } from "../../types.js";
 
@@ -13,8 +16,34 @@ import type { SessionStatus, SessionEvent } from "../../types.js";
 // D1 Row Types
 // =============================================================================
 
+export interface UserRow {
+  id: string;
+  email: string;
+  display_name: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkspaceRow {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface WorkspaceMembershipRow {
+  workspace_id: string;
+  user_id: string;
+  role: string;
+  joined_at: number;
+  updated_at: number;
+}
+
 export interface SessionRow {
   id: string;
+  workspace_id: string;
   workflow_id: string;
   status: string;
   next_event_cursor: number;
@@ -32,6 +61,7 @@ export interface SessionWithCountRow extends SessionRow {
 
 export interface SessionEventRow {
   session_id: string;
+  workspace_id: string | null;
   sequence: number;
   timestamp: number;
   type: string;
@@ -40,6 +70,7 @@ export interface SessionEventRow {
 
 export interface QueueRow {
   session_id: string;
+  workspace_id: string | null;
   sequence: number;
   event_json: string;
   created_at: number;
@@ -48,6 +79,7 @@ export interface QueueRow {
 // Runtime row type for storing workflow session and snapshot data
 export interface RuntimeRow {
   session_id: string;
+  workspace_id: string | null;
   active: number;
   workflow_session_json: string | null;
   snapshot_json: string | null;
@@ -55,6 +87,7 @@ export interface RuntimeRow {
 }
 
 export interface StoredCodeRow {
+  workspace_id: string;
   name: string;
   code: string;
   description: string | null;
@@ -64,6 +97,7 @@ export interface StoredCodeRow {
 }
 
 export interface EgressHandlerRow {
+  workspace_id: string;
   name: string;
   description: string;
   domains_json: string;
@@ -73,12 +107,52 @@ export interface EgressHandlerRow {
 }
 
 // =============================================================================
+// User Mappers
+// =============================================================================
+
+export function mapUserRow(row: UserRow): User {
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// =============================================================================
+// Workspace Mappers
+// =============================================================================
+
+export function mapWorkspaceRow(row: WorkspaceRow): Workspace {
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    description: row.description ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function mapWorkspaceMembershipRow(row: WorkspaceMembershipRow): WorkspaceMembership {
+  return {
+    workspaceId: row.workspace_id,
+    userId: row.user_id,
+    role: row.role as import("../interfaces.js").WorkspaceRole,
+    joinedAt: row.joined_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// =============================================================================
 // Session Mappers
 // =============================================================================
 
 export function mapSessionRow(row: SessionRow): SessionMetadataState {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     workflowId: row.workflow_id,
     status: row.status as SessionStatus,
     nextEventCursor: String(row.next_event_cursor),
@@ -93,6 +167,7 @@ export function mapSessionSummaryRow(row: SessionRow): SessionSummary {
   const status = row.status as SessionStatus;
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     workflowId: row.workflow_id,
     status,
     messageCount: 0, // Will need to query events for this
@@ -105,6 +180,7 @@ export function mapSessionSummaryRowWithCount(row: SessionWithCountRow): Session
   const status = row.status as SessionStatus;
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     workflowId: row.workflow_id,
     status,
     messageCount: row.event_count ?? 0,
@@ -140,6 +216,7 @@ export function mapQueueRow(row: QueueRow): { type: string; content?: string; ma
 
 export function mapStoredCodeRow(row: StoredCodeRow): StoredCodeEntry {
   return {
+    workspaceId: row.workspace_id,
     name: row.name,
     code: row.code,
     description: row.description ?? undefined,
@@ -155,6 +232,7 @@ export function mapStoredCodeRow(row: StoredCodeRow): StoredCodeEntry {
 
 export function mapEgressHandlerRow(row: EgressHandlerRow): EgressHandlerMetadata {
   return {
+    workspaceId: row.workspace_id,
     name: row.name,
     description: row.description,
     domains: JSON.parse(row.domains_json) as string[],

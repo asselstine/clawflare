@@ -1,4 +1,6 @@
 // D1 Session Repository Implementation
+// Workspace-scoped for multi-tenant data access
+
 import type {
   SessionRepository,
   SessionMetadataState,
@@ -10,7 +12,7 @@ import type { SessionRow } from "./row-mappers.js";
 import { mapSessionRow, mapSessionSummaryRowWithCount } from "./row-mappers.js";
 
 // Extended row type including event count from JOIN
-interface SessionWithCountRow extends SessionRow {
+interface SessionWithCountRowExt extends SessionRow {
   event_count: number;
   active?: number;
 }
@@ -25,11 +27,12 @@ export class D1SessionRepository implements SessionRepository {
       .prepare(
         `
         INSERT INTO sessions (
-          id, workflow_id, status, next_event_cursor,
+          id, workspace_id, workflow_id, status, next_event_cursor,
           updated_at, error_message, max_queue_size, idle_timeout
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
           workflow_id = excluded.workflow_id,
           status = excluded.status,
           next_event_cursor = excluded.next_event_cursor,
@@ -41,6 +44,7 @@ export class D1SessionRepository implements SessionRepository {
       )
       .bind(
         session.id,
+        session.workspaceId,
         session.workflowId,
         session.status,
         Number(session.nextEventCursor || 0),
@@ -55,14 +59,15 @@ export class D1SessionRepository implements SessionRepository {
       .prepare(
         `
         INSERT INTO session_counters (
-          session_id, next_queue_sequence, next_event_sequence, updated_at
+          session_id, workspace_id, next_queue_sequence, next_event_sequence, updated_at
         )
-        VALUES (?, 1, 1, ?)
+        VALUES (?, ?, 1, 1, ?)
         ON CONFLICT(session_id) DO UPDATE SET
+          workspace_id = excluded.workspace_id,
           updated_at = excluded.updated_at
       `
       )
-      .bind(session.id, session.updatedAt || now)
+      .bind(session.id, session.workspaceId, session.updatedAt || now)
       .run();
   }
 
@@ -71,13 +76,33 @@ export class D1SessionRepository implements SessionRepository {
       .prepare(
         `
         SELECT 
-          id, workflow_id, status, next_event_cursor,
+          id, workspace_id, workflow_id, status, next_event_cursor,
           updated_at, error_message, max_queue_size, idle_timeout
         FROM sessions
         WHERE id = ?
       `
       )
       .bind(sessionId)
+      .first<SessionRow>();
+
+    return row ? mapSessionRow(row) : null;
+  }
+
+  async findByIdInWorkspace(
+    workspaceId: string,
+    sessionId: string
+  ): Promise<SessionMetadataState | null> {
+    const row = await this.db
+      .prepare(
+        `
+        SELECT 
+          id, workspace_id, workflow_id, status, next_event_cursor,
+          updated_at, error_message, max_queue_size, idle_timeout
+        FROM sessions
+        WHERE id = ? AND workspace_id = ?
+      `
+      )
+      .bind(sessionId, workspaceId)
       .first<SessionRow>();
 
     return row ? mapSessionRow(row) : null;
@@ -133,6 +158,7 @@ export class D1SessionRepository implements SessionRepository {
   async list(filter: SessionListFilter): Promise<SessionSummary[]> {
     const limit = Math.min(filter.limit ?? 50, 100);
     const offset = filter.offset ?? 0;
+    const workspaceId = filter.workspaceId;
 
     // Single query with JOIN to get event counts efficiently
     let query: string;
@@ -141,37 +167,38 @@ export class D1SessionRepository implements SessionRepository {
     if (filter.status && filter.status !== "all") {
       query = `
         SELECT 
-          s.id, s.workflow_id, s.status, s.next_event_cursor,
+          s.id, s.workspace_id, s.workflow_id, s.status, s.next_event_cursor,
           s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
           COUNT(e.sequence) AS event_count,
           COALESCE(MAX(r.active), 0) AS active
         FROM sessions s
         LEFT JOIN session_events e ON e.session_id = s.id
         LEFT JOIN session_runtime r ON r.session_id = s.id
-        WHERE s.status = ?
+        WHERE s.workspace_id = ? AND s.status = ?
         GROUP BY s.id
         ORDER BY s.updated_at DESC
         LIMIT ? OFFSET ?
       `;
-      bindings = [filter.status, limit, offset];
+      bindings = [workspaceId, filter.status, limit, offset];
     } else {
       query = `
         SELECT 
-          s.id, s.workflow_id, s.status, s.next_event_cursor,
+          s.id, s.workspace_id, s.workflow_id, s.status, s.next_event_cursor,
           s.updated_at, s.error_message, s.max_queue_size, s.idle_timeout,
           COUNT(e.sequence) AS event_count,
           COALESCE(MAX(r.active), 0) AS active
         FROM sessions s
         LEFT JOIN session_events e ON e.session_id = s.id
         LEFT JOIN session_runtime r ON r.session_id = s.id
+        WHERE s.workspace_id = ?
         GROUP BY s.id
         ORDER BY s.updated_at DESC
         LIMIT ? OFFSET ?
       `;
-      bindings = [limit, offset];
+      bindings = [workspaceId, limit, offset];
     }
 
-    const result = await this.db.prepare(query).bind(...bindings).all<SessionWithCountRow>();
+    const result = await this.db.prepare(query).bind(...bindings).all<SessionWithCountRowExt>();
 
     return result.results.map(mapSessionSummaryRowWithCount);
   }
@@ -181,11 +208,11 @@ export class D1SessionRepository implements SessionRepository {
     let bindings: (string | number)[];
 
     if (filter.status && filter.status !== "all") {
-      query = `SELECT COUNT(*) as count FROM sessions WHERE status = ?`;
-      bindings = [filter.status];
+      query = `SELECT COUNT(*) as count FROM sessions WHERE workspace_id = ? AND status = ?`;
+      bindings = [filter.workspaceId, filter.status];
     } else {
-      query = `SELECT COUNT(*) as count FROM sessions`;
-      bindings = [];
+      query = `SELECT COUNT(*) as count FROM sessions WHERE workspace_id = ?`;
+      bindings = [filter.workspaceId];
     }
 
     const result = await this.db

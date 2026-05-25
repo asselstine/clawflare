@@ -105,8 +105,11 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       await dataLayer.sessions.save(existingSession);
     } else {
       workflowId = crypto.randomUUID();
+      // Phase 6: workspace-scoped sessions
+      const workspaceId = "default-workspace"; // Until full auth is in place
       const initialState: SessionMetadataState = {
         id: sessionId,
+        workspaceId,
         workflowId,
         status: "processing",
         nextEventCursor: "0",

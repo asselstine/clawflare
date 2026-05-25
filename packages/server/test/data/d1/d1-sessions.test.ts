@@ -4,6 +4,9 @@ import { describe, it, expect } from "vitest";
 import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
 import type { SessionMetadataState } from "../../../src/data/interfaces.js";
 
+// Default workspace for testing - Phase 6 adds workspace scoping
+const DEFAULT_WORKSPACE_ID = "test-workspace";
+
 // Mock D1Database for testing
 class MockD1Database {
   private data = new Map<string, Record<string, unknown>>();
@@ -69,9 +72,10 @@ describe("D1 Session Repository", () => {
     expect(D1SessionRepository).toBeDefined();
   });
 
-  it("SessionMetadataState type is valid", () => {
+  it("SessionMetadataState type is valid (workspace-scoped)", () => {
     const session: SessionMetadataState = {
       id: "test-session",
+      workspaceId: DEFAULT_WORKSPACE_ID, // Phase 6: workspace scoping
       workflowId: "workflow-123",
       status: "idle",
       nextEventCursor: "0",
@@ -82,6 +86,7 @@ describe("D1 Session Repository", () => {
     };
 
     expect(session.id).toBe("test-session");
+    expect(session.workspaceId).toBe(DEFAULT_WORKSPACE_ID);
     expect(session.status).toBe("idle");
   });
 });

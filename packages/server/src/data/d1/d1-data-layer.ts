@@ -9,6 +9,7 @@ import { D1SessionRuntimeRepository } from "./d1-runtime-state.js";
 import { D1StoredCodeRepository } from "./d1-stored-code.js";
 import { D1EgressHandlerRepository } from "./d1-egress-handlers.js";
 import { D1SnapshotRepository } from "./d1-snapshots.js";
+import { D1WorkspaceRepository } from "./d1-workspaces.js";
 
 /**
  * Create a DataLayer backed by D1
@@ -24,12 +25,13 @@ export function createD1DataLayer(db: D1Database): DataLayer {
     runtime: new D1SessionRuntimeRepository(db),
     storedCode,
     egressHandlers,
+    workspaces: new D1WorkspaceRepository(db),
     snapshots: new D1SnapshotRepository(db),
 
-    async search(query: string, limit: number): Promise<SearchResults> {
+    async search(workspaceId: string, query: string, limit: number): Promise<SearchResults> {
       const [storedCodeResults, egressResults] = await Promise.all([
-        storedCode.search(query, limit),
-        egressHandlers.search(query, limit),
+        storedCode.search(workspaceId, query, limit),
+        egressHandlers.search(workspaceId, query, limit),
       ]);
 
       return {
@@ -51,4 +53,5 @@ export {
   D1StoredCodeRepository,
   D1EgressHandlerRepository,
   D1SnapshotRepository,
+  D1WorkspaceRepository,
 };

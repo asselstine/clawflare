@@ -31,6 +31,12 @@ export type {
   UpsertEgressHandlerParams,
   SearchResults,
 
+  // User/Workspace types
+  Workspace,
+  User,
+  WorkspaceMembership,
+  WorkspaceRole,
+
   // Repository interfaces
   SessionRepository,
   SessionEventRepository,
@@ -39,6 +45,7 @@ export type {
   StoredCodeRepository,
   EgressHandlerRepository,
   SnapshotRepository,
+  WorkspaceRepository,
   DataLayer,
   Datastore,
 } from "./interfaces.js";
@@ -68,6 +75,7 @@ export {
   D1StoredCodeRepository,
   D1EgressHandlerRepository,
   D1SnapshotRepository,
+  D1WorkspaceRepository,
 } from "./d1/d1-data-layer.js";
 
 // =============================================================================
@@ -75,6 +83,9 @@ export {
 // =============================================================================
 
 export type {
+  UserRow,
+  WorkspaceRow,
+  WorkspaceMembershipRow,
   SessionRow,
   SessionWithCountRow,
   SessionEventRow,
@@ -85,6 +96,9 @@ export type {
 } from "./d1/row-mappers.js";
 
 export {
+  mapUserRow,
+  mapWorkspaceRow,
+  mapWorkspaceMembershipRow,
   mapSessionRow,
   mapSessionSummaryRowWithCount,
   mapSessionEventRow,

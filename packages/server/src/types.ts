@@ -80,6 +80,7 @@ export interface ChatRequest {
  */
 export interface SessionResponse {
   id: string;
+  workspaceId?: string;
   status: SessionStatus;
   messages: AgentMessage[];
   events: SessionEvent[];
