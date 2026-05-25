@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
-import { AgentClient } from "@clawflare/cli";
+import { AgentClient } from "@clawflare/cli/client";
 import { DEFAULT_RUNTIME_NAMES as runtimeNames } from "../../runtime/src/runtime-names.js";
 
 const TEST_TOKEN = "test-token-12345";
@@ -740,8 +740,18 @@ async function runManualTesting(url: string, token: string): Promise<void> {
   console.log(`   Token: ${token}`);
   console.log("\n   Press Ctrl+C to exit. The remote Worker is deleted when this process exits.\n");
 
-  const { runCli } = await import("@clawflare/cli");
-  await runCli(url, token);
+  const cliPath = pathResolve(process.cwd(), "..", "cli", "dist", "index.js");
+  const child = spawn("node", [cliPath, "--host", url, "--token", token], {
+    stdio: "inherit",
+    env: { ...process.env, CLAWFLARE_URL: url, CLAWFLARE_API_TOKEN: token },
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`CLI exited with code ${code}`));
+    });
+  });
 }
 
 function parseArgs(): { help: boolean; ui: boolean; keepAlive: boolean } {

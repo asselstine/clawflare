@@ -4,10 +4,45 @@
  */
 
 import { execSync } from "child_process";
-import * as fs from "fs/promises";
+import * as fs from "fs";
+import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import * as Module from "module";
 import { getConfigRuntimeNames } from "@clawflare/runtime/runtime-names";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+/**
+ * Resolve the path to the tsx binary.
+ * First tries to resolve from the CLI's dependencies, then falls back to global resolution.
+ */
+function resolveTsxPath(): string {
+  // First, try to resolve tsx from the CLI's own node_modules
+  const cliNodeModules = path.resolve(__dirname, "..", "..");
+  const cliTsxPath = path.join(cliNodeModules, "node_modules", ".bin", "tsx");
+  
+  try {
+    // Check if tsx exists at the CLI's location (sync version)
+    fs.accessSync(cliTsxPath);
+    return cliTsxPath;
+  } catch {
+    // Fallback: try to resolve tsx using Node's module resolution
+    try {
+      const require = Module.createRequire(import.meta.url);
+      const tsxMain = require.resolve("tsx");
+      // tsx main is at dist/loader.mjs or similar, bin is at dist/cli.mjs
+      const tsxDir = path.dirname(tsxMain);
+      return path.join(tsxDir, "cli.mjs");
+    } catch {
+      // Last resort: assume tsx is in PATH
+      return "tsx";
+    }
+  }
+}
+
+const tsxPath = resolveTsxPath();
 
 export interface AiConfig {
   provider?: string;
@@ -57,7 +92,7 @@ export class ConfigValidationError extends Error {
 export async function isClawflareProject(projectDir: string): Promise<boolean> {
   try {
     const configPath = path.join(projectDir, "clawflare.config.ts");
-    await fs.access(configPath);
+    await fsPromises.access(configPath);
     return true;
   } catch {
     return false;
@@ -73,7 +108,7 @@ export async function loadProjectConfig(projectDir: string): Promise<LoadedConfi
 
   // Check if config file exists
   try {
-    await fs.access(configPath);
+    await fsPromises.access(configPath);
   } catch {
     throw new ConfigValidationError(
       `No clawflare.config.ts found in ${projectDir}\n` +
@@ -81,37 +116,29 @@ export async function loadProjectConfig(projectDir: string): Promise<LoadedConfi
     );
   }
 
+  // Check if node_modules exists (dependencies installed)
+  const nodeModulesPath = path.join(projectDir, "node_modules");
   try {
-    // Use tsx to import the TypeScript config
-    // This imports the config and gets the default export
-    const tsxPath = path.join(projectDir, "node_modules", ".bin", "tsx");
-    const tsxCmd = `"${tsxPath}" --import "${configPath}" -e "console.log(JSON.stringify(require('${configPath.replace(/\\/g, "/")}').default || require('${configPath.replace(/\\/g, "/")}')))"`;
+    await fsPromises.access(nodeModulesPath);
+  } catch {
+    throw new ConfigValidationError(
+      `Dependencies not installed in ${projectDir}\n` +
+        "Run 'npm install' or equivalent to install dependencies"
+    );
+  }
 
-    // Fallback: try running tsx directly if available
-    let configJson: string;
-    try {
-      configJson = execSync(
-        `npx tsx --eval "import config from '${configPath.replace(/\\/g, "/")}'; console.log(JSON.stringify(config));"`,
-        {
-          cwd: projectDir,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, FORCE_COLOR: "0" },
-        }
-      );
-    } catch {
-      // Try alternative method: read and evaluate with ts-node or direct tsx
-      const result = execSync(
-        `node --import tsx -e "import config from '${configPath.replace(/\\/g, "/")}'; console.log(JSON.stringify(config));"`,
-        {
-          cwd: projectDir,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-          env: { ...process.env, FORCE_COLOR: "0" },
-        }
-      );
-      configJson = result;
-    }
+  try {
+    // Use tsx from the CLI's own node_modules to import the TypeScript config
+    const importPath = configPath.replace(/\\/g, "/");
+    const configJson = execSync(
+      `"${tsxPath}" --eval "import config from '${importPath}'; console.log(JSON.stringify(config));"`,
+      {
+        cwd: projectDir,
+        encoding: "utf-8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, FORCE_COLOR: "0" },
+      }
+    );
 
     const config = JSON.parse(configJson.trim()) as ClawflareConfig;
 
@@ -134,9 +161,8 @@ export async function loadProjectConfig(projectDir: string): Promise<LoadedConfi
         (error instanceof Error ? error.message : String(error)) +
         "\n\nMake sure:\n" +
         "1. You're in a Clawflare project directory\n" +
-        "2. You've run 'npm install' or equivalent\n" +
-        "3. Your clawflare.config.ts has a default export\n" +
-        '4. Example: export default defineClawflareConfig({ name: "my-agent" })'
+        "2. Your clawflare.config.ts has a default export\n" +
+        '3. Example: export default defineClawflareConfig({ name: "my-agent" })'
     );
   }
 }

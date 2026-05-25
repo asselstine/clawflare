@@ -35,7 +35,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { AgentClient } from "@clawflare/cli";
+import { AgentClient } from "@clawflare/cli/client";
 
 const TEST_TOKEN = "test-token-12345";
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
