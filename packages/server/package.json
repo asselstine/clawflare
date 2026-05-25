@@ -1,8 +1,8 @@
 {
-  "name": "@clawflare/runtime",
+  "name": "@clawflare/server",
   "version": "0.1.0",
   "private": true,
-  "description": "Clawflare Agent runtime - runs in Cloudflare Workers with pi-agent-core",
+  "description": "Clawflare Server - runs in Cloudflare Workers with pi-agent-core",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -36,3 +36,4 @@
     "wrangler": "^4.90.1"
   }
 }
+

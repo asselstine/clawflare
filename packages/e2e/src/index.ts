@@ -13,10 +13,10 @@ import { randomUUID } from "node:crypto";
 import { rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli/client";
-import { DEFAULT_RUNTIME_NAMES as runtimeNames } from "../../runtime/src/runtime-names.js";
+import { DEFAULT_SERVER_NAMES as runtimeNames } from "../../server/src/server-names.js";
 
 const TEST_TOKEN = "test-token-12345";
-const HARNESS_DIR = pathResolve(process.cwd(), "..", "runtime");
+const HARNESS_DIR = pathResolve(process.cwd(), "..", "server");
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
 
 interface RemoteDeployment {

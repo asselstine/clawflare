@@ -6,9 +6,9 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
-    "deploy": "cd packages/runtime && pnpm run deploy",
+    "deploy": "cd packages/server && pnpm run deploy",
     "deploy:prod": "pnpm run deploy",
-    "dev": "cd packages/runtime && npx wrangler dev src/index.ts",
+    "dev": "cd packages/server && npx wrangler dev src/index.ts",
     "test": "pnpm -r test",
     "test:unit": "pnpm -r --filter=!@clawflare/e2e test",
     "test:e2e": "cd packages/e2e && node --import=tsx src/index.ts",

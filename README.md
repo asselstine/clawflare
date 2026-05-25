@@ -125,7 +125,7 @@ See `examples/` folder for complete working projects:
 clawflare/
 ├── packages/
 │   ├── cli/                # Published as "clawflare"
-│   ├── runtime/            # Published as "@clawflare/runtime"
+│   ├── server/             # Cloudflare Worker server implementation
 │   ├── egress-core/        # Published as "@clawflare/egress-core"
 │   ├── github/             # Published as "@clawflare/github"
 │   ├── cloudflare/         # Published as "@clawflare/cloudflare"
@@ -160,7 +160,7 @@ pnpm build
 pnpm typecheck
 
 # Run tests
-pnpm --filter @clawflare/runtime test
+pnpm --filter @clawflare/server test
 
 # Run E2E tests
 pnpm test:e2e
@@ -170,7 +170,7 @@ pnpm test:e2e
 
 ```bash
 # Build package
-pnpm --filter @clawflare/runtime build
+pnpm --filter @clawflare/server build
 
 # Run dev server
 pnpm dev
@@ -179,11 +179,11 @@ pnpm dev
 pnpm deploy:prod
 
 # Run harness tests
-pnpm --filter @clawflare/runtime test
+pnpm --filter @clawflare/server test
 
 # Apply D1 migrations
-pnpm --filter @clawflare/runtime db:migrations:apply:local
-pnpm --filter @clawflare/runtime db:migrations:apply:remote
+pnpm --filter @clawflare/server db:migrations:apply:local
+pnpm --filter @clawflare/server db:migrations:apply:remote
 ```
 
 ### Container Workspace
@@ -192,7 +192,7 @@ Requires Cloudflare Containers feature.
 
 ```bash
 # Build container image
-cd packages/runtime/container-runtime
+cd packages/server/container-runtime
 docker build -t clawflare-container .
 ```
 

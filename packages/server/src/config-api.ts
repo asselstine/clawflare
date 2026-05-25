@@ -7,7 +7,7 @@ import type { Env } from "./internal-types/index.js";
 import type { ToolContext } from "./tools/index.js";
 import { handleHttpRequest } from "./http/router.js";
 import { createEgressRegistry as createBaseEgressRegistry } from "./egress/registry.js";
-import { getConfigRuntimeNames } from "./runtime-names.js";
+import { getConfigServerNames } from "./server-names.js";
 
 // =============================================================================
 // Configuration Types
@@ -119,7 +119,7 @@ export function defineClawflareConfig(config: ClawflareConfig): ClawflareConfig 
  * Normalize and validate configuration
  */
 export function normalizeConfig(config: ClawflareConfig): Required<ClawflareConfig> {
-  const runtimeNames = getConfigRuntimeNames(config);
+  const runtimeNames = getConfigServerNames(config);
 
   return {
     name: config.name,

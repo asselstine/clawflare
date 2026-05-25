@@ -1,5 +1,5 @@
 // API Types for Clawflare CLI
-// Duplicated from @clawflare/runtime to avoid package dependency
+// Duplicated from @clawflare/server to avoid package dependency
 // These types are frozen and match the server API contract
 
 import type { AgentMessage, AgentEvent } from "@earendil-works/pi-agent-core";

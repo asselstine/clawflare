@@ -127,22 +127,22 @@ export {
   getRuntimeConfig,
 } from "./config-api.js";
 
-// Export runtime naming helpers
+// Export server naming helpers
 export {
-  DEFAULT_RUNTIME_NAMES,
-  resolveRuntimeNames,
-  getConfigRuntimeNames,
+  DEFAULT_SERVER_NAMES,
+  resolveServerNames,
+  getConfigServerNames,
   getConfigWorkerName,
   getConfigWorkflowName,
-} from "./runtime-names.js";
+} from "./server-names.js";
 
 export type {
-  RuntimeNames,
-  RuntimeNameOverrides,
-  RuntimeCloudflarePreferences,
-  RuntimeNameConfigLike,
-  ConfigRuntimeNames,
-} from "./runtime-names.js";
+  ServerNames,
+  ServerNameOverrides,
+  ServerCloudflarePreferences,
+  ServerNameConfigLike,
+  ConfigServerNames,
+} from "./server-names.js";
 
 // Export config types
 export type {

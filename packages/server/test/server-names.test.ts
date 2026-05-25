@@ -1,21 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_RUNTIME_NAMES,
-  getConfigRuntimeNames,
-  resolveRuntimeNames,
-} from "../src/runtime-names.js";
+  DEFAULT_SERVER_NAMES,
+  getConfigServerNames,
+  resolveServerNames,
+} from "../src/server-names.js";
 
-describe("runtime names", () => {
+describe("server names", () => {
   it("returns the built-in defaults", () => {
-    expect(resolveRuntimeNames()).toEqual(DEFAULT_RUNTIME_NAMES);
+    expect(resolveServerNames()).toEqual(DEFAULT_SERVER_NAMES);
   });
 
   it("applies explicit overrides", () => {
-    expect(resolveRuntimeNames({ workerName: "custom-worker" }).workerName).toBe("custom-worker");
+    expect(resolveServerNames({ workerName: "custom-worker" }).workerName).toBe("custom-worker");
   });
 
-  it("derives project runtime names from config", () => {
-    expect(getConfigRuntimeNames({ name: "my-agent" })).toEqual({
+  it("derives project server names from config", () => {
+    expect(getConfigServerNames({ name: "my-agent" })).toEqual({
       workerName: "my-agent",
       workflowName: "my-agent-workflow",
     });
@@ -23,7 +23,7 @@ describe("runtime names", () => {
 
   it("folds in cloudflare name preferences and env suffixes", () => {
     expect(
-      getConfigRuntimeNames(
+      getConfigServerNames(
         {
           name: "my-agent",
           cloudflare: {

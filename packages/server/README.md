@@ -1,6 +1,6 @@
-# Clawflare Runtime
+# Clawflare Server
 
-`@clawflare/runtime` is the Cloudflare Worker runtime for Clawflare agents. It provides the Worker entrypoint, Durable Object bindings, workflow integration, data layer, HTTP routes, WebSocket session handling, and runtime extension APIs.
+`@clawflare/server` is the Cloudflare Worker implementation of the Clawflare hosted server. It provides the Worker entrypoint, Durable Object bindings, workflow integration, data layer, HTTP routes, WebSocket session handling, and server integrations.
 
 ## Quick Start
 
@@ -8,19 +8,19 @@ From the repository root:
 
 ```bash
 pnpm install
-pnpm --filter @clawflare/runtime dev
+pnpm --filter @clawflare/server dev
 ```
 
-Or from the runtime package directory:
+Or from the server package directory:
 
 ```bash
-cd packages/runtime
+cd packages/server
 pnpm dev
 ```
 
 ## Configuration
 
-The runtime uses a checked-in `wrangler.jsonc` as the source of truth. Edit this file directly for configuration changes.
+The server uses a checked-in `wrangler.jsonc` as the source of truth. Edit this file directly for configuration changes.
 
 ### Required Configuration
 
@@ -52,7 +52,7 @@ npx wrangler d1 list
 
 ## Cloudflare Bindings
 
-The harness uses:
+The server uses:
 
 - `DB` D1 database for persistent sessions, events, stored code, and egress handler metadata
 - `WEBSOCKET_SESSION` Durable Object for WebSocket connections
@@ -141,10 +141,6 @@ GitHub REST API requests receive API-specific headers and optional `GITHUB_TOKEN
 
 Enabled handler metadata is stored in D1.
 
-## Skills
-
-Skills are not stored or served by the harness. The CLI loads generic Agent Skills locally from `~/.agents/skills/` and project `.agents/skills/` directories, then includes relevant skill context in prompts sent to the harness.
-
 ## Deployment
 
 For production deployment:
@@ -155,4 +151,4 @@ For production deployment:
 pnpm deploy
 ```
 
-The deploy script will check and set required secrets from environment variables before deploying.
+The deploy script will check and set
