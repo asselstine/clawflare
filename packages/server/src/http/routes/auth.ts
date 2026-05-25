@@ -2,7 +2,7 @@
 // Handles CLI authentication flow and OAuth callbacks
 
 import type { Env } from "../../internal-types/index.js";
-import { json, badRequest, unauthorized, serverError } from "../responses.js";
+import { json, badRequest, serverError } from "../responses.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 
@@ -387,7 +387,7 @@ async function hashToken(token: string): Promise<string> {
  * GET /v1/me
  */
 export async function handleGetMe(
-  request: Request,
+  _request: Request,
   env: Env,
   ctx: RequestContext
 ): Promise<Response> {
@@ -428,7 +428,7 @@ export async function handleGetMe(
  * POST /v1/auth/logout
  */
 export async function handleLogout(
-  request: Request,
+  _request: Request,
   env: Env,
   ctx: RequestContext
 ): Promise<Response> {

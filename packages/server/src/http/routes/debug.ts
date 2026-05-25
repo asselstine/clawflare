@@ -2,7 +2,7 @@
 // Inspect session details from D1
 
 import type { Env } from "../../internal-types/index.js";
-import { json, badRequest, notFound, serverError, forbidden } from "../responses.js";
+import { json, badRequest, notFound, serverError } from "../responses.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 

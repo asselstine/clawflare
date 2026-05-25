@@ -2,60 +2,75 @@
 
 Common issues and solutions.
 
-## Installation Issues
+## CLI Issues
 
-### Global install fails
+### "Not logged in. Run 'clawflare login' to authenticate."
 
-```bash
-# Try with explicit permission
-sudo npm install -g clawflare
-
-# Or use pnpm
-pnpm add -g clawflare
-
-# Or use npx (no install needed)
-npx clawflare init my-agent
-```
-
-## Deployment Issues
-
-### "No Cloudflare account found"
-
-**Cause:** Wrangler not authenticated.
+**Cause:** CLI token not stored locally.
 
 **Solution:**
 ```bash
-# Login to Cloudflare
-npx wrangler login
-
-# Or use API token
-export CLOUDFLARE_API_TOKEN=your-token
+clawflare login
 ```
 
-### "D1 database already exists"
+Or for self-hosted:
+```bash
+clawflare open --server <url> --token <token>
+```
 
-**Cause:** Database name conflicts with existing database.
+### "Authentication failed"
+
+**Cause:** Token is invalid or expired.
 
 **Solution:**
 ```bash
-# Option 1: Use different project name
-clawflare init my-agent-2
+# Re-authenticate
+clawflare logout
+clawflare login
+```
 
-# Option 2: Reuse existing database
-# Edit .clawflare/state.json and set d1DatabaseId
+### "Could not connect to server"
+
+**Cause:** Server URL is incorrect or server is down.
+
+**Solution:**
+```bash
+# Check server URL
+clawflare whoami
+
+# For self-hosted, verify the Worker is deployed
+curl https://your-worker.workers.dev/health
+```
+
+## Server Issues (Self-Hosted)
+
+### "No D1 database found"
+
+**Cause:** Database not created or ID incorrect.
+
+**Solution:**
+```bash
+cd packages/server
+
+# Create database
+wrangler d1 create clawflare
+
+# Update wrangler.jsonc with the database_id
 ```
 
 ### "Migrations failed"
 
-**Cause:** Migration already applied or schema conflict.
+**Cause:** Migration conflict or pending migrations.
 
 **Solution:**
 ```bash
-# Check migration status
-npx wrangler d1 migrations list <database>
+cd packages/server
 
-# Force apply (careful!)
-npx wrangler d1 migrations apply <database> --remote
+# Check migration status
+wrangler d1 migrations list clawflare
+
+# Apply pending migrations
+wrangler d1 migrations apply clawflare --remote
 ```
 
 ### "Worker deployment failed"
@@ -66,31 +81,14 @@ npx wrangler d1 migrations apply <database> --remote
    - Account: D1:Edit
    - Account: Account Settings:Read
 
-2. Worker name is unique:
+2. Required secrets are set:
 ```bash
-# Check existing workers
-npx wrangler whoami
+wrangler secret list
 ```
 
-3. Dependencies are built:
+3. TypeScript builds:
 ```bash
-pnpm build
-```
-
-## Runtime Issues
-
-### "API authentication failed"
-
-**Cause:** Missing or incorrect CLAWFLARE_API_TOKEN.
-
-**Solution:**
-```bash
-# Check token
-clawflare doctor
-
-# Regenerate token (in your .env)
-CLAWFLARE_API_TOKEN=$(openssl rand -hex 32)
-clawflare secret set CLAWFLARE_API_TOKEN
+pnpm typecheck
 ```
 
 ### "AI provider error"
@@ -99,29 +97,14 @@ clawflare secret set CLAWFLARE_API_TOKEN
 
 **Solution:**
 ```bash
-# Set provider-specific key
-clawflare secret set ANTHROPIC_API_KEY
+cd packages/server
+
+# Set provider key
+wrangler secret put AWS_BEARER_TOKEN_BEDROCK
 # or
-clawflare secret set OPENAI_API_KEY
+wrangler secret put ANTHROPIC_API_KEY
 # or
-clawflare secret set AWS_BEARER_TOKEN_BEDROCK
-```
-
-### "Container not available"
-
-**Cause:** Cloudflare Containers not enabled on account.
-
-**Solution:**
-Containers require an opt-in. Check your Cloudflare account settings or contact support.
-
-Workaround without containers:
-```typescript
-// Disable container tools
-export default defineClawflareConfig({
-  name: "my-agent",
-  // Container tools auto-enabled if available
-  // Use built-in tools instead
-});
+wrangler secret put OPENAI_API_KEY
 ```
 
 ## Local Development Issues
@@ -133,21 +116,29 @@ export default defineClawflareConfig({
 **Solution:**
 ```bash
 # Use different port
-clawflare dev --port 8788
+wrangler dev --port 8788
 
-# Or check for port conflicts
+# Check for port conflicts
 lsof -i :8787
 ```
 
 ### "Local D1 not found"
 
 ```bash
-# Initialize local D1
-npx wrangler d1 create clawflare-local --local
+cd packages/server
 
-# Or generate config again
-clawflare config generate
+# Apply local migrations
+pnpm db:migrations:apply:local
 ```
+
+## Container Issues
+
+### "Container not available"
+
+**Cause:** Cloudflare Containers not enabled on account.
+
+**Solution:**
+Containers require an opt-in. Check your Cloudflare account settings or contact support.
 
 ## Performance Issues
 
@@ -159,94 +150,68 @@ clawflare config generate
 3. Container warmup - container tools have initial delay
 
 **Optimize:**
-```typescript
-// Use faster model
-ai: {
-  provider: "cloudflare-workers-ai",
-  model: "@cf/meta/llama-3.1-8b-instruct"
-}
-```
-
-### High memory usage
-
-**Cause:** Large stored code or many sessions.
-
-**Solution:**
 ```bash
-# Clean up old sessions
-npx wrangler d1 execute <database> --remote --command "DELETE FROM sessions WHERE status = 'closed' AND updated_at < datetime('now', '-7 days');"
+# Use faster model
+AI_PROVIDER=cloudflare-workers-ai
+AI_MODEL=@cf/meta/llama-3.1-8b-instruct
 ```
 
 ## Debugging
 
-### Enable verbose logging
-
-```bash
-# CLI verbose mode
-clawflare deploy --verbose
-clawflare doctor --verbose
-```
-
 ### Check Worker logs
 
 ```bash
+cd packages/server
+
 # Stream logs
-clawflare logs
+pnpm logs
 
 # Or with Wrangler
-npx wrangler tail
+wrangler tail
 ```
 
-### Inspect generated config
+### Test server health
 
 ```bash
-# Print wrangler.jsonc
-clawflare config print
-
-# Save to file
-clawflare config print > wrangler-debug.jsonc
+curl https://your-worker.workers.dev/health
 ```
 
-### Test ingress locally
+### Check environment variables
 
 ```bash
-# Start dev server
-clawflare dev &
+cd packages/server
 
-# Test endpoint
-curl http://localhost:8787/health
+# List secrets
+wrangler secret list
 ```
 
 ## Getting Help
 
-1. Run diagnostics:
+1. Check server logs:
 ```bash
-clawflare doctor
+pnpm logs
 ```
 
-2. Check status:
+2. Verify configuration:
 ```bash
-clawflare status
+wrangler d1 migrations list clawflare
+wrangler secret list
 ```
 
-3. Review logs:
+3. Test connectivity:
 ```bash
-clawflare logs --tail 50
-```
-
-4. Check configuration:
-```bash
-clawflare config print
+curl https://your-worker.workers.dev/health
+curl https://your-worker.workers.dev/v1/tools -H "Authorization: Bearer <token>"
 ```
 
 ## Common Error Messages
 
 | Error | Likely Cause | Solution |
 |-------|-------------|----------|
-| `auth failed` | Wrong CLAWFLARE_API_TOKEN | Check .env, redeploy secrets |
+| `auth failed` | Wrong CLAWFLARE_API_TOKEN | Run `clawflare login` |
 | `no provider` | Missing AI API key | Set provider secret |
-| `database error` | D1 not created/migrated | Run migrations |
+| `database error` | D1 not migrated | Run migrations |
 | `worker not found` | Deploy failed | Check wrangler logs |
-| `egress denied` | No handler for domain | Add egress handler |
-| `container error` | Containers not enabled | Contact Cloudflare or disable |
-| `timeout` | Slow AI provider | Change provider or model |
+| `egress denied` | No handler for domain | Check egress configuration |
+| `container error` | Containers not enabled | Contact Cloudflare |
+| `timeout` | Slow AI provider | Change provider/model |

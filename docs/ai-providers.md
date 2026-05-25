@@ -1,89 +1,26 @@
 # AI Provider Configuration
 
-Configure different AI providers for your Clawflare agent.
+Configure AI providers for your self-hosted Clawflare server.
 
-## Overview
+## Supported Providers
 
-Clawflare supports multiple AI providers through the `pi-ai` abstraction:
+Clawflare supports multiple AI providers:
 
+- **Amazon Bedrock** - Minimax, Nova, and other models (default)
 - **Anthropic** - Claude models
-- **OpenAI** - GPT models  
-- **Amazon Bedrock** - Minimax, Nova, and other models
+- **OpenAI** - GPT models
 - **Cloudflare Workers AI** - Llama, Mistral, and other models
 
-## Anthropic
+## Configuration
 
-```typescript
-// clawflare.config.ts
-export default defineClawflareConfig({
-  name: "my-agent",
-  ai: {
-    provider: "anthropic",
-    model: "claude-3-5-sonnet-20241022"
-  }
-});
-```
+AI providers are configured via environment variables in `packages/server/.env`:
 
-**Setup:**
+### Amazon Bedrock (Default)
+
 ```bash
-# Set your API key
-clawflare secret set ANTHROPIC_API_KEY
-# or
-npx wrangler secret put ANTHROPIC_API_KEY
+AWS_BEARER_TOKEN_BEDROCK=your_aws_token
+AWS_REGION=us-east-1
 ```
-
-**Available models:**
-- `claude-3-5-sonnet-20241022`
-- `claude-3-5-haiku-20241022`
-- `claude-3-opus-20240229`
-
-## OpenAI
-
-```typescript
-export default defineClawflareConfig({
-  name: "my-agent",
-  ai: {
-    provider: "openai",
-    model: "gpt-4o"
-  }
-});
-```
-
-**Setup:**
-```bash
-clawflare secret set OPENAI_API_KEY
-```
-
-**Available models:**
-- `gpt-4o`
-- `gpt-4o-mini`
-- `gpt-4-turbo`
-
-## Amazon Bedrock (Default)
-
-```typescript
-export default defineClawflareConfig({
-  name: "my-agent",
-  ai: {
-    provider: "bedrock",
-    model: "minimax.minimax-m2.5"
-  }
-});
-```
-
-**Setup:**
-```bash
-# Option 1: Bearer token (temporary)
-clawflare secret set AWS_BEARER_TOKEN_BEDROCK
-
-# Option 2: AWS profile
-export AWS_PROFILE=your-profile
-```
-
-**Environment variables:**
-- `AWS_BEARER_TOKEN_BEDROCK` - AWS bearer token
-- `AWS_REGION` - AWS region (default: `us-east-1`)
-- `AWS_PROFILE` - AWS CLI profile name
 
 **Available models:**
 - `minimax.minimax-m2.5` (default)
@@ -91,19 +28,45 @@ export AWS_PROFILE=your-profile
 - `amazon.nova-lite-v1:0`
 - `mistral.mistral-large-2402-v1:0`
 
-## Cloudflare Workers AI
-
-```typescript
-export default defineClawflareConfig({
-  name: "my-agent",
-  ai: {
-    provider: "cloudflare-workers-ai",
-    model: "@cf/meta/llama-3.1-70b-instruct"
-  }
-});
+Set the default model in `packages/server/.env`:
+```bash
+AI_PROVIDER=amazon-bedrock
+AI_MODEL=minimax.minimax-m2.5
 ```
 
-**Setup:**
+### Anthropic
+
+```bash
+ANTHROPIC_API_KEY=your_anthropic_key
+AI_PROVIDER=anthropic
+AI_MODEL=claude-3-5-sonnet-20241022
+```
+
+**Available models:**
+- `claude-3-5-sonnet-20241022`
+- `claude-3-5-haiku-20241022`
+- `claude-3-opus-20240229`
+
+### OpenAI
+
+```bash
+OPENAI_API_KEY=your_openai_key
+AI_PROVIDER=openai
+AI_MODEL=gpt-4o
+```
+
+**Available models:**
+- `gpt-4o`
+- `gpt-4o-mini`
+- `gpt-4-turbo`
+
+### Cloudflare Workers AI
+
+```bash
+AI_PROVIDER=cloudflare-workers-ai
+AI_MODEL=@cf/meta/llama-3.1-8b-instruct
+```
+
 No additional API key needed - uses your Cloudflare account.
 
 **Available models:**
@@ -111,16 +74,20 @@ No additional API key needed - uses your Cloudflare account.
 - `@cf/meta/llama-3.1-8b-instruct`
 - `@cf/mistral/mistral-7b-instruct-v0.1`
 
-## Environment Variable Override
+## Setting Secrets
 
-Set provider and model via environment variables:
+Use Wrangler to set secrets on your deployed Worker:
 
 ```bash
-export AI_PROVIDER=anthropic
-export AI_MODEL=claude-3-5-sonnet-20241022
+cd packages/server
+
+wrangler secret put AWS_BEARER_TOKEN_BEDROCK
+wrangler secret put ANTHROPIC_API_KEY
+wrangler secret put AI_PROVIDER
+wrangler secret put AI_MODEL
 ```
 
-These override config file settings.
+For local development, set them in `.env`.
 
 ## Provider Comparison
 

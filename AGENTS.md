@@ -4,6 +4,27 @@
 
 **Clawflare** is an AI agent harness that runs on Cloudflare Workers, providing a durable, multi-turn agent execution environment with tool support. D1 is the source of truth for persisted sessions, events, input queues, runtime state, stored code, and egress handler metadata.
 
+## Architecture Decision: Thin Server Model
+
+Clawflare has moved from a "packaged project" model to a **thin server model**:
+
+**Old model (rejected):**
+- CLI generates per-user projects with `clawflare init`
+- Users deploy their own Workers with `clawflare deploy`
+- Generated Wrangler config
+- Public config API (`defineClawflareConfig`)
+
+**New model:**
+- **Hosted Clawflare** as the primary product
+- CLI is just an API client (`login`, `logout`, `whoami`, `open`)
+- Server deployed by maintainers using Wrangler directly
+- Checked-in `wrangler.jsonc` (no generation)
+- Direct server wiring (no public config API)
+
+Users can still self-host by cloning the repo and running `pnpm dev` / `pnpm deploy`.
+
+See `docs/architecture.md` for details.
+
 ## Package Structure
 
 ### 1. `packages/server/` - Core Cloudflare Worker
@@ -56,10 +77,26 @@
 
 ### 2. `packages/cli/` - TUI Client
 
+The CLI is an **API client**, not a deployment tool. It connects to a hosted Clawflare server or self-hosted instance.
+
+**Commands:**
+- `login` - Authenticate with Clawflare server
+- `logout` - Remove stored credentials
+- `whoami` - Show current auth status
+- `open` - Launch the TUI
+
+**Files:**
 - `src/client.ts` - `AgentClient` class - HTTP client for harness API, session polling, and WebSocket connection
 - `src/tui-app.ts` - `ClawflareTUIApp` class - Full TUI using `@earendil-works/pi-tui`
-- `src/skills.ts` - Agent Skills loader from `~/.agents/skills/` and project `.agents/skills/`
-- `src/index.ts` - Entry point, argument parsing, `runCli()` function
+- `src/skills.ts` - Agent Skills loader from `~/.agents/skills/`
+- `src/commands/login.ts` - Login/logout/whoami implementations
+- `src/commands/open.ts` - TUI launcher
+- `src/index.ts` - Entry point with Commander.js
+
+**Auth Storage:** OS-level config directory (not project-local):
+- macOS: `~/Library/Application Support/clawflare/config.json`
+- Linux: `~/.config/clawflare/config.json`
+- Windows: `%APPDATA%\clawflare\config.json`
 
 ### 3. `packages/egress-core/` - Shared Egress Types
 
@@ -117,15 +154,27 @@
 
 Harness uses `amazon-bedrock` with `minimax.minimax-m2.5` as defaults. Production deploys require real D1 database IDs in `packages/server/wrangler.jsonc` or an environment-specific Wrangler config.
 
+Server environment variables (set via Wrangler secrets):
+
 | Variable | Purpose |
 |----------|---------|
 | `CLAWFLARE_API_TOKEN` | Harness API authentication (required) |
-| `CF_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | Cloudflare API token for deploy/E2E; needs Workers Scripts:Edit, D1:Edit, Account Settings:Read |
 | `AI_PROVIDER` | AI provider (default: `amazon-bedrock`) |
 | `AI_MODEL` | Model ID (default: `minimax.minimax-m2.5`) |
 | `AWS_BEARER_TOKEN_BEDROCK` | AWS bearer token for Bedrock |
 | `AWS_REGION` | AWS region (default: `us-east-1`) |
+| `ANTHROPIC_API_KEY` | Anthropic API key |
+| `OPENAI_API_KEY` | OpenAI API key |
 | `MOCK_AI` | Enable mock AI mode for testing |
+| `CF_API_TOKEN` / `CLOUDFLARE_API_TOKEN` | Cloudflare API token for E2E tests |
+
+CLI environment variables:
+
+| Variable | Purpose |
+|----------|---------|
+| `CLAWFLARE_URL` | Clawflare server URL |
+| `CLAWFLARE_API_TOKEN` | API token for authentication |
+| `CLAWFLARE_WORKSPACE` | Default workspace ID |
 
 ## CI/CD
 

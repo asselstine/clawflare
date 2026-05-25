@@ -43,7 +43,7 @@ export async function handleGetContext(
  */
 export async function handleNewContext(
   request: Request,
-  env: Env,
+  _env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
   try {

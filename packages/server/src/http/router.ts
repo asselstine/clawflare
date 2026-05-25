@@ -26,22 +26,25 @@ import {
 // Legacy token authentication for backwards compatibility during transition
 import { validateHarnessToken, validateHarnessConfigured } from "./auth.js";
 
-/**
+/*
  * Routes that don't require authentication
- */
+ * Note: These are checked inline in handleHttpRequest below
+ * Kept for documentation/reference purposes
 const PUBLIC_ROUTES = [
   /^\/health$/,
   /^\/v1\/auth\/cli\/start$/,
   /^\/v1\/auth\/cli\/poll$/,
   /^\/v1\/auth\/github\/callback$/,
 ];
+*/
 
-/**
+/*
  * Check if a route is public (no auth required)
- */
+ * Currently unused - routes are checked inline
 function isPublicRoute(path: string): boolean {
   return PUBLIC_ROUTES.some((pattern) => pattern.test(path));
 }
+*/
 
 /**
  * Main HTTP request handler

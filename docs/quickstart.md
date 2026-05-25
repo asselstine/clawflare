@@ -1,54 +1,93 @@
 # Clawflare Quickstart
 
-Get up and running with Clawflare in minutes.
+Get up and running with Clawflare.
 
-## Prerequisites
+## Hosted Clawflare (Recommended)
 
-- Node.js 22+
-- pnpm 9+ (or npm/yarn)
-- Cloudflare account with API token
-
-## Install
+### 1. Install the CLI
 
 ```bash
 npm install -g clawflare
 ```
 
-## Create Your First Agent
+### 2. Login
 
 ```bash
-# Create a new project
-clawflare init my-agent
-cd my-agent
-
-# Install dependencies
-npm install
+clawflare login
 ```
 
-## Deploy
+This will:
+- Print a URL to open in your browser
+- Authenticate via OAuth
+- Store your credentials locally
+
+### 3. Open the TUI
 
 ```bash
-# One-command deploy
-clawflare deploy
-```
-
-The first deploy will:
-- Create a D1 database
-- Apply migrations
-- Set up secrets
-- Deploy your Worker
-- Save deployment state
-
-## Connect
-
-```bash
-# Open the TUI to chat with your agent
 clawflare open
+```
+
+Start chatting with your AI agent!
+
+## Self-Hosted Clawflare
+
+For self-hosting, you'll work with the repository directly.
+
+### Prerequisites
+
+- Node.js 22+
+- pnpm 9+
+- Cloudflare account with API token
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/asselstine/clawflare
+cd clawflare
+```
+
+### 2. Install Dependencies
+
+```bash
+pnpm install
+```
+
+### 3. Configure Environment
+
+```bash
+cp packages/server/.env.example packages/server/.env
+# Edit .env with your credentials
+```
+
+### 4. Run Local Development
+
+```bash
+# Start the dev server
+pnpm dev
+
+# Apply database migrations
+pnpm --filter @clawflare/server db:migrations:apply:local
+```
+
+### 5. Deploy
+
+```bash
+# Apply migrations to remote D1
+pnpm --filter @clawflare/server db:migrations:apply:remote
+
+# Deploy the Worker
+pnpm deploy
+```
+
+### 6. Connect with CLI
+
+```bash
+# Connect to your self-hosted instance
+clawflare open --server https://your-worker.workers.dev --token <your-token>
 ```
 
 ## Next Steps
 
-- [CLI Reference](./cli.md) - All available commands
-- [Configuration](./configuration.md) - Customize your agent
-- [Custom Tools](./custom-tools.md) - Add your own tools
-- [Custom Egress](./custom-egress.md) - Control outbound HTTP
+- [CLI Reference](./cli.md) - Learn all CLI commands
+- [Self-Hosting Guide](./self-hosting.md) - Detailed self-host instructions
+- [Architecture](./architecture.md) - Understand how Clawflare works

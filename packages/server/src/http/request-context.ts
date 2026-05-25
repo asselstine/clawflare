@@ -66,8 +66,6 @@ async function verifyCliToken(
   token: string,
   env: Env
 ): Promise<TokenVerificationResult | null> {
-  const data = getDataLayer(env);
-
   try {
     const tokenHash = await hashToken(token);
     const row = await env.DB.prepare(
@@ -120,7 +118,7 @@ async function getDefaultWorkspace(
     const workspaces = await data.workspaces.listForUser(userId);
 
     if (workspaces.length > 0) {
-      return workspaces[0];
+      return workspaces[0]!;
     }
 
     // Create a personal workspace for the user
