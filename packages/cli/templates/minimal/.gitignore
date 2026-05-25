@@ -1,7 +1,0 @@
-node_modules/
-dist/
-.env
-.dev.vars
-.clawflare/state.json
-.clawflare/wrangler.jsonc
-*.log

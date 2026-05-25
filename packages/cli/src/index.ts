@@ -5,178 +5,55 @@
  */
 
 import { Command } from "commander";
-import { config } from "dotenv";
-import {
-  configCommand,
-  deployCommand,
-  devCommand,
-  doctorCommand,
-  initCommand,
-  logsCommand,
-  openCommand,
-  statusCommand,
-} from "./commands/index.js";
-
-// Load .env file from current directory
-config({ path: ".env" });
+import { loginCommand, logoutCommand, whoamiCommand } from "./commands/login.js";
+import { openCommand } from "./commands/open.js";
 
 const program = new Command()
   .name("clawflare")
-  .description("Clawflare CLI - AI agent harness for Cloudflare Workers")
+  .description("Clawflare CLI - Client for the Clawflare hosted agent harness")
   .version("0.1.0");
 
-// init command
+// login command
 program
-  .command("init <name>")
-  .description("Create a new Clawflare project")
-  .option("-t, --template <template>", "Template to use (minimal, github, cloudflare, full)", "minimal")
-  .option("-p, --package-manager <pm>", "Package manager (npm, pnpm, yarn)")
-  .option("--no-install", "Skip dependency installation")
-  .option("--provider <provider>", "AI provider (amazon-bedrock, anthropic, openai)", "amazon-bedrock")
-  .option("--model <model>", "AI model")
-  .action(async (name: string, options: {
-    template: string;
-    packageManager?: string;
-    install: boolean;
-    provider: string;
-    model?: string;
-  }) => {
-    await initCommand(name, {
-      template: options.template,
-      packageManager: options.packageManager as "npm" | "pnpm" | "yarn" | undefined,
-      noInstall: !options.install,
-      provider: options.provider,
-      model: options.model,
-    });
+  .command("login")
+  .description("Authenticate with the Clawflare server")
+  .option("-s, --server <url>", "Clawflare server URL", "https://app.clawflare.dev")
+  .action(async (options: { server?: string }) => {
+    await loginCommand({ server: options.server });
   });
 
-// deploy command
+// logout command
 program
-  .command("deploy")
-  .description("Deploy the project to Cloudflare")
-  .option("-e, --env <environment>", "Environment (production, staging)")
-  .option("--print-config", "Print generated Wrangler config without deploying")
-  .option("-f, --force", "Force recreation of resources")
-  .option("--account-id <id>", "Override Cloudflare account ID")
-  .action(async (options: {
-    env?: string;
-    printConfig: boolean;
-    force: boolean;
-    accountId?: string;
-  }) => {
-    await deployCommand({
-      env: options.env,
-      printConfig: options.printConfig,
-      force: options.force,
-      accountId: options.accountId,
-    });
+  .command("logout")
+  .description("Remove stored authentication")
+  .action(async () => {
+    await logoutCommand();
+  });
+
+// whoami command
+program
+  .command("whoami")
+  .description("Show current authentication status")
+  .action(async () => {
+    await whoamiCommand();
   });
 
 // open command
 program
   .command("open")
   .description("Open the TUI for your agent")
-  .option("--host <url>", "Harness URL (overrides state)")
-  .option("--token <token>", "API token (overrides env)")
-  .option("--local", "Connect to local development server")
+  .option("-s, --server <url>", "Clawflare server URL")
+  .option("-t, --token <token>", "API token for authentication")
+  .option("-w, --workspace <workspace>", "Workspace to use")
   .action(async (options: {
-    host?: string;
+    server?: string;
     token?: string;
-    local: boolean;
+    workspace?: string;
   }) => {
     await openCommand({
-      host: options.host,
+      server: options.server,
       token: options.token,
-      local: options.local,
-    });
-  });
-
-// dev command
-program
-  .command("dev")
-  .description("Start local development server")
-  .option("-p, --port <port>", "Port to run on", parseInt)
-  .option("--local", "Use local mode")
-  .action(async (options: {
-    port?: number;
-    local: boolean;
-  }) => {
-    await devCommand({
-      port: options.port,
-      local: options.local,
-    });
-  });
-
-// doctor command
-program
-  .command("doctor")
-  .description("Check project health and configuration")
-  .action(async () => {
-    await doctorCommand();
-  });
-
-// status command
-program
-  .command("status")
-  .description("Show deployment status")
-  .action(async () => {
-    await statusCommand();
-  });
-
-// logs command
-program
-  .command("logs")
-  .description("Stream logs from the deployed Worker")
-  .option("-e, --env <environment>", "Environment (production, staging, local)")
-  .option("-f, --follow", "Follow logs in real-time (default: true)", true)
-  .option("--format <format>", "Output format (json, pretty)", "pretty")
-  .option("-n, --limit <number>", "Limit the number of log entries", parseInt)
-  .option("--since <time>", "Show logs since (e.g., 10m, 1h)")
-  .action(async (options: {
-    env?: string;
-    follow: boolean;
-    format: "json" | "pretty";
-    limit?: number;
-    since?: string;
-  }) => {
-    await logsCommand({
-      env: options.env,
-      follow: options.follow,
-      format: options.format,
-      limit: options.limit,
-      since: options.since,
-    });
-  });
-
-// config command
-const configCmd = program
-  .command("config")
-  .description("Configuration management");
-
-configCmd
-  .command("generate")
-  .description("Generate Wrangler configuration")
-  .option("-e, --env <environment>", "Environment (production, staging)")
-  .option("-o, --output <path>", "Output file path")
-  .action(async (options: {
-    env?: string;
-    output?: string;
-  }) => {
-    await configCommand("generate", {
-      env: options.env,
-      output: options.output,
-    });
-  });
-
-configCmd
-  .command("print")
-  .description("Print Wrangler configuration")
-  .option("-e, --env <environment>", "Environment (production, staging)")
-  .action(async (options: {
-    env?: string;
-  }) => {
-    await configCommand("print", {
-      env: options.env,
+      workspace: options.workspace,
     });
   });
 
