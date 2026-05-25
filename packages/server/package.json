@@ -10,6 +10,7 @@
     "dev:raw": "wrangler dev",
     "deploy": "node scripts/deploy.mjs",
     "timing:analyze": "node scripts/analyze-timing.mjs",
+    "logs": "wrangler tail",
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
