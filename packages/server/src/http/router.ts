@@ -13,21 +13,35 @@ import { handleCfDebug } from "./routes/debug.js";
 import {
   handleDeviceAuthStart,
   handleDeviceAuthPoll,
+  handleDeviceVerify,
+  handleDeviceApprove,
   handleGithubCallback,
-  handleGetMe,
+  handleRegister,
+  handleLogin,
   handleLogout,
+  handleGetMe,
+  handleForgotPassword,
+  handleResetPassword,
+  handleVerifyEmail,
+  handleGetAuthSession,
 } from "./routes/auth.js";
 import {
-  getBearerToken,
   resolveRequestContext,
 } from "./request-context.js";
 
 // Routes that don't require authentication
 const PUBLIC_ROUTES = [
   /^\/health$/,
+  /^\/v1\/auth\/register$/,
+  /^\/v1\/auth\/login$/,
   /^\/v1\/auth\/device\/start$/,
   /^\/v1\/auth\/device\/poll$/,
+  /^\/v1\/auth\/device\/verify$/,
+  /^\/v1\/auth\/device\/approve$/,
   /^\/v1\/auth\/github\/callback$/,
+  /^\/v1\/auth\/password\/forgot$/,
+  /^\/v1\/auth\/password\/reset$/,
+  /^\/v1\/auth\/email\/verify$/,
 ];
 
 /**
@@ -59,35 +73,85 @@ export async function handleHttpRequest(
     return json({ status: "ok" });
   }
 
-  // Auth routes - no authentication required
+  // ============= AUTH ROUTES (no auth required) =============
+
+  // POST /v1/auth/register
+  if (path === "/v1/auth/register" && request.method === "POST") {
+    return handleRegister(request, env);
+  }
+
+  // POST /v1/auth/login
+  if (path === "/v1/auth/login" && request.method === "POST") {
+    return handleLogin(request, env);
+  }
+
+  // POST /v1/auth/device/start
   if (path === "/v1/auth/device/start" && request.method === "POST") {
     return handleDeviceAuthStart(request, env);
   }
 
+  // POST /v1/auth/device/poll
   if (path === "/v1/auth/device/poll" && request.method === "POST") {
     return handleDeviceAuthPoll(request, env);
   }
 
+  // GET /v1/auth/device/verify - browser verification page
+  if (path === "/v1/auth/device/verify" && request.method === "GET") {
+    return handleDeviceVerify(request, env);
+  }
+
+  // POST /v1/auth/device/approve - approve/deny device
+  if (path === "/v1/auth/device/approve" && request.method === "POST") {
+    return handleDeviceApprove(request, env);
+  }
+
+  // GET /v1/auth/github/callback
   if (path === "/v1/auth/github/callback" && request.method === "GET") {
     return handleGithubCallback(request, env);
   }
 
-  // Check if this is a public route
+  // POST /v1/auth/password/forgot
+  if (path === "/v1/auth/password/forgot" && request.method === "POST") {
+    return handleForgotPassword(request, env);
+  }
+
+  // POST /v1/auth/password/reset
+  if (path === "/v1/auth/password/reset" && request.method === "POST") {
+    return handleResetPassword(request, env);
+  }
+
+  // GET /v1/auth/email/verify
+  if (path === "/v1/auth/email/verify" && request.method === "GET") {
+    return handleVerifyEmail(request, env);
+  }
+
+  // Check if this is a public route that wasn't matched above
   if (isPublicRoute(path)) {
     return notFound();
   }
 
-  // Authenticate all other requests
-  const token = getBearerToken(request);
-  if (!token) {
-    return unauthorized("Missing Authorization header");
-  }
+  // ============= AUTHENTICATED ROUTES =============
 
-  // Resolve request context from access token
-  const requestContext = await resolveRequestContext(token, env);
+  // Resolve request context (from bearer token or session cookie)
+  const requestContext = await resolveRequestContext(request, env);
 
   if (!requestContext) {
-    return unauthorized("Invalid token");
+    return unauthorized("Invalid or missing authentication");
+  }
+
+  // GET /v1/auth/session - get current session info
+  if (path === "/v1/auth/session" && request.method === "GET") {
+    return handleGetAuthSession(request, env, requestContext);
+  }
+
+  // POST /v1/auth/logout
+  if (path === "/v1/auth/logout" && request.method === "POST") {
+    return handleLogout(request, env, requestContext);
+  }
+
+  // GET /v1/me
+  if (path === "/v1/me" && request.method === "GET") {
+    return handleGetMe(request, env, requestContext);
   }
 
   // WebSocket upgrade for interactive workflow sessions
@@ -96,32 +160,20 @@ export async function handleHttpRequest(
     return env.WEBSOCKET_SESSION.get(id).fetch(request);
   }
 
-  // Route matching
-  // Use a simple switch on path prefix + method for clarity
-
-  // /v1/me - GET (current user info)
-  if (path === "/v1/me" && request.method === "GET") {
-    return handleGetMe(request, env, requestContext);
-  }
-
-  // /v1/auth/logout - POST
-  if (path === "/v1/auth/logout" && request.method === "POST") {
-    return handleLogout(request, env, requestContext);
-  }
+  // ============= APP ROUTES =============
 
   // /v1/chat - POST
   if (path === "/v1/chat" && request.method === "POST") {
     return handleChat(request, env, requestContext);
   }
 
-  // /v1/session - POST (create new session without prompt)
+  // /v1/session - POST
   if (path === "/v1/session" && request.method === "POST") {
     return await handleCreateSession(request, env, requestContext);
   }
 
   // /v1/session/:id - GET
   if ((path.match(/^\/v1\/session\/[^\/]+$/) || path.startsWith("/v1/session/")) && request.method === "GET") {
-    // Extract sessionId from path
     const sessionId = path.replace("/v1/session/", "").replace("/close", "").split("/")[0];
     if (sessionId && !path.includes("/close")) {
       return handleGetSession(sessionId, url, env, requestContext);

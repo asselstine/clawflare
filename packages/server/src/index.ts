@@ -101,6 +101,33 @@ export { normalizeBedrockBearerToken } from "./agent-config.js";
 // Export diagnostics
 export { logTiming, timingStart } from "./diagnostics.js";
 
+// Export auth utilities
+export {
+  hashPassword,
+  verifyPassword,
+  validatePasswordStrength,
+  normalizeEmail,
+  createAccessToken,
+  verifyAccessToken,
+  revokeAccessToken,
+  listAccessTokens,
+  createDeviceAuthorization,
+  approveDeviceAuthorization,
+  denyDeviceAuthorization,
+  pollDeviceAuthorization,
+  createWebSession,
+  verifyWebSession,
+  destroyWebSession,
+  getSessionCookie,
+  getClearSessionCookie,
+  extractSessionToken,
+  extractCsrfToken,
+  createEmailVerificationToken,
+  verifyEmailToken,
+  createPasswordResetToken,
+  verifyPasswordResetToken,
+} from "./auth/index.js";
+
 // Export core tools (config-driven tools removed in Phase 4)
 export {
   createTools,
