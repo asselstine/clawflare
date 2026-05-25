@@ -40,8 +40,8 @@
     {
       "binding": "DB",
       "database_name": "clawflare",
-      "database_id": "test-db-id",
-      "preview_database_id": "test-preview-db-id",
+      "database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
+      "preview_database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
       "migrations_dir": "migrations"
     }
   ],

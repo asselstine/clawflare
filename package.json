@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",
-    "deploy": "pnpm --filter @clawflare/server deploy",
+    "deploy": "cd packages/server && pnpm --filter @clawflare/server run deploy",
     "deploy:prod": "pnpm run deploy",
     "dev": "pnpm --filter @clawflare/server dev",
     "logs": "pnpm --filter @clawflare/server logs",

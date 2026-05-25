@@ -185,6 +185,8 @@ clawflare open --server https://your-worker.workers.dev --token <your-token>
 ### "No D1 database found"
 
 ```bash
+cd packages/server
+
 # Create database
 wrangler d1 create clawflare
 
@@ -194,6 +196,8 @@ wrangler d1 create clawflare
 ### "Migrations failed"
 
 ```bash
+cd packages/server
+
 # Check migrations status
 wrangler d1 migrations list clawflare
 
