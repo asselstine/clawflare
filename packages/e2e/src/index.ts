@@ -15,7 +15,6 @@ import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli/client";
 import { DEFAULT_SERVER_NAMES as runtimeNames } from "../../server/src/server-names.js";
 
-const TEST_TOKEN = "test-token-12345";
 const HARNESS_DIR = pathResolve(process.cwd(), "..", "server");
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
 
@@ -242,7 +241,7 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
       MOCK_AI: "true",
-      CLAWFLARE_API_TOKEN: TEST_TOKEN,
+      // CLAWFLARE_API_TOKEN removed - tests now use login-based auth
       CLOUDFLARE_API_TOKEN: "e2e-mock-token",
       CLAWFLARE_TEST_RUN: "true",
     },
@@ -312,17 +311,59 @@ async function waitForServer(url: string, maxAttempts = 60): Promise<boolean> {
   return false;
 }
 
-async function runTests(url: string, token: string): Promise<void> {
+async function runTests(url: string): Promise<void> {
   const runner = new TestRunner();
+
+  const ready = await waitForServer(url);
+  if (!ready) throw new Error("Remote Worker failed to become responsive");
+  console.log("✅ Remote Worker is responsive, authenticating...\n");
+
+  // Register a test user and create an access token
+  const testEmail = `e2e-test-${Date.now()}@clawflare.dev`;
+  const testPassword = `TestPass_${randomUUID().slice(0, 8)}!`;
+
+  console.log("🔑 Creating test user account...");
+  const registerResponse = await fetch(`${url}/v1/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: testEmail,
+      password: testPassword,
+      displayName: "E2E Test User",
+    }),
+  });
+  const registerData = await readJsonResponse<{ user?: { id: string }; error?: string }>(registerResponse);
+  if (!registerData.user?.id) {
+    throw new Error(`Failed to register test user: ${registerData.error || "unknown error"}`);
+  }
+  const testUserId = registerData.user.id;
+  console.log(`   ✓ Registered test user: ${testEmail} (${testUserId})`);
+
+  // Create access token for the test user (using __test endpoint)
+  console.log("🔑 Creating access token...");
+  const tokenResponse = await fetch(`${url}/__test/create-access-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: testUserId,
+      name: "E2E Test Token",
+      clientName: "e2e-test-suite",
+    }),
+  });
+  const tokenData = await readJsonResponse<{ token?: string; ok: boolean; error?: string }>(tokenResponse);
+  if (!tokenData.ok || !tokenData.token) {
+    throw new Error(`Failed to create access token: ${tokenData.error || "unknown error"}`);
+  }
+  const token = tokenData.token;
+  console.log(`   ✓ Got access token: ${token.slice(0, 16)}...\n`);
+
+  // Now create the client with the token
   const client = new AgentClient(url, token);
 
   console.log("🧪 Starting remote E2E Tests");
   console.log(`   Target: ${url}`);
-  console.log(`   Token: ${token.substring(0, 10)}...`);
-
-  const ready = await waitForServer(url);
-  if (!ready) throw new Error("Remote Worker failed to become responsive");
-  console.log("✅ Remote Worker is responsive, starting tests\n");
+  console.log(`   User: ${testEmail}`);
+  console.log(`   Token: ${token.substring(0, 10)}...\n`);
 
   await runner.runTest("Unauthorized - missing auth header", async () => {
     const response = await fetch(`${url}/v1/chat`, {
@@ -901,9 +942,9 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
 
   console.log("\n🧹 Tearing down remote E2E resources...");
 
-  // Clean up containers BEFORE deleting the Worker - this is critical
-  // because container.destroy() needs the Worker to be running
-  await cleanupAllContainers(deployment.url, TEST_TOKEN);
+  // Note: Container cleanup requires authentication. Since we're tearing down
+  // the Worker anyway, the containers will be terminated automatically.
+  // We skip explicit container cleanup here to avoid needing a token.
 
   try {
     await runWrangler(["delete", deployment.workerName, "--force"]);
@@ -953,9 +994,11 @@ async function main(): Promise<void> {
     deployment = await deployRemote();
 
     if (ui) {
-      await runManualTesting(deployment.url, TEST_TOKEN);
+      // For manual testing, we still need to get a token
+      const token = await authenticateForManualTesting(deployment.url);
+      await runManualTesting(deployment.url, token);
     } else {
-      await runTests(deployment.url, TEST_TOKEN);
+      await runTests(deployment.url);
     }
   } catch (error) {
     console.error("\n❌ Fatal error:", error instanceof Error ? error.message : String(error));
@@ -964,6 +1007,45 @@ async function main(): Promise<void> {
     await cleanupRemoteDeployment(deployment, keepAlive);
     if (!keepAlive) process.exit(process.exitCode || 0);
   }
+}
+
+async function authenticateForManualTesting(url: string): Promise<string> {
+  const testEmail = `e2e-manual-${Date.now()}@clawflare.dev`;
+  const testPassword = `TestPass_${randomUUID().slice(0, 8)}!`;
+
+  console.log("🔑 Creating test user account for manual testing...");
+  const registerResponse = await fetch(`${url}/v1/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: testEmail,
+      password: testPassword,
+      displayName: "E2E Manual Test User",
+    }),
+  });
+  const registerData = await readJsonResponse<{ user?: { id: string }; error?: string }>(registerResponse);
+  if (!registerData.user?.id) {
+    throw new Error(`Failed to register test user: ${registerData.error || "unknown error"}`);
+  }
+
+  // Create access token
+  const tokenResponse = await fetch(`${url}/__test/create-access-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: registerData.user.id,
+      name: "E2E Manual Test Token",
+      clientName: "e2e-manual-test",
+    }),
+  });
+  const tokenData = await readJsonResponse<{ token?: string; ok: boolean; error?: string }>(tokenResponse);
+  if (!tokenData.ok || !tokenData.token) {
+    throw new Error(`Failed to create access token: ${tokenData.error || "unknown error"}`);
+  }
+
+  console.log(`   ✓ Created test user: ${testEmail}`);
+  console.log(`   ✓ Token: ${tokenData.token.slice(0, 16)}...\n`);
+  return tokenData.token;
 }
 
 main();

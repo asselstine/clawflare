@@ -9,6 +9,7 @@ import type { Env } from "./internal-types/index.js";
 import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
 import { containerBash, containerLs, destroyContainer, getContainerHealth } from "./container/client.js";
+import { createAccessToken } from "./auth/access-tokens.js";
 
 export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer, ContainerProxy };
 
@@ -99,6 +100,20 @@ export default {
         payload = await response.text();
       }
       return Response.json({ ok: response.ok, status: response.status, body: payload });
+    }
+
+    // Create access token for E2E tests (allows login-based auth flow)
+    if (path === "/__test/create-access-token" && request.method === "POST") {
+      const body = await request.json<{ userId?: string; name?: string; clientName?: string }>();
+      const result = await createAccessToken(env, {
+        userId: body.userId || "e2e-test-user",
+        name: body.name || "E2E Test Token",
+        clientName: body.clientName || "e2e-test-client",
+      });
+      if (!result) {
+        return Response.json({ ok: false, error: "Failed to create access token" }, { status: 500 });
+      }
+      return Response.json({ ok: true, token: result.token, tokenId: result.id });
     }
 
     // Container test endpoints
