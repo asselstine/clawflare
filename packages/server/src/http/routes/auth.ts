@@ -10,12 +10,13 @@ import {
   verifyPassword,
   validatePasswordStrength,
   normalizeEmail,
-  createAccessToken,
   createWebSession,
   createDeviceAuthorization,
+  getDeviceAuthorizationByOAuthState,
   getDeviceAuthorizationByUserCode,
   denyDeviceAuthorization,
   pollDeviceAuthorization,
+  approveDeviceAuthorization,
   getSessionCookie,
   getClearSessionCookie,
   createEmailVerificationToken,
@@ -30,6 +31,7 @@ const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL = "https://api.github.com";
 
 const POLL_INTERVAL_SECONDS = 2;
+const GITHUB_SCOPES = "read:user user:email";
 
 // Email validation regex (basic)
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -290,20 +292,39 @@ export async function handleDeviceAuthStart(
   env: Env
 ): Promise<Response> {
   try {
-    const body = await request.json() as { clientName?: string };
+    const body = await request.json() as { clientName?: string; provider?: string };
     const clientName = sanitizeClientName(body.clientName);
+    const provider = body.provider || "github";
+
+    // Validate provider
+    if (provider !== "github") {
+      return badRequest("Only 'github' provider is supported");
+    }
 
     const result = await createDeviceAuthorization(env, clientName);
     if (!result) {
       return serverError("Failed to create device authorization");
     }
 
-    const verificationUrl = `${new URL(request.url).origin}/v1/auth/device/verify?code=${result.userCode}`;
+    const baseUrl = new URL(request.url).origin;
+    const verificationUrl = `${baseUrl}/v1/auth/device/verify?code=${result.userCode}`;
+
+    // Build GitHub OAuth authorize URL
+    const clientId = env.GITHUB_CLIENT_ID;
+    let authorizationUrl: string | undefined;
+
+    if (clientId) {
+      const redirectUri = `${baseUrl}/v1/auth/github/callback`;
+      const state = result.oauthState; // Use the secure random state
+      const scope = encodeURIComponent(GITHUB_SCOPES);
+      authorizationUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&state=${encodeURIComponent(state)}`;
+    }
 
     return json({
       deviceCode: result.deviceCode,
       userCode: result.userCode,
       verificationUrl,
+      authorizationUrl,
       expiresIn: 600, // 10 minutes in seconds
       interval: POLL_INTERVAL_SECONDS,
     });
@@ -590,19 +611,64 @@ export async function handleGithubCallback(
     const error = url.searchParams.get("error");
 
     if (error) {
-      return badRequest(`OAuth error: ${error}`);
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Error</title></head>
+<body>
+<h1>Authentication Error</h1>
+<p>GitHub returned an error: ${escapeHtml(error)}</p>
+<p>Please try again.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
     }
 
     if (!code || !state) {
-      return badRequest("Missing code or state");
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Error</title></head>
+<body>
+<h1>Authentication Error</h1>
+<p>Missing authorization code or state parameter.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
     }
 
-    // Parse state
-    let stateData: { flow?: string; deviceCode?: string; clientName?: string };
-    try {
-      stateData = JSON.parse(state);
-    } catch {
-      return badRequest("Invalid state parameter");
+    // Look up device authorization by OAuth state
+    const deviceAuth = await getDeviceAuthorizationByOAuthState(env, state);
+    
+    if (!deviceAuth) {
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Expired</title></head>
+<body>
+<h1>Authentication Expired</h1>
+<p>This authentication request has expired or is invalid.</p>
+<p>Please run <code>clawflare login</code> again in your terminal.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 410 }
+      );
+    }
+
+    if (deviceAuth.status !== "pending") {
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Already Processed</title></head>
+<body>
+<h1>Already Processed</h1>
+<p>This authentication request has already been ${deviceAuth.status}.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
     }
 
     // Exchange code for access token
@@ -610,7 +676,17 @@ export async function handleGithubCallback(
     const clientSecret = env.GITHUB_CLIENT_SECRET;
 
     if (!clientId || !clientSecret) {
-      return serverError("GitHub OAuth not configured");
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Configuration Error</title></head>
+<body>
+<h1>Configuration Error</h1>
+<p>GitHub OAuth is not configured on this server.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 500 }
+      );
     }
 
     const tokenResponse = await fetch(GITHUB_TOKEN_URL, {
@@ -632,7 +708,18 @@ export async function handleGithubCallback(
     };
 
     if (tokenData.error || !tokenData.access_token) {
-      return badRequest(`Token exchange failed: ${tokenData.error || "unknown error"}`);
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title></head>
+<body>
+<h1>Authentication Failed</h1>
+<p>Could not exchange authorization code with GitHub.</p>
+<p>Please try again.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
     }
 
     const githubAccessToken = tokenData.access_token;
@@ -673,11 +760,23 @@ export async function handleGithubCallback(
     }
 
     if (!email) {
-      return badRequest("Could not retrieve email from GitHub");
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Email Required</title></head>
+<body>
+<h1>Email Required</h1>
+<p>GitHub did not provide an email address.</p>
+<p>Please ensure your GitHub account has a verified email.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
     }
 
     const now = Date.now();
     const normalizedEmail = normalizeEmail(email);
+    const displayName = githubUser.name || githubUser.login;
 
     // Check if user exists
     const existingUser = await env.DB.prepare(
@@ -692,7 +791,7 @@ export async function handleGithubCallback(
       await env.DB.prepare(
         `UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?`
       )
-        .bind(githubUser.name || githubUser.login, now, userId)
+        .bind(displayName, now, userId)
         .run();
     } else {
       // Create new user
@@ -703,7 +802,7 @@ export async function handleGithubCallback(
         VALUES (?, ?, ?, ?, ?)
       `
       )
-        .bind(userId, normalizedEmail, githubUser.name || githubUser.login, now, now)
+        .bind(userId, normalizedEmail, displayName, now, now)
         .run();
 
       // Create personal workspace
@@ -725,69 +824,65 @@ export async function handleGithubCallback(
       });
     }
 
-    // Handle device authorization flow
-    if (stateData.flow === "device" && stateData.deviceCode) {
-      const clientName = stateData.clientName || "Unknown application";
-      const { token, id: tokenId } = await createAccessToken(env, {
-        userId,
-        name: "Device Authorization",
-        clientName,
-      }) || {};
+    // Approve the device authorization and store token for one-time retrieval
+    const approvalResult = await approveDeviceAuthorization(env, deviceAuth.deviceCode, userId);
 
-      if (!token || !tokenId) {
-        return serverError("Failed to create access token");
-      }
-
-      // Update device authorization
-      await env.DB.prepare(
-        `
-        UPDATE device_authorizations
-        SET user_id = ?,
-            access_token_id = ?,
-            status = 'approved',
-            approved_at = ?
-        WHERE device_code = ?
-      `
-      )
-        .bind(userId, tokenId, now, stateData.deviceCode)
-        .run();
-
-      // Return success HTML
+    if (!approvalResult) {
       return new Response(
         `<!DOCTYPE html>
 <html>
-<head><title>Authentication Complete</title></head>
+<head><title>Authentication Failed</title></head>
 <body>
-<h1>Authentication Complete</h1>
-<p>You can now close this window and return to ${escapeHtml(clientName)}.</p>
+<h1>Authentication Failed</h1>
+<p>Could not complete device authorization.</p>
+<p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" } }
+        { headers: { "Content-Type": "text/html" }, status: 500 }
       );
     }
 
-    // Web flow - create web session
-    const sessionResult = await createWebSession(env, userId);
-    if (!sessionResult) {
-      return serverError("Failed to create session");
-    }
-
-    const cookie = getSessionCookie(sessionResult.sessionToken, sessionResult.expiresAt);
-
+    // Return success HTML
     return new Response(
       `<!DOCTYPE html>
 <html>
-<head><title>Authentication Complete</title></head>
+<head>
+<title>Authentication Complete</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; text-align: center; }
+h1 { color: #4CAF50; }
+.success-icon { font-size: 64px; margin: 20px 0; }
+.instructions { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
+code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
+</style>
+</head>
 <body>
 <h1>Authentication Complete</h1>
-<p>You can now close this window or continue to <a href="/">Dashboard</a>.</p>
+<div class="success-icon">✓</div>
+<p>You are now authenticated with Clawflare.</p>
+<div class="instructions">
+<p>You can close this window and return to your terminal.</p>
+<p>Run <code>clawflare open</code> to start using Clawflare.</p>
+</div>
+<p><small>Clawflare CLI authentication successful</small></p>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html", "Set-Cookie": cookie } }
+      { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
     console.error("[handleGithubCallback] Error:", error);
-    return serverError(error instanceof Error ? error.message : "Unknown error");
+    return new Response(
+      `<!DOCTYPE html>
+<html>
+<head><title>Authentication Error</title></head>
+<body>
+<h1>Authentication Error</h1>
+<p>An unexpected error occurred.</p>
+<p>Please try again.</p>
+</body>
+</html>`,
+      { headers: { "Content-Type": "text/html" }, status: 500 }
+    );
   }
 }
 

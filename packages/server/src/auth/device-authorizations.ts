@@ -2,9 +2,22 @@
 // For CLI, mobile apps, and other clients
 
 import type { Env } from "../internal-types/index.js";
-import { createAccessToken } from "./access-tokens.js";
+import { createAccessToken, hashToken } from "./access-tokens.js";
 
 const DEVICE_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+/**
+ * Generate a random OAuth state value
+ * Used for secure state passing in OAuth flows
+ */
+function generateOAuthState(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
 /**
  * Generate a human-readable user code
@@ -29,6 +42,7 @@ function generateUserCode(): string {
 
 /**
  * Create a new device authorization
+ * Returns oauthState for building authorization URLs
  */
 export async function createDeviceAuthorization(
   env: Env,
@@ -36,27 +50,89 @@ export async function createDeviceAuthorization(
 ): Promise<{
   deviceCode: string;
   userCode: string;
+  oauthState: string;
   expiresAt: number;
 } | null> {
   try {
     const deviceCode = crypto.randomUUID();
     const userCode = generateUserCode();
+    const oauthState = generateOAuthState();
+    const oauthStateHash = await hashToken(oauthState);
     const now = Date.now();
     const expiresAt = now + DEVICE_CODE_TTL_MS;
     
     await env.DB.prepare(
       `
       INSERT INTO device_authorizations
-        (device_code, user_code, client_name, status, expires_at, created_at)
-      VALUES (?, ?, ?, 'pending', ?, ?)
+        (device_code, user_code, client_name, status, expires_at, created_at, oauth_state_hash)
+      VALUES (?, ?, ?, 'pending', ?, ?, ?)
     `
     )
-      .bind(deviceCode, userCode, clientName, expiresAt, now)
+      .bind(deviceCode, userCode, clientName, expiresAt, now, oauthStateHash)
       .run();
     
-    return { deviceCode, userCode, expiresAt };
+    return { deviceCode, userCode, oauthState, expiresAt };
   } catch (error) {
     console.error("[createDeviceAuthorization] Error:", error);
+    return null;
+  }
+}
+
+/**
+ * Get device authorization by OAuth state hash
+ * Used in OAuth callback to find the pending authorization
+ */
+export async function getDeviceAuthorizationByOAuthState(
+  env: Env,
+  oauthState: string
+): Promise<{
+  deviceCode: string;
+  clientName: string;
+  status: string;
+  expiresAt: number;
+} | null> {
+  try {
+    const oauthStateHash = await hashToken(oauthState);
+    
+    const row = await env.DB.prepare(
+      `
+      SELECT device_code, client_name, status, expires_at
+      FROM device_authorizations
+      WHERE oauth_state_hash = ?
+    `
+    )
+      .bind(oauthStateHash)
+      .first<{
+        device_code: string;
+        client_name: string;
+        status: string;
+        expires_at: number;
+      }>();
+    
+    if (!row) return null;
+    
+    // Check if expired
+    if (Date.now() > row.expires_at && row.status === "pending") {
+      await env.DB.prepare(
+        `
+        UPDATE device_authorizations
+        SET status = 'expired'
+        WHERE device_code = ?
+      `
+      )
+        .bind(row.device_code)
+        .run();
+      return null;
+    }
+    
+    return {
+      deviceCode: row.device_code,
+      clientName: row.client_name,
+      status: row.status,
+      expiresAt: row.expires_at,
+    };
+  } catch (error) {
+    console.error("[getDeviceAuthorizationByOAuthState] Error:", error);
     return null;
   }
 }
@@ -104,7 +180,8 @@ export async function getDeviceAuthorizationByUserCode(
 }
 
 /**
- * Approve a device authorization
+ * Approve a device authorization and store access token for one-time retrieval
+ * Returns the access token to be stored temporarily for the polling response
  */
 export async function approveDeviceAuthorization(
   env: Env,
@@ -158,18 +235,19 @@ export async function approveDeviceAuthorization(
     
     if (!tokenResult) return null;
     
-    // Update device authorization
+    // Update device authorization with token for one-time retrieval
     await env.DB.prepare(
       `
       UPDATE device_authorizations
       SET user_id = ?,
           access_token_id = ?,
+          access_token_plaintext = ?,
           status = 'approved',
           approved_at = ?
       WHERE device_code = ?
     `
     )
-      .bind(userId, tokenResult.id, now, deviceCode)
+      .bind(userId, tokenResult.id, tokenResult.token, now, deviceCode)
       .run();
     
     return { accessToken: tokenResult.token };
@@ -205,6 +283,7 @@ export async function denyDeviceAuthorization(
 
 /**
  * Poll device authorization status
+ * Returns access token exactly once via one-time retrieval
  */
 export async function pollDeviceAuthorization(
   env: Env,
@@ -220,7 +299,7 @@ export async function pollDeviceAuthorization(
   try {
     const row = await env.DB.prepare(
       `
-      SELECT status, expires_at, user_id, access_token_id
+      SELECT status, expires_at, user_id, access_token_id, access_token_plaintext, token_retrieved_at
       FROM device_authorizations
       WHERE device_code = ?
     `
@@ -231,6 +310,8 @@ export async function pollDeviceAuthorization(
         expires_at: number;
         user_id: string | null;
         access_token_id: string | null;
+        access_token_plaintext: string | null;
+        token_retrieved_at: number | null;
       }>();
     
     if (!row) return null;
@@ -260,11 +341,31 @@ export async function pollDeviceAuthorization(
       return { status: "pending" };
     }
     
-    // Get the access token from the database
-    // Note: We don't store the plaintext token, so the client must have saved it
-    // This is returned during the approval callback
+    // Device is approved - handle one-time token retrieval
+    // If token was already retrieved, return complete without token
+    if (row.token_retrieved_at || !row.access_token_plaintext) {
+      return {
+        status: "complete",
+        userId: row.user_id ?? undefined,
+      };
+    }
+    
+    // One-time token retrieval: clear the plaintext token and mark as retrieved
+    const accessToken = row.access_token_plaintext;
+    await env.DB.prepare(
+      `
+      UPDATE device_authorizations
+      SET access_token_plaintext = NULL,
+          token_retrieved_at = ?
+      WHERE device_code = ?
+    `
+    )
+      .bind(now, deviceCode)
+      .run();
+    
     return {
       status: "complete",
+      accessToken,
       userId: row.user_id ?? undefined,
     };
   } catch (error) {

@@ -17,9 +17,10 @@ export async function openCommand(options: OpenOptions): Promise<void> {
   // Priority: 1) CLI options, 2) env vars, 3) saved config, 4) defaults
   let server = options.server || process.env.CLAWFLARE_URL;
   let token = options.token || process.env.CLAWFLARE_API_TOKEN;
+  let workspace = options.workspace || process.env.CLAWFLARE_WORKSPACE;
   
   // Try loading from saved config
-  if (!server || !token) {
+  if (!server || !token || !workspace) {
     const config = await loadConfig();
     if (!server) {
       server = config.server;
@@ -27,16 +28,19 @@ export async function openCommand(options: OpenOptions): Promise<void> {
     if (!token) {
       token = config.token;
     }
+    if (!workspace) {
+      workspace = config.workspace;
+    }
   }
   
-  // Default to localhost if no server specified
+  // Default to hosted service if no server specified
   if (!server) {
-    server = "http://localhost:8787";
+    server = "https://app.clawflare.dev";
   }
   
   if (!token) {
-    console.error("Error: CLAWFLARE_API_TOKEN required");
-    console.error("\nUsage:");
+    console.error("Error: Not authenticated. Please run 'clawflare login' to authenticate.");
+    console.error("\nAlternatively, you can provide a token explicitly:");
     console.error("  clawflare open --token <token>");
     console.error("  CLAWFLARE_API_TOKEN=<token> clawflare open");
     console.error("\nFor self-hosted:");
@@ -46,7 +50,7 @@ export async function openCommand(options: OpenOptions): Promise<void> {
 
   console.log(`Connecting to ${server}...`);
   
-  const client = new AgentClient(server, token);
+  const client = new AgentClient(server, token, workspace);
   const app = createTUI(client);
   app.start();
 }

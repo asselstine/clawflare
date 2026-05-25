@@ -76,12 +76,14 @@ export interface ServerInfo {
 export class AgentClient {
   private url: string;
   private token: string;
+  private workspace?: string;
   private ws?: WebSocket;
   private currentSessionId: string | null = null;
 
-  constructor(url: string, token: string) {
+  constructor(url: string, token: string, workspace?: string) {
     this.url = url;
     this.token = token;
+    this.workspace = workspace;
   }
 
   private getHeaders(): Record<string, string> {
