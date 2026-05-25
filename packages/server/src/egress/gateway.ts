@@ -1,23 +1,17 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../internal-types/index.js";
 import { getDataLayer } from "../data/index.js";
-import { createEgressRegistry as createBaseEgressRegistry } from "./registry.js";
+import { createEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
-import { getRuntimeConfig, createEgressRegistryWithConfig } from "../config-api.js";
 
 export async function routeOutboundRequest(
   env: Env,
   request: Request,
   requestId?: string
 ): Promise<Response> {
-  // Use config-driven registry if runtime config is available, otherwise fallback to base
-  let registry;
-  const runtimeConfig = getRuntimeConfig();
-  if (runtimeConfig) {
-    registry = createEgressRegistryWithConfig(runtimeConfig);
-  } else {
-    registry = createBaseEgressRegistry<Env>();
-  }
+  // Use the base registry (GitHub and Cloudflare handlers only)
+  // Config-driven handlers removed in Phase 4
+  const registry = createEgressRegistry<Env>();
 
   const data = getDataLayer(env);
   const metadata = await data.egressHandlers.list(true);
@@ -43,7 +37,7 @@ export async function routeOutboundRequest(
   }
 
   // Second: check registry handlers that don't have D1 metadata
-  // This allows config-defined handlers to work without manual D1 setup
+  // This allows handlers to work without manual D1 setup
   for (const handler of registry.list()) {
     // Skip handlers that have metadata (already checked above)
     if (metadataNames.has(handler.name)) continue;

@@ -63,7 +63,7 @@ export {
   ContainerProxy,
 };
 
-// Export HTTP utilities for extension
+// Export HTTP utilities
 export {
   handleHttpRequest,
   normalizePath,
@@ -100,61 +100,20 @@ export { normalizeBedrockBearerToken } from "./agent-config.js";
 // Export diagnostics
 export { logTiming, timingStart } from "./diagnostics.js";
 
-// Export tool factory and new config-driven tool creation
+// Export core tools (config-driven tools removed in Phase 4)
 export {
   createTools,
-  defineTool,
-  UserToolContext,
-  UserToolDefinition,
-  ToolFactory as ToolFactoryDef,
-  ToolFactoryFn,
-  createCoreTools,
-  createContainerToolsIfAvailable,
-  createPluginTools,
-  createUserTools as createUserToolsFromDefs,
 } from "./tools/index.js";
 
 // Export tool context type
 export type { ToolContext } from "./tools/index.js";
 
-// Export configuration API
+// Export simplified server config (internal constants only)
 export {
-  defineClawflareConfig,
-  normalizeConfig,
-  createClawflareWorker,
-  createUserTools as createUserToolsFromConfig,
-  createEgressRegistryWithConfig,
-  getRuntimeConfig,
-} from "./config-api.js";
-
-// Export server naming helpers
-export {
-  DEFAULT_SERVER_NAMES,
-  resolveServerNames,
-  getConfigServerNames,
-  getConfigWorkerName,
-  getConfigWorkflowName,
-} from "./server-names.js";
-
-export type {
-  ServerNames,
-  ServerNameOverrides,
-  ServerCloudflarePreferences,
-  ServerNameConfigLike,
-  ConfigServerNames,
-} from "./server-names.js";
-
-// Export config types
-export type {
-  ClawflareConfig,
-  AiConfig,
-  CloudflareConfig,
-  SecretSpec,
-  ToolFactory,
-  EgressHandlerFactory,
-  ClawflarePlugin,
-  ClawflareWorker,
-  DefineEgressHandlerConfig,
+  DEFAULT_AI_PROVIDER,
+  DEFAULT_AI_MODEL,
+  getAiProvider,
+  getAiModel,
 } from "./config-api.js";
 
 // Re-export egress core types for user convenience
@@ -165,7 +124,7 @@ export type {
   HttpEgressHandlerContext,
 } from "@clawflare/egress-core";
 
-// Export both egress handler helpers for user convenience
+// Export egress handler helpers
 export {
   defineEgressHandler,
   defineHttpEgressHandler,

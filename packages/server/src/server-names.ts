@@ -1,3 +1,10 @@
+// Server Names - Simple constants for internal use
+// Config-based naming removed in Phase 4
+
+/**
+ * Default server names used by the Clawflare server
+ * These are fixed values, not derived from config
+ */
 export interface ServerNames {
   workerName: string;
   testWorkerName: string;
@@ -6,23 +13,6 @@ export interface ServerNames {
   testWorkflowName: string;
   e2eWorkflowPrefix: string;
   e2eDatabasePrefix: string;
-}
-
-export interface ServerNameOverrides extends Partial<ServerNames> {}
-
-export interface ServerCloudflarePreferences {
-  workerName?: string;
-  workflowName?: string;
-}
-
-export interface ServerNameConfigLike {
-  name: string;
-  cloudflare?: ServerCloudflarePreferences;
-}
-
-export interface ConfigServerNames {
-  workerName: string;
-  workflowName: string;
 }
 
 export const DEFAULT_SERVER_NAMES: ServerNames = {
@@ -35,31 +25,13 @@ export const DEFAULT_SERVER_NAMES: ServerNames = {
   e2eDatabasePrefix: "clawflare-e2e",
 };
 
-export function resolveServerNames(overrides: ServerNameOverrides = {}): ServerNames {
+/**
+ * Resolve server names with optional overrides
+ * (Kept for backward compatibility with e2e tests)
+ */
+export function resolveServerNames(overrides: Partial<ServerNames> = {}): ServerNames {
   return {
     ...DEFAULT_SERVER_NAMES,
     ...overrides,
   };
-}
-
-function applyEnvSuffix(name: string, env?: string): string {
-  return env ? `${name}-${env}` : name;
-}
-
-export function getConfigServerNames(config: ServerNameConfigLike, env?: string): ConfigServerNames {
-  const preferredWorkerName = config.cloudflare?.workerName ?? config.name;
-  const preferredWorkflowName = config.cloudflare?.workflowName ?? `${preferredWorkerName}-workflow`;
-
-  return {
-    workerName: applyEnvSuffix(preferredWorkerName, env),
-    workflowName: applyEnvSuffix(preferredWorkflowName, env),
-  };
-}
-
-export function getConfigWorkerName(config: ServerNameConfigLike, env?: string): string {
-  return getConfigServerNames(config, env).workerName;
-}
-
-export function getConfigWorkflowName(config: ServerNameConfigLike, env?: string): string {
-  return getConfigServerNames(config, env).workflowName;
 }

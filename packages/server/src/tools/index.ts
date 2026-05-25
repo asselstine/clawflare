@@ -9,7 +9,6 @@ import type { ExecutionResult } from "./../internal-types/tools.js";
 import { getDataLayer } from "../data/index.js";
 import { executeDynamicWorker, USER_FUNCTION_CONTRACT } from "./dynamic-worker";
 import { createContainerTools } from "../container/tools.js";
-import type { ClawflareConfig } from "../config-api.js";
 
 // Tool parameter types
 interface StoreCodeParams {
@@ -53,119 +52,16 @@ function validateName(name: string): void {
 }
 
 /**
- * Context passed to user-defined tools
+ * Tool context for creating tools with session-specific capabilities
  */
-export interface UserToolContext {
-  env: Env;
-  ctx?: ExecutionContext;
-  sessionId?: string;
-  logger: Console;
-}
-
-/**
- * Tool definition for user-defined tools
- */
-export interface UserToolDefinition {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  execute: (params: unknown, context: UserToolContext) => Promise<unknown> | unknown;
-}
-
-/**
- * Define a custom tool using a simple API.
- * This wraps the lower-level AgentTool interface for easier use.
- */
-export function defineTool(def: UserToolDefinition): ToolFactory {
-  return {
-    name: def.name,
-    description: def.description,
-    parameters: def.parameters,
-    def,
-  };
-}
-
 export interface ToolContext {
   sessionId?: string;
-  config?: ClawflareConfig;
-}
-
-/**
- * Internal factory representation for user tools
- */
-export interface ToolFactory {
-  name: string;
-  description: string;
-  parameters: Record<string, unknown>;
-  def: UserToolDefinition;
-}
-
-/**
- * Tool factory function type for config-based tools
- */
-export type ToolFactoryFn = (env: Env, ctx?: ExecutionContext, _toolCtx?: ToolContext) => AgentTool | AgentTool[];
-
-/**
- * Create AgentTool instances from user tool definitions.
- * This is used internally to convert user tools to runtime tools.
- */
-export function createAgentToolsFromUserDefs(
-  toolFactories: ToolFactory[],
-  env: Env,
-  ctx?: ExecutionContext,
-  toolCtx?: ToolContext
-): AgentTool[] {
-  const context: UserToolContext = {
-    env,
-    ctx,
-    sessionId: toolCtx?.sessionId,
-    logger: console,
-  };
-
-  return toolFactories.map((factory): AgentTool => {
-    const schema = factory.parameters as TSchema;
-    
-    return {
-      name: factory.name,
-      description: factory.description,
-      label: factory.name,
-      parameters: schema,
-      execute: async (
-        _toolCallId: string,
-        params: Static<TSchema>
-      ): Promise<AgentToolResult<unknown>> => {
-        const result = await factory.def.execute(params, context);
-        
-        // Handle result normalization
-        if (result === undefined || result === null) {
-          return {
-            content: [{ type: "text", text: "" }],
-            details: {},
-          };
-        }
-        
-        // If result is already a string, use it directly
-        if (typeof result === "string") {
-          return {
-            content: [{ type: "text", text: result }],
-            details: { result },
-          };
-        }
-        
-        // Otherwise, serialize as JSON
-        return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          details: { result },
-        };
-      },
-    };
-  });
 }
 
 /**
  * Create core built-in tools (store_code, execute_stored_code, execute_code, search)
  */
-export function createCoreTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
+function createCoreTools(env: Env, ctx?: ExecutionContext): AgentTool[] {
   return [
     createStoreCodeTool(env),
     createExecuteStoredCodeTool(env, ctx),
@@ -188,107 +84,16 @@ export function createContainerToolsIfAvailable(
 }
 
 /**
- * Create tools from plugins in the config
- */
-export function createPluginTools(
-  config: ClawflareConfig | undefined,
-  env: Env,
-  ctx?: ExecutionContext,
-  _toolCtx?: ToolContext
-): AgentTool[] {
-  if (!config?.plugins) {
-    return [];
-  }
-
-  const tools: AgentTool[] = [];
-  for (const plugin of config.plugins) {
-    if (plugin.registerTools) {
-      const result = plugin.registerTools(env, ctx);
-      const pluginTools = Array.isArray(result) ? result : [result];
-      tools.push(...pluginTools);
-    }
-  }
-  return tools;
-}
-
-/**
- * Type guard to check if something is a ToolFactory (defineTool result)
- */
-function isToolFactory(item: unknown): item is ToolFactory {
-  return (
-    typeof item === "object" &&
-    item !== null &&
-    "name" in item &&
-    "description" in item &&
-    "parameters" in item &&
-    "def" in item
-  );
-}
-
-/**
- * Type guard to check if an item is an AgentTool
- */
-function isAgentTool(item: unknown): item is AgentTool {
-  return (
-    typeof item === "object" &&
-    item !== null &&
-    "name" in item &&
-    "description" in item &&
-    "parameters" in item &&
-    "execute" in item
-  );
-}
-
-/**
- * Create user-defined tools from config.
- * Handles both defineTool() results and advanced AgentTool factories.
- */
-export function createUserTools(
-  config: ClawflareConfig | undefined,
-  env: Env,
-  ctx?: ExecutionContext,
-  toolCtx?: ToolContext
-): AgentTool[] {
-  if (!config?.tools) {
-    return [];
-  }
-
-  const tools: AgentTool[] = [];
-
-  for (const factory of config.tools) {
-    const result = factory(env, ctx, toolCtx);
-
-    // Handle array results
-    const items = Array.isArray(result) ? result : [result];
-
-    for (const item of items) {
-      // If it's a ToolFactory (from defineTool), convert it to AgentTools
-      if (isToolFactory(item)) {
-        const agentTools = createAgentToolsFromUserDefs([item], env, ctx, toolCtx);
-        tools.push(...agentTools);
-      }
-      // If it's already an AgentTool, use it directly
-      else if (isAgentTool(item)) {
-        tools.push(item);
-      }
-      // Otherwise, skip with a warning (can't happen in valid code)
-    }
-  }
-
-  return tools;
-}
-
-/**
  * Create all tools - the main entry point for tool creation.
- * Combines core, container, plugin, and user tools.
+ * Combines core and container tools only.
+ * User-defined tools and plugins have been removed as part of Phase 4
+ * de-packaging refactoring.
  */
 export function createTools(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool[] {
   const coreTools = createCoreTools(env, ctx);
   const containerTools = createContainerToolsIfAvailable(env, toolCtx);
-  const pluginTools = createPluginTools(toolCtx?.config, env, ctx);
-  const userTools = createUserTools(toolCtx?.config, env, ctx);
   
-  return [...coreTools, ...containerTools, ...pluginTools, ...userTools];
+  return [...coreTools, ...containerTools];
 }
 
 // Tool: Store code for later execution
