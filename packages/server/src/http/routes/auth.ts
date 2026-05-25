@@ -1,5 +1,5 @@
 // Auth Route Handlers - /v1/auth/*
-// Handles CLI authentication flow and OAuth callbacks
+// Handles device authorization flow and OAuth callbacks
 
 import type { Env } from "../../internal-types/index.js";
 import { json, badRequest, serverError } from "../responses.js";
@@ -11,34 +11,76 @@ const GITHUB_OAUTH_URL = "https://github.com/login/oauth/authorize";
 const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL = "https://api.github.com";
 
+// Device authorization constants
+const DEVICE_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const POLL_INTERVAL_SECONDS = 2;
+
+// Token prefix for generated access tokens
+const TOKEN_PREFIX = "clf_";
+
 /**
- * CLI login initiation
- * Creates a device authorization request and returns a URL for the user to visit
- * POST /v1/auth/cli/start
+ * Generate a secure opaque access token
+ * Format: clf_<base64url-encoded-random-bytes>
  */
-export async function handleCliLoginStart(
+function generateAccessToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const encoded = btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `${TOKEN_PREFIX}${encoded}`;
+}
+
+/**
+ * Sanitize client name for display
+ */
+function sanitizeClientName(name: unknown): string | null {
+  if (typeof name !== "string") return null;
+  const sanitized = name.trim().slice(0, 100);
+  return sanitized.length > 0 ? sanitized : null;
+}
+
+/**
+ * Device authorization initiation
+ * Creates a device authorization request and returns a URL for the user to visit
+ * POST /v1/auth/device/start
+ */
+export async function handleDeviceAuthStart(
   request: Request,
   env: Env
 ): Promise<Response> {
   try {
-    const body = (await request.json()) as { deviceCode?: string };
-    const deviceCode = body.deviceCode || crypto.randomUUID();
+    const body = (await request.json()) as { clientName?: string };
+    const clientName = sanitizeClientName(body.clientName) || "Unknown application";
 
-    // In Phase 7, we implement a simplified flow:
-    // 1. CLI generates a verification code
-    // 2. User visits /v1/auth/cli/verify with the code
-    // 3. After GitHub OAuth, the CLI token is associated with the code
-    // 4. CLI polls /v1/auth/cli/poll to retrieve the token
-
-    // For now, return a direct GitHub OAuth URL
-    // The user_code will be the device code for polling
     const clientId = env.GITHUB_CLIENT_ID;
     if (!clientId) {
       return serverError("GitHub OAuth not configured");
     }
 
+    const now = Date.now();
+    const expiresAt = now + DEVICE_CODE_TTL_MS;
+    const deviceCode = crypto.randomUUID();
+
+    // Store device authorization
+    await env.DB.prepare(
+      `
+      INSERT INTO device_authorizations
+        (device_code, client_name, created_at, expires_at)
+      VALUES (?, ?, ?, ?)
+    `
+    )
+      .bind(deviceCode, clientName, now, expiresAt)
+      .run();
+
+    // Build OAuth URL with device flow state
     const redirectUri = `${new URL(request.url).origin}/v1/auth/github/callback`;
-    const state = JSON.stringify({ type: "cli", deviceCode });
+    const state = JSON.stringify({
+      flow: "device",
+      deviceCode,
+      clientName,
+    });
 
     const authUrl = `${GITHUB_OAUTH_URL}?client_id=${clientId}&redirect_uri=${encodeURIComponent(
       redirectUri
@@ -47,20 +89,22 @@ export async function handleCliLoginStart(
     return json({
       deviceCode,
       verificationUrl: authUrl,
-      message: "Visit the URL to authenticate with GitHub",
+      expiresAt,
+      intervalSeconds: POLL_INTERVAL_SECONDS,
+      message: `Visit the URL to authenticate ${clientName}`,
     });
   } catch (error) {
-    console.error("[handleCliLoginStart] Error:", error);
+    console.error("[handleDeviceAuthStart] Error:", error);
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
 
 /**
- * CLI token poll
- * Polls for authentication completion
- * POST /v1/auth/cli/poll
+ * Device authorization poll
+ * Polls for authorization completion
+ * POST /v1/auth/device/poll
  */
-export async function handleCliLoginPoll(
+export async function handleDeviceAuthPoll(
   request: Request,
   env: Env
 ): Promise<Response> {
@@ -72,27 +116,48 @@ export async function handleCliLoginPoll(
       return badRequest("deviceCode required");
     }
 
-    // Check if there's a completed OAuth for this device code
+    // Check device authorization
     const row = await env.DB.prepare(
       `
-      SELECT cli_token, user_id, completed_at
-      FROM cli_device_authorizations
+      SELECT user_id, access_token_id, access_token_plaintext, completed_at, expires_at
+      FROM device_authorizations
       WHERE device_code = ?
     `
     )
       .bind(deviceCode)
-      .first<{ cli_token: string; user_id: string; completed_at: number }>();
+      .first<{
+        user_id: string;
+        access_token_id: string;
+        access_token_plaintext: string;
+        completed_at: number;
+        expires_at: number;
+      }>();
 
     if (!row) {
-      // Still pending
       return json({
         status: "pending",
         message: "Authorization pending",
       });
     }
 
+    // Check expiration
+    if (Date.now() > row.expires_at) {
+      // Clean up expired device authorization
+      await env.DB.prepare(
+        `
+        DELETE FROM device_authorizations WHERE device_code = ?
+      `
+      )
+        .bind(deviceCode)
+        .run();
+
+      return json({
+        status: "expired",
+        message: "Device authorization expired",
+      });
+    }
+
     if (!row.completed_at) {
-      // Still pending
       return json({
         status: "pending",
         message: "Authorization pending",
@@ -110,11 +175,10 @@ export async function handleCliLoginPoll(
       .bind(row.user_id)
       .first<{ id: string; email: string; display_name: string | null }>();
 
-    // Clean up the device authorization
+    // Clean up the device authorization after successful poll
     await env.DB.prepare(
       `
-      DELETE FROM cli_device_authorizations
-      WHERE device_code = ?
+      DELETE FROM device_authorizations WHERE device_code = ?
     `
     )
       .bind(deviceCode)
@@ -122,7 +186,7 @@ export async function handleCliLoginPoll(
 
     return json({
       status: "complete",
-      token: row.cli_token,
+      accessToken: row.access_token_plaintext,
       user: userRow
         ? {
             id: userRow.id,
@@ -132,7 +196,7 @@ export async function handleCliLoginPoll(
         : null,
     });
   } catch (error) {
-    console.error("[handleCliLoginPoll] Error:", error);
+    console.error("[handleDeviceAuthPoll] Error:", error);
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -161,12 +225,15 @@ export async function handleGithubCallback(
     }
 
     // Parse state to determine flow type
-    let stateData: { type: string; deviceCode?: string };
+    let stateData: { flow?: string; type?: string; deviceCode?: string; clientName?: string };
     try {
       stateData = JSON.parse(state);
     } catch {
       return badRequest("Invalid state parameter");
     }
+
+    // Support both new 'flow' and legacy 'type' for compatibility during transition
+    const flowType = stateData.flow || stateData.type;
 
     // Exchange code for access token
     const clientId = env.GITHUB_CLIENT_ID;
@@ -316,34 +383,98 @@ export async function handleGithubCallback(
       });
     }
 
-    // Handle CLI flow
-    if (stateData.type === "cli" && stateData.deviceCode) {
-      // Generate CLI token
-      const cliToken = crypto.randomUUID();
-      const tokenHash = await hashToken(cliToken);
+    // Handle device authorization flow
+    if (flowType === "device" && stateData.deviceCode) {
+      // Generate access token
+      const rawToken = generateAccessToken();
+      const tokenHash = await hashToken(rawToken);
+      const tokenId = crypto.randomUUID();
 
-      await env.DB.prepare(
+      // Get client name from device authorization record
+      const deviceAuth = await env.DB.prepare(
         `
-        INSERT INTO cli_tokens (id, user_id, token_hash, name, created_at)
-        VALUES (?, ?, ?, ?, ?)
+        SELECT client_name FROM device_authorizations WHERE device_code = ?
       `
       )
-        .bind(crypto.randomUUID(), finalUserId, tokenHash, "CLI", now)
+        .bind(stateData.deviceCode)
+        .first<{ client_name: string }>();
+
+      const clientName = deviceAuth?.client_name || stateData.clientName || "Unknown application";
+
+      // Store access token (hashed)
+      await env.DB.prepare(
+        `
+        INSERT INTO access_tokens (id, user_id, token_hash, name, client_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      )
+        .bind(tokenId, finalUserId, tokenHash, "Access Token", clientName, now)
         .run();
 
-      // Store in device authorizations table
+      // Update device authorization with token info
       await env.DB.prepare(
         `
-        INSERT INTO cli_device_authorizations
-        (device_code, user_id, cli_token, completed_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(device_code) DO UPDATE SET
-          user_id = excluded.user_id,
-          cli_token = excluded.cli_token,
-          completed_at = excluded.completed_at
+        UPDATE device_authorizations
+        SET user_id = ?,
+            access_token_id = ?,
+            access_token_plaintext = ?,
+            completed_at = ?
+        WHERE device_code = ?
       `
       )
-        .bind(stateData.deviceCode, finalUserId, cliToken, now)
+        .bind(finalUserId, tokenId, rawToken, now, stateData.deviceCode)
+        .run();
+
+      // Escape client name for HTML display
+      const escapedClientName = clientName
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+      // Return HTML that shows success message
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Complete</title></head>
+<body>
+<h1>Authentication Complete</h1>
+<p>You can now close this window and return to ${escapedClientName}.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" } }
+      );
+    }
+
+    // Legacy CLI flow (for backward compatibility during transition)
+    if (stateData.type === "cli" && stateData.deviceCode) {
+      // Generate access token
+      const rawToken = generateAccessToken();
+      const tokenHash = await hashToken(rawToken);
+      const tokenId = crypto.randomUUID();
+
+      // Store access token
+      await env.DB.prepare(
+        `
+        INSERT INTO access_tokens (id, user_id, token_hash, name, client_name, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      )
+        .bind(tokenId, finalUserId, tokenHash, "Clawflare CLI", "Clawflare CLI", now)
+        .run();
+
+      // Update device authorization with token info
+      await env.DB.prepare(
+        `
+        UPDATE device_authorizations
+        SET user_id = ?,
+            access_token_id = ?,
+            access_token_plaintext = ?,
+            completed_at = ?
+        WHERE device_code = ?
+      `
+      )
+        .bind(finalUserId, tokenId, rawToken, now, stateData.deviceCode)
         .run();
 
       // Return HTML that shows success message
@@ -353,7 +484,7 @@ export async function handleGithubCallback(
 <head><title>Authentication Complete</title></head>
 <body>
 <h1>Authentication Complete</h1>
-<p>You can now close this window and return to the CLI.</p>
+<p>You can now close this window and return to Clawflare CLI.</p>
 </body>
 </html>`,
         { headers: { "Content-Type": "text/html" } }
@@ -424,7 +555,7 @@ export async function handleGetMe(
 }
 
 /**
- * Logout - revoke CLI token
+ * Logout - revoke access token
  * POST /v1/auth/logout
  */
 export async function handleLogout(
@@ -434,13 +565,14 @@ export async function handleLogout(
 ): Promise<Response> {
   try {
     // Revoke the current token
-    if (ctx.tokenId) {
+    if (ctx.accessTokenId) {
+      const now = Date.now();
       await env.DB.prepare(
         `
-        DELETE FROM cli_tokens WHERE id = ?
+        UPDATE access_tokens SET revoked_at = ? WHERE id = ?
       `
       )
-        .bind(ctx.tokenId)
+        .bind(now, ctx.accessTokenId)
         .run();
     }
 

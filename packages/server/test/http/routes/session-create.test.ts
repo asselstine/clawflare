@@ -26,8 +26,6 @@ function createMockEnv(): Env {
         sendEvent: () => Promise.resolve(),
       }),
     } as unknown as Env["AGENT_WORKFLOW"],
-    API_TOKEN: "test-token",
-    CLAWFLARE_API_TOKEN: "test-token",
   } as unknown as Env;
 }
 

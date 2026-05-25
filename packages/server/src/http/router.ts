@@ -11,8 +11,8 @@ import { handleListTools } from "./routes/tools.js";
 import { handleGetInfo } from "./routes/info.js";
 import { handleCfDebug } from "./routes/debug.js";
 import {
-  handleCliLoginStart,
-  handleCliLoginPoll,
+  handleDeviceAuthStart,
+  handleDeviceAuthPoll,
   handleGithubCallback,
   handleGetMe,
   handleLogout,
@@ -20,31 +20,22 @@ import {
 import {
   getBearerToken,
   resolveRequestContext,
-  type RequestContext,
 } from "./request-context.js";
 
-// Legacy token authentication for backwards compatibility during transition
-import { validateHarnessToken, validateHarnessConfigured } from "./auth.js";
-
-/*
- * Routes that don't require authentication
- * Note: These are checked inline in handleHttpRequest below
- * Kept for documentation/reference purposes
+// Routes that don't require authentication
 const PUBLIC_ROUTES = [
   /^\/health$/,
-  /^\/v1\/auth\/cli\/start$/,
-  /^\/v1\/auth\/cli\/poll$/,
+  /^\/v1\/auth\/device\/start$/,
+  /^\/v1\/auth\/device\/poll$/,
   /^\/v1\/auth\/github\/callback$/,
 ];
-*/
 
-/*
+/**
  * Check if a route is public (no auth required)
- * Currently unused - routes are checked inline
+ */
 function isPublicRoute(path: string): boolean {
   return PUBLIC_ROUTES.some((pattern) => pattern.test(path));
 }
-*/
 
 /**
  * Main HTTP request handler
@@ -63,26 +54,27 @@ export async function handleHttpRequest(
     console.log(`[REQUEST] ${request.method} ${request.url}`);
   }
 
-  // Validate API_TOKEN is configured (still needed for legacy and e2e)
-  const configError = validateHarnessConfigured(env);
-  if (configError) return configError;
-
-  // Health check and auth routes (no auth required)
+  // Health check (no auth required)
   if (path === "/health") {
     return json({ status: "ok" });
   }
 
   // Auth routes - no authentication required
-  if (path === "/v1/auth/cli/start" && request.method === "POST") {
-    return handleCliLoginStart(request, env);
+  if (path === "/v1/auth/device/start" && request.method === "POST") {
+    return handleDeviceAuthStart(request, env);
   }
 
-  if (path === "/v1/auth/cli/poll" && request.method === "POST") {
-    return handleCliLoginPoll(request, env);
+  if (path === "/v1/auth/device/poll" && request.method === "POST") {
+    return handleDeviceAuthPoll(request, env);
   }
 
   if (path === "/v1/auth/github/callback" && request.method === "GET") {
     return handleGithubCallback(request, env);
+  }
+
+  // Check if this is a public route
+  if (isPublicRoute(path)) {
+    return notFound();
   }
 
   // Authenticate all other requests
@@ -91,31 +83,8 @@ export async function handleHttpRequest(
     return unauthorized("Missing Authorization header");
   }
 
-  // Try new token-based auth first
-  let requestContext: RequestContext | null = await resolveRequestContext(token, env);
-
-  // Fall back to legacy token for backwards compatibility and e2e tests
-  if (!requestContext) {
-    const legacyError = validateHarnessToken(request, env);
-    if (legacyError) {
-      return legacyError;
-    }
-    // Legacy auth - use default workspace context
-    const data = (await import("../data/index.js")).getDataLayer(env);
-    const defaultWorkspace = await data.workspaces.getById("default-workspace");
-    if (defaultWorkspace) {
-      requestContext = {
-        user: {
-          id: "legacy-user",
-          email: "legacy@clawflare.dev",
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-        workspace: defaultWorkspace,
-        role: "owner",
-      };
-    }
-  }
+  // Resolve request context from access token
+  const requestContext = await resolveRequestContext(token, env);
 
   if (!requestContext) {
     return unauthorized("Invalid token");

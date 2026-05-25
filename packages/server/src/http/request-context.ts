@@ -10,7 +10,7 @@ import type { User, Workspace, WorkspaceRole } from "../data/index.js";
  * Every authenticated request must have a resolved context
  */
 export interface RequestContext {
-  /** Authenticated user (from CLI token or OAuth session) */
+  /** Authenticated user (from access token or OAuth session) */
   user: User;
 
   /** Active workspace for this request */
@@ -19,8 +19,8 @@ export interface RequestContext {
   /** User's role in the workspace */
   role: WorkspaceRole;
 
-  /** CI token metadata if authenticated via token */
-  tokenId?: string;
+  /** Access token ID if authenticated via token */
+  accessTokenId?: string;
 
   /** OAuth provider if authenticated via web */
   oauthProvider?: string;
@@ -31,7 +31,7 @@ export interface RequestContext {
  */
 interface TokenVerificationResult {
   userId: string;
-  tokenId: string;
+  accessTokenId: string;
 }
 
 /**
@@ -48,7 +48,7 @@ export function getBearerToken(request: Request): string | null {
 
 /**
  * Hash a token using SHA-256 for database lookup
- * CLI tokens are stored hashed in the database
+ * Access tokens are stored hashed in the database
  */
 async function hashToken(token: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -59,10 +59,10 @@ async function hashToken(token: string): Promise<string> {
 }
 
 /**
- * Verify a CLI token and return the user ID if valid
+ * Verify an access token and return the user ID if valid
  * Also updates last_used_at timestamp
  */
-async function verifyCliToken(
+async function verifyAccessToken(
   token: string,
   env: Env
 ): Promise<TokenVerificationResult | null> {
@@ -70,13 +70,18 @@ async function verifyCliToken(
     const tokenHash = await hashToken(token);
     const row = await env.DB.prepare(
       `
-      SELECT id, user_id, expires_at
-      FROM cli_tokens
+      SELECT id, user_id, expires_at, revoked_at
+      FROM access_tokens
       WHERE token_hash = ?
     `
     )
       .bind(tokenHash)
-      .first<{ id: string; user_id: string; expires_at: number | null }>();
+      .first<{
+        id: string;
+        user_id: string;
+        expires_at: number | null;
+        revoked_at: number | null;
+      }>();
 
     if (!row) {
       return null;
@@ -87,10 +92,15 @@ async function verifyCliToken(
       return null;
     }
 
+    // Check if token is revoked
+    if (row.revoked_at) {
+      return null;
+    }
+
     // Update last_used_at
     await env.DB.prepare(
       `
-      UPDATE cli_tokens
+      UPDATE access_tokens
       SET last_used_at = ?
       WHERE id = ?
     `
@@ -98,9 +108,9 @@ async function verifyCliToken(
       .bind(Date.now(), row.id)
       .run();
 
-    return { userId: row.user_id, tokenId: row.id };
+    return { userId: row.user_id, accessTokenId: row.id };
   } catch (error) {
-    console.error("[verifyCliToken] Error:", error);
+    console.error("[verifyAccessToken] Error:", error);
     return null;
   }
 }
@@ -156,7 +166,7 @@ export async function resolveRequestContext(
   env: Env
 ): Promise<RequestContext | null> {
   // Verify the token
-  const tokenResult = await verifyCliToken(token, env);
+  const tokenResult = await verifyAccessToken(token, env);
   if (!tokenResult) {
     return null;
   }
@@ -172,7 +182,13 @@ export async function resolveRequestContext(
   `
   )
     .bind(tokenResult.userId)
-    .first<{ id: string; email: string; display_name: string | null; created_at: number; updated_at: number }>();
+    .first<{
+      id: string;
+      email: string;
+      display_name: string | null;
+      created_at: number;
+      updated_at: number;
+    }>();
 
   if (!userRow) {
     return null;
@@ -202,7 +218,7 @@ export async function resolveRequestContext(
     user,
     workspace,
     role,
-    tokenId: tokenResult.tokenId,
+    accessTokenId: tokenResult.accessTokenId,
   };
 }
 

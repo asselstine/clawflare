@@ -84,16 +84,10 @@ export {
   payloadTooLarge,
 } from "./http/responses.js";
 
-export {
-  getBearerToken,
-  validateHarnessToken,
-  validateHarnessConfigured,
-  isAuthenticated,
-} from "./http/auth.js";
-
 // Export request context utilities
 export type { RequestContext } from "./http/request-context.js";
 export {
+  getBearerToken,
   resolveRequestContext,
   hasPermission,
 } from "./http/request-context.js";

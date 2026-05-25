@@ -32,9 +32,6 @@ declare global {
  * Contains all bindings, secrets, and environment variables
  */
 export interface Env {
-  // API token for authentication
-  CLAWFLARE_API_TOKEN: string;
-
   // D1 Database - Primary persistent storage
   DB: D1Database;
 
