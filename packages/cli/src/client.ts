@@ -16,7 +16,7 @@ import type {
   ChatRequest,
   SessionListResponse,
   SessionSummary,
-} from "@clawflare/runtime";
+} from "./types.js";
 
 export type {
   AgentMessage,

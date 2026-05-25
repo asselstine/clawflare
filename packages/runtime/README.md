@@ -20,37 +20,32 @@ pnpm dev
 
 ## Configuration
 
-The harness uses a **template-based configuration** to separate complex Worker setup from environment-specific values.
+The runtime uses a checked-in `wrangler.jsonc` as the source of truth. Edit this file directly for configuration changes.
 
-### Template-based Configuration
+### Required Configuration
 
-Instead of editing `wrangler.jsonc` directly, use the template system:
+Ensure `wrangler.jsonc` has the correct D1 database IDs:
 
-1. **Copy the environment example**:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. **Fill in your values** in `.env`:
-   ```bash
-   # Required: D1 Database IDs
-   DATABASE_ID=your-production-database-id
-   
-   # Optional: AI configuration (has defaults)
-   AI_PROVIDER=amazon-bedrock
-   AI_MODEL=minimax.minimax-m2.5
-   ```
-
-3. **Generate wrangler.jsonc** from the template:
-   ```bash
-   pnpm generate:config
-   ```
-
-This substitutes your environment variables into `wrangler.template.jsonc` and outputs `wrangler.jsonc`.
+```jsonc
+{
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "clawflare",
+      "database_id": "your-production-database-id",
+      "preview_database_id": "your-preview-database-id",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
+```
 
 ### Getting D1 Database IDs
 
 ```bash
+# Create a new database
+npx wrangler d1 create clawflare
+
 # Or list existing databases
 npx wrangler d1 list
 ```
@@ -65,7 +60,7 @@ The harness uses:
 - `AGENT_WORKFLOW` Workflow for durable agent execution
 - `HTTP_GATEWAY` Service binding for controlled outbound HTTP from Dynamic Workers
 
-`wrangler.template.jsonc` configures these bindings with placeholder values for substitution.
+`wrangler.jsonc` configures these bindings directly.
 
 ## Secrets and Variables
 
@@ -150,18 +145,14 @@ Enabled handler metadata is stored in D1.
 
 Skills are not stored or served by the harness. The CLI loads generic Agent Skills locally from `~/.agents/skills/` and project `.agents/skills/` directories, then includes relevant skill context in prompts sent to the harness.
 
-## Environment-Specific Deployment
+## Deployment
 
-For production deployment with specific environment configs:
+For production deployment:
 
 ```bash
-# Ensure environment variables are set
-export DATABASE_ID=prod-db-id
-export PREVIEW_DATABASE_ID=prod-preview-db-id
-export AI_PROVIDER=amazon-bedrock
-export AI_MODEL=minimax.minimax-m2.5
-
-# Generate config and deploy
-pnpm generate:config
+# Ensure wrangler.jsonc is configured with correct database IDs
+# Deploy via Wrangler
 pnpm deploy
 ```
+
+The deploy script will check and set required secrets from environment variables before deploying.

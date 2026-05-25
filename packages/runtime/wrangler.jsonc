@@ -1,5 +1,5 @@
-// wrangler.template.jsonc - Template for generating wrangler.jsonc
-// DO NOT EDIT wrangler.jsonc directly - edit this file and run `pnpm generate:config`
+// wrangler.jsonc - Checked-in source of truth for Wrangler configuration
+// Edit this file directly for configuration changes
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "clawflare-runtime",
