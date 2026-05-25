@@ -369,7 +369,7 @@ async function runTests(url: string): Promise<void> {
     const response = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", content: "hello" }),
+      body: JSON.stringify({  content: "hello" }),
     });
     if (response.status !== 401) throw new Error(`Expected 401, got ${response.status}`);
   });
@@ -378,7 +378,7 @@ async function runTests(url: string): Promise<void> {
     const response = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: "Bearer wrong-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", content: "hello" }),
+      body: JSON.stringify({  content: "hello" }),
     });
     if (response.status !== 401) throw new Error(`Expected 401, got ${response.status}`);
   });
@@ -387,34 +387,31 @@ async function runTests(url: string): Promise<void> {
     const response = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", content: "hello" }),
+      body: JSON.stringify({  content: "hello" }),
     });
     if (response.status === 401) throw new Error("Valid token was rejected");
   });
 
-  await runner.runTest("Get context - authorized", async () => {
-    const context = await client.getContext();
-    if (!context.id) throw new Error("Context missing ID");
-    if (!Array.isArray(context.messages)) throw new Error("Context messages not an array");
+  await runner.runTest("Create new session", async () => {
+    const oldSessionId = client.getCurrentSessionId();
+    const session = await client.createSession();
+    if (!session.id) throw new Error("New session missing ID");
+    if (session.id === oldSessionId) throw new Error("New session has same ID as old session");
   });
 
-  await runner.runTest("Create new context", async () => {
-    const oldContextId = client.getCurrentContextId();
-    const context = await client.createContext();
-    if (!context.id) throw new Error("New context missing ID");
-    if (context.id === oldContextId) throw new Error("New context has same ID as old context");
-  });
-
-  await runner.runTest("Create context with parent", async () => {
-    const parentContext = await client.createContext();
-    const childContext = await client.createContext(parentContext.id);
-    if (childContext.parentId !== parentContext.id) {
-      throw new Error(`Expected parentId ${parentContext.id}, got ${childContext.parentId}`);
+  await runner.runTest("Create session with parent", async () => {
+    const parentSession = await client.createSession();
+    const forkSession = await client.forkSession({
+      parentSessionId: parentSession.id,
+      parentMessageId: "", // Fork from latest
+    });
+    if (forkSession.id === parentSession.id) {
+      throw new Error(`Expected fork to create new session`);
     }
   });
 
   await runner.runTest("Simple prompt", async () => {
-    const submitted = await client.submitChat({ type: "prompt", content: "Say 'hello'" });
+    const submitted = await client.submitChat({  content: "Say 'hello'" });
     // Poll until complete
     for await (const update of client.streamSession(submitted.sessionId)) {
       if (update.complete) {
@@ -437,10 +434,10 @@ async function runTests(url: string): Promise<void> {
 
   await runner.runTest("Session history preserved", async () => {
     // Create a new context to ensure we don't reuse the Simple prompt session
-    await client.createContext();
+    await client.createSession();
     
     // First message
-    const submitted1 = await client.submitChat({ type: "prompt", content: `First message: test-${Date.now()}` });
+    const submitted1 = await client.submitChat({  content: `First message: test-${Date.now()}` });
     let firstResponse = "";
     for await (const update of client.streamSession(submitted1.sessionId)) {
       if (update.complete) {
@@ -462,7 +459,7 @@ async function runTests(url: string): Promise<void> {
     await new Promise(r => setTimeout(r, 1000));
     
     // Second message using same session
-    const submitted2 = await client.submitChat({ type: "prompt", content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
+    const submitted2 = await client.submitChat({  content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
     console.error(`Second submit returned sessionId: ${submitted2.sessionId}`);
     
     let secondResponse = "";
@@ -492,21 +489,24 @@ async function runTests(url: string): Promise<void> {
     }
   });
 
-  await runner.runTest("Fork context", async () => {
-    const context = await client.createContext();
-    const originalId = context.id;
-    const newContext = await client.forkContext();
-    if (!newContext.id) throw new Error("Fork failed - no context ID returned");
-    if (newContext.id === originalId) throw new Error("Fork returned same context ID");
+  await runner.runTest("Fork session", async () => {
+    const session = await client.createSession();
+    const originalId = session.id;
+    const forkSession = await client.forkSession({
+      parentSessionId: originalId,
+      parentMessageId: "",
+    });
+    if (!forkSession.id) throw new Error("Fork failed - no session ID returned");
+    if (forkSession.id === originalId) throw new Error("Fork returned same session ID");
   });
 
-  await runner.runTest("Chat rejects steer messages", async () => {
+  await runner.runTest("Chat accepts steer-style content", async () => {
     const response = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "steer", content: "Be more helpful" }),
+      body: JSON.stringify({ content: "Be more helpful" }),
     });
-    if (response.status !== 400) throw new Error(`Expected 400, got ${response.status}`);
+    if (response.status !== 200) throw new Error(`Expected 200, got ${response.status}`);
   });
 
   await runner.runTest("List tools", async () => {
@@ -644,7 +644,7 @@ async function runTests(url: string): Promise<void> {
     const startResponse = await fetch(`${url}/v1/chat`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "prompt", content: "session smoke test" }),
+      body: JSON.stringify({  content: "session smoke test" }),
     });
     const submitted = await startResponse.json() as { sessionId?: string; eventCursor?: string };
     if (!submitted.sessionId || !submitted.eventCursor) throw new Error(`Session did not start: ${JSON.stringify(submitted)}`);
@@ -686,7 +686,7 @@ async function runTests(url: string): Promise<void> {
           reject(error);
         });
 
-        ws.send(JSON.stringify({ type: "prompt", content: "websocket workflow smoke test" }));
+        ws.send(JSON.stringify({  content: "websocket workflow smoke test" }));
       });
 
       if (result.type !== "message" || !result.content) {

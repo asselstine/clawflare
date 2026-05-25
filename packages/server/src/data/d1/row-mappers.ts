@@ -11,7 +11,7 @@ import type {
   User,
   ModelConnection,
 } from "../interfaces.js";
-import type { SessionStatus, SessionEvent } from "../../types.js";
+import type { SessionStatus, SessionEvent, ModelProvider } from "../../types.js";
 
 // =============================================================================
 // D1 Row Types
@@ -184,7 +184,7 @@ export function mapSessionRow(row: SessionRow): SessionMetadataState {
     maxQueueSize: row.max_queue_size,
     idleTimeout: row.idle_timeout ?? undefined,
     modelConnectionId: row.model_connection_id ?? undefined,
-    modelProvider: row.model_provider ?? undefined,
+    modelProvider: (row.model_provider as ModelProvider | undefined) ?? undefined,
     modelName: row.model_name ?? undefined,
   };
 }
@@ -213,7 +213,7 @@ export function mapSessionSummaryRowWithCount(row: SessionWithCountRow): Session
     updatedAt: row.updated_at,
     isActive: row.active !== undefined ? Boolean(row.active) : status === "idle" || status === "processing",
     modelConnectionId: row.model_connection_id ?? undefined,
-    modelProvider: row.model_provider ?? undefined,
+    modelProvider: (row.model_provider as ModelProvider | undefined) ?? undefined,
     modelName: row.model_name ?? undefined,
   };
 }
@@ -309,7 +309,7 @@ export function mapModelConnectionRow(row: ModelConnectionRow): ModelConnection 
     id: row.id,
     workspaceId: row.workspace_id,
     displayName: row.display_name ?? undefined,
-    provider: row.provider,
+    provider: row.provider as ModelProvider,
     modelName: row.model_name,
     secretRefs: safeJsonParse(row.secret_refs_json, {}),
     config: safeJsonParse(row.config_json, {}),

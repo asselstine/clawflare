@@ -58,10 +58,10 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       try {
         const data = JSON.parse(event.data as string) as ChatRequest;
 
-        if (data.type !== "prompt" || !data.content) {
+        if (!data.content) {
           ws.send(JSON.stringify({
             type: "error",
-            message: "Invalid request. type='prompt' and content required"
+            message: "Invalid request. content is required"
           }));
           return;
         }

@@ -2,7 +2,7 @@
 // Handles session-based chat submissions
 
 import type { Env } from "../../internal-types/index.js";
-import type { ChatRequest } from "../../types.js";
+import type { ChatRequest, ModelProvider } from "../../types.js";
 import type { SessionInputEvent } from "../../data/index.js";
 import { json, badRequest, gone, tooManyRequests, serverError } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
@@ -26,13 +26,13 @@ export async function handleChat(
     const body = (await request.json()) as ChatRequest;
 
     const content = body.content;
-    if (body.type !== "prompt" || !content) {
-      return badRequest("Invalid request. type='prompt' and content required");
+    if (!content) {
+      return badRequest("Invalid request. content is required");
     }
 
     const maxTurns = body.maxTurns;
-    sessionIdVar = body.sessionId || crypto.randomUUID();
-    const sessionId: string = sessionIdVar;
+    const sessionId = body.sessionId ?? crypto.randomUUID();
+    sessionIdVar = sessionId;
     const workspaceId = requestContext.workspace.id;
 
     logTiming(env, sessionId, "chat.request.parsed", requestStart, {
@@ -187,7 +187,7 @@ async function handleNewSession(
     maxQueueSize: 100,
     idleTimeout: "7 days",
     modelConnectionId: resolvedModel?.id,
-    modelProvider: resolvedModel?.provider,
+    modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
     modelName: resolvedModel?.modelName,
   };
   await data.sessions.save(initialState);

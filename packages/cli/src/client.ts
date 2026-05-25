@@ -19,7 +19,10 @@ import type {
   ModelConnection,
   ModelConnectionListResponse,
   CreateModelConnectionRequest,
-} from "./types.js";
+  UpdateModelConnectionRequest,
+  CreateSessionRequest,
+  CreateSessionResponse,
+} from "@clawflare/types";
 
 export type {
   AgentMessage,
@@ -32,6 +35,9 @@ export type {
   ModelConnection,
   ModelConnectionListResponse,
   CreateModelConnectionRequest,
+  UpdateModelConnectionRequest,
+  CreateSessionRequest,
+  CreateSessionResponse,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -55,13 +61,6 @@ export interface ChatUsage {
   totalTokens: number;
 }
 
-export interface ContextInfo {
-  id: string;
-  parentId?: string;
-  messages: AgentMessage[];
-  createdAt: number;
-}
-
 export interface ToolInfo {
   name: string;
   description: string;
@@ -78,7 +77,7 @@ export class AgentClient {
   private url: string;
   private token: string;
   private ws?: WebSocket;
-  private currentContextId: string | null = null;
+  private currentSessionId: string | null = null;
 
   constructor(url: string, token: string) {
     this.url = url;
@@ -143,7 +142,7 @@ export class AgentClient {
   async submitChat(request: ChatRequest): Promise<ChatSubmittedResponse> {
     const requestWithContext: ChatRequest = {
       ...request,
-      sessionId: request.sessionId ?? this.currentContextId ?? undefined,
+      sessionId: request.sessionId ?? this.currentSessionId ?? undefined,
     };
 
     const data = await this.requestJson<ChatSubmittedResponse>("/v1/chat", {
@@ -151,7 +150,7 @@ export class AgentClient {
       body: JSON.stringify(requestWithContext),
     });
 
-    if (data.sessionId) this.currentContextId = data.sessionId;
+    if (data.sessionId) this.currentSessionId = data.sessionId;
     return data;
   }
 
@@ -220,39 +219,25 @@ export class AgentClient {
     throw new Error(`Session ${sessionId} did not complete before polling timed out`);
   }
 
-  async getContext(): Promise<ContextInfo> {
-    const data = await this.requestJson<ContextInfo>("/v1/context");
-    this.currentContextId = data.id;
-    return data;
-  }
-
-  async createSession(): Promise<ContextInfo> {
-    const data = await this.requestJson<ContextInfo>("/v1/session", {
+  async createSession(input: CreateSessionRequest = {}): Promise<CreateSessionResponse> {
+    const data = await this.requestJson<CreateSessionResponse>("/v1/session", {
       method: "POST",
+      body: JSON.stringify(input),
     });
-    this.currentContextId = data.id;
+    this.currentSessionId = data.id;
     return data;
   }
 
   async warmupSession(): Promise<void> {
-    // Create a throwaway session to warm up the workflow isolate
-    await this.requestJson<ContextInfo>("/v1/session", {
-      method: "POST",
-    });
+    await this.createSession();
   }
 
-  async createContext(parentId?: string): Promise<ContextInfo> {
-    const data = await this.requestJson<ContextInfo>("/v1/context", {
-      method: "POST",
-      body: JSON.stringify({ parentId }),
-    });
-
-    this.currentContextId = data.id;
-    return data;
-  }
-
-  async forkContext(): Promise<ContextInfo> {
-    return this.createContext(this.currentContextId || undefined);
+  async forkSession(input: {
+    parentSessionId: string;
+    parentMessageId: string;
+    modelConnectionId?: string;
+  }): Promise<CreateSessionResponse> {
+    return this.createSession(input);
   }
 
   async listTools(): Promise<ToolInfo[]> {
@@ -272,8 +257,12 @@ export class AgentClient {
     });
   }
 
+  getCurrentSessionId(): string | null {
+    return this.currentSessionId;
+  }
+
   getCurrentContextId(): string | null {
-    return this.currentContextId;
+    return this.getCurrentSessionId();
   }
 
   getUrl(): string {
@@ -309,7 +298,7 @@ export class AgentClient {
 
   async updateModelConnection(
     id: string,
-    input: Partial<CreateModelConnectionRequest>
+    input: UpdateModelConnectionRequest
   ): Promise<ModelConnection> {
     const data = await this.requestJson<{ modelConnection: ModelConnection }>(
       `/v1/model-connections/${id}`,

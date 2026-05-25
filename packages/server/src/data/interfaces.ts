@@ -1,10 +1,13 @@
 // Data layer interfaces - Repository pattern for Clawflare persistence
 // These interfaces define the contract between the application and storage
 
+import type { ModelProvider } from "@clawflare/types";
+
 import type { SessionEvent, SessionStatus } from "../types.js";
 
 // Re-export for backwards compatibility
 export type { SessionEvent, SessionStatus } from "../types.js";
+export type { ModelProvider } from "@clawflare/types";
 
 // =============================================================================
 // Workspace Types
@@ -68,7 +71,7 @@ export interface SessionMetadataState {
   maxQueueSize?: number;
   idleTimeout?: string;
   modelConnectionId?: string;
-  modelProvider?: string;
+  modelProvider?: ModelProvider;
   modelName?: string;
 }
 
@@ -84,7 +87,7 @@ export interface SessionSummary {
   updatedAt: number;
   isActive: boolean;
   modelConnectionId?: string;
-  modelProvider?: string;
+  modelProvider?: ModelProvider;
   modelName?: string;
 }
 
@@ -399,11 +402,6 @@ export interface SearchResults {
 // =============================================================================
 // Model Connection Types
 // =============================================================================
-
-/**
- * Model provider identifier
- */
-export type ModelProvider = string;
 
 /**
  * Model connection entity - workspace scoped AI model configuration

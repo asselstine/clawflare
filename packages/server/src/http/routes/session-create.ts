@@ -4,6 +4,7 @@
 
 import type { Env } from "../../internal-types/index.js";
 import type { SessionMetadataState } from "../../data/index.js";
+import type { ModelProvider } from "../../types.js";
 import { json, badRequest } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
@@ -58,7 +59,7 @@ export async function handleCreateSession(
       maxQueueSize: 100,
       idleTimeout: "7 days",
       modelConnectionId: resolvedModel?.id,
-      modelProvider: resolvedModel?.provider,
+      modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
       modelName: resolvedModel?.modelName,
     };
     await data.sessions.save(initialState);

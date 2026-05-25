@@ -166,6 +166,7 @@ export async function handleListSessions(
         ]);
         const summary: SessionSummary = {
           id: state.id,
+          workspaceId: state.workspaceId,
           workflowId: state.workflowId,
           status: state.status,
           messageCount,

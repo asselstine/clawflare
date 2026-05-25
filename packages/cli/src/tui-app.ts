@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, ContextInfo, ToolInfo, ServerInfo, SessionResponse, SessionEvent } from "./client.js";
+import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -568,8 +568,6 @@ export class ClawflareTUIApp {
     this.loadInitialData();
   }
 
-  private warmupPromise: Promise<void> | null = null;
-
   private async loadInitialData(): Promise<void> {
     this.setStatus("Connecting...", "yellow");
     try {
@@ -589,21 +587,9 @@ export class ClawflareTUIApp {
       this.renderMessages();
       this.setStatus("Connected", "green");
       
-      // Start warmup in the background - don't await it
-      this.warmupPromise = this.warmupSessionInBackground();
     } catch (e) {
       this.error = e instanceof Error ? e.message : "Failed to connect";
       this.setStatus(`Error: ${this.error}`, "red");
-    }
-  }
-
-  private async warmupSessionInBackground(): Promise<void> {
-    try {
-      // Fire warmup request - this creates a workflow that warms up the isolate
-      await this.client.warmupSession();
-    } catch (e) {
-      // Warmup failure shouldn't block the user - just log it
-      console.error("[warmup] Background warmup failed:", e);
     }
   }
 
@@ -1077,22 +1063,11 @@ export class ClawflareTUIApp {
     this.abortController = new AbortController();
     const requestAbortController = this.abortController;
 
-    // Wait for warmup to complete (if it's still running), then send the prompt
-    const warmupPromise = this.warmupPromise;
-    this.warmupPromise = null; // Clear it so we don't wait again
-
     const sendAfterWarmup = async (): Promise<void> => {
-      if (warmupPromise) {
-        try {
-          await warmupPromise;
-        } catch {
-          // Warmup failure shouldn't block the real prompt
-        }
-      }
       
       // Fire off the session-based chat request
       const submitted = await this.client.submitChat({
-        type: "prompt",
+        
         content: actualContent,
         sessionId: this.sessionId,
       });
@@ -1246,32 +1221,35 @@ export class ClawflareTUIApp {
 
       switch (command) {
         case "new":
-          this.setStatus("Creating new context...", "yellow");
+          this.setStatus("Creating new session...", "yellow");
           try {
-            const ctx = await this.client.createContext();
-            this.sessionId = ctx.id;
+            const session = await this.client.createSession();
+            this.sessionId = session.id;
             this.messages = [];
             this.updateHeader();
             this.renderMessages();
-            this.setStatus("New context created", "green");
+            this.setStatus("New session created", "green");
           } catch (e) {
-            this.error = e instanceof Error ? e.message : "Failed to create context";
+            this.error = e instanceof Error ? e.message : "Failed to create session";
             this.renderMessages();
             this.setStatus(`Error: ${this.error}`, "red");
           }
           break;
 
         case "fork":
-          this.setStatus("Forking context...", "yellow");
+          this.setStatus("Forking session...", "yellow");
           try {
-            const ctx = await this.client.forkContext();
-            this.sessionId = ctx.id;
-            this.messages = ctx.messages.map((m) => this.formatMessageForDisplay(m));
+            const session = await this.client.forkSession({
+              parentSessionId: this.sessionId,
+              parentMessageId: "",
+            });
+            this.sessionId = session.id;
+            this.messages = [];
             this.updateHeader();
             this.renderMessages();
-            this.setStatus("Context forked", "green");
+            this.setStatus("Session forked", "green");
           } catch (e) {
-            this.error = e instanceof Error ? e.message : "Failed to fork context";
+            this.error = e instanceof Error ? e.message : "Failed to fork session";
             this.renderMessages();
             this.setStatus(`Error: ${this.error}`, "red");
           }
