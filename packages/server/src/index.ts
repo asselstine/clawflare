@@ -91,6 +91,13 @@ export {
   isAuthenticated,
 } from "./http/auth.js";
 
+// Export request context utilities
+export type { RequestContext } from "./http/request-context.js";
+export {
+  resolveRequestContext,
+  hasPermission,
+} from "./http/request-context.js";
+
 // Export canonical data layer accessor
 export { getDataLayer } from "./data/index.js";
 

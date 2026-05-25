@@ -2,8 +2,7 @@
 // Handles all HTTP routes for the Clawflare harness
 
 import type { Env } from "../internal-types/index.js";
-import { validateHarnessToken, validateHarnessConfigured } from "./auth.js";
-import { json, notFound } from "./responses.js";
+import { json, notFound, unauthorized } from "./responses.js";
 import { handleChat } from "./routes/chat.js";
 import { handleGetSession, handleCloseSession, handleListSessions } from "./routes/sessions.js";
 import { handleCreateSession } from "./routes/session-create.js";
@@ -11,6 +10,38 @@ import { handleGetContext, handleNewContext } from "./routes/context.js";
 import { handleListTools } from "./routes/tools.js";
 import { handleGetInfo } from "./routes/info.js";
 import { handleCfDebug } from "./routes/debug.js";
+import {
+  handleCliLoginStart,
+  handleCliLoginPoll,
+  handleGithubCallback,
+  handleGetMe,
+  handleLogout,
+} from "./routes/auth.js";
+import {
+  getBearerToken,
+  resolveRequestContext,
+  type RequestContext,
+} from "./request-context.js";
+
+// Legacy token authentication for backwards compatibility during transition
+import { validateHarnessToken, validateHarnessConfigured } from "./auth.js";
+
+/**
+ * Routes that don't require authentication
+ */
+const PUBLIC_ROUTES = [
+  /^\/health$/,
+  /^\/v1\/auth\/cli\/start$/,
+  /^\/v1\/auth\/cli\/poll$/,
+  /^\/v1\/auth\/github\/callback$/,
+];
+
+/**
+ * Check if a route is public (no auth required)
+ */
+function isPublicRoute(path: string): boolean {
+  return PUBLIC_ROUTES.some((pattern) => pattern.test(path));
+}
 
 /**
  * Main HTTP request handler
@@ -29,18 +60,63 @@ export async function handleHttpRequest(
     console.log(`[REQUEST] ${request.method} ${request.url}`);
   }
 
-  // Validate API_TOKEN is configured
+  // Validate API_TOKEN is configured (still needed for legacy and e2e)
   const configError = validateHarnessConfigured(env);
   if (configError) return configError;
 
-  // Health check (no auth required for simplicity in dev)
+  // Health check and auth routes (no auth required)
   if (path === "/health") {
     return json({ status: "ok" });
   }
 
+  // Auth routes - no authentication required
+  if (path === "/v1/auth/cli/start" && request.method === "POST") {
+    return handleCliLoginStart(request, env);
+  }
+
+  if (path === "/v1/auth/cli/poll" && request.method === "POST") {
+    return handleCliLoginPoll(request, env);
+  }
+
+  if (path === "/v1/auth/github/callback" && request.method === "GET") {
+    return handleGithubCallback(request, env);
+  }
+
   // Authenticate all other requests
-  const authError = validateHarnessToken(request, env);
-  if (authError) return authError;
+  const token = getBearerToken(request);
+  if (!token) {
+    return unauthorized("Missing Authorization header");
+  }
+
+  // Try new token-based auth first
+  let requestContext: RequestContext | null = await resolveRequestContext(token, env);
+
+  // Fall back to legacy token for backwards compatibility and e2e tests
+  if (!requestContext) {
+    const legacyError = validateHarnessToken(request, env);
+    if (legacyError) {
+      return legacyError;
+    }
+    // Legacy auth - use default workspace context
+    const data = (await import("../data/index.js")).getDataLayer(env);
+    const defaultWorkspace = await data.workspaces.getById("default-workspace");
+    if (defaultWorkspace) {
+      requestContext = {
+        user: {
+          id: "legacy-user",
+          email: "legacy@clawflare.dev",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        workspace: defaultWorkspace,
+        role: "owner",
+      };
+    }
+  }
+
+  if (!requestContext) {
+    return unauthorized("Invalid token");
+  }
 
   // WebSocket upgrade for interactive workflow sessions
   if (path === "/ws") {
@@ -51,14 +127,24 @@ export async function handleHttpRequest(
   // Route matching
   // Use a simple switch on path prefix + method for clarity
 
+  // /v1/me - GET (current user info)
+  if (path === "/v1/me" && request.method === "GET") {
+    return handleGetMe(request, env, requestContext);
+  }
+
+  // /v1/auth/logout - POST
+  if (path === "/v1/auth/logout" && request.method === "POST") {
+    return handleLogout(request, env, requestContext);
+  }
+
   // /v1/chat - POST
   if (path === "/v1/chat" && request.method === "POST") {
-    return handleChat(request, env);
+    return handleChat(request, env, requestContext);
   }
 
   // /v1/session - POST (create new session without prompt)
   if (path === "/v1/session" && request.method === "POST") {
-    return handleCreateSession(request, env);
+    return await handleCreateSession(request, env, requestContext);
   }
 
   // /v1/session/:id - GET
@@ -66,29 +152,29 @@ export async function handleHttpRequest(
     // Extract sessionId from path
     const sessionId = path.replace("/v1/session/", "").replace("/close", "").split("/")[0];
     if (sessionId && !path.includes("/close")) {
-      return handleGetSession(sessionId, url, env);
+      return handleGetSession(sessionId, url, env, requestContext);
     }
   }
 
   // /v1/session/:id/close - POST
   if (path.startsWith("/v1/session/") && path.endsWith("/close") && request.method === "POST") {
     const sessionId = path.replace("/v1/session/", "").replace("/close", "");
-    return handleCloseSession(sessionId, env);
+    return handleCloseSession(sessionId, env, requestContext);
   }
 
   // /v1/sessions - GET
   if (path === "/v1/sessions" && request.method === "GET") {
-    return handleListSessions(url, env);
+    return handleListSessions(url, env, requestContext);
   }
 
   // /v1/context - GET
   if (path === "/v1/context" && request.method === "GET") {
-    return handleGetContext();
+    return await handleGetContext(request, env, requestContext);
   }
 
   // /v1/context - POST
   if (path === "/v1/context" && request.method === "POST") {
-    return handleNewContext(request);
+    return await handleNewContext(request, env, requestContext);
   }
 
   // /v1/tools - GET
@@ -103,7 +189,7 @@ export async function handleHttpRequest(
 
   // /v1/cf_debug - GET
   if (path === "/v1/cf_debug" && request.method === "GET") {
-    return handleCfDebug(env, url);
+    return handleCfDebug(env, url, requestContext);
   }
 
   // 404 for unmatched routes

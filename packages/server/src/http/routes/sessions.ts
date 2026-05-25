@@ -7,9 +7,9 @@ import { json, notFound, badRequest, serverError } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { Env } from "../../internal-types/index.js";
+import type { RequestContext } from "../request-context.js";
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
-const DEFAULT_WORKSPACE_ID = "default-workspace";
 
 /**
  * Get session state - polls for messages and events
@@ -18,18 +18,16 @@ export async function handleGetSession(
   sessionId: string,
   url: URL,
   env: Env,
-  workspaceId?: string
+  requestContext: RequestContext
 ): Promise<Response> {
   const pollStart = timingStart();
   const data = getDataLayer(env);
-  // Use provided workspace or default
-  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
+  // Use workspace from request context
+  const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
     // Find session scoped to workspace
-    const sessionState = effectiveWorkspaceId 
-      ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
-      : await data.sessions.findById(sessionId);
+    const sessionState = await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
 
     if (!sessionState) {
       logTiming(env, sessionId, "session.poll.not_found", pollStart);
@@ -91,16 +89,18 @@ export async function handleGetSession(
 /**
  * Close a session - sends close event to workflow
  */
-export async function handleCloseSession(sessionId: string, env: Env, workspaceId?: string): Promise<Response> {
+export async function handleCloseSession(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
   const data = getDataLayer(env);
-  // Use provided workspace or default
-  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
+  // Use workspace from request context
+  const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
     // Find session scoped to workspace
-    const session = effectiveWorkspaceId
-      ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
-      : await data.sessions.findById(sessionId);
+    const session = await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
       
     if (!session) {
       return notFound("Session");
@@ -138,10 +138,14 @@ export async function handleCloseSession(sessionId: string, env: Env, workspaceI
 /**
  * List sessions - returns active and recent sessions using D1
  */
-export async function handleListSessions(url: URL, env: Env, workspaceId?: string): Promise<Response> {
+export async function handleListSessions(
+  url: URL,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
   const data = getDataLayer(env);
-  // Use provided workspace or default
-  const effectiveWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
+  // Use workspace from request context
+  const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
     // Parse query parameters
@@ -153,9 +157,7 @@ export async function handleListSessions(url: URL, env: Env, workspaceId?: strin
     const sessionId = url.searchParams.get("sessionId");
     if (sessionId) {
       // Scoped to workspace
-      const state = effectiveWorkspaceId
-        ? await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId)
-        : await data.sessions.findById(sessionId);
+      const state = await data.sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
         
       if (state) {
         const [messageCount, isActive] = await Promise.all([

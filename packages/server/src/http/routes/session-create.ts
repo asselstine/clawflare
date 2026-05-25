@@ -7,23 +7,25 @@ import type { SessionMetadataState } from "../../data/index.js";
 import { json } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
-
-// Default workspace for sessions until full auth is in place
-const DEFAULT_WORKSPACE_ID = "default-workspace";
+import type { RequestContext } from "../request-context.js";
 
 /**
  * Create a new empty session with workflow
  * Returns session ID immediately; workflow is created but idle
  */
-export async function handleCreateSession(request: Request, env: Env): Promise<Response> {
+export async function handleCreateSession(
+  request: Request,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
   const requestStart = timingStart();
 
   try {
-    const body = (await request.json().catch(() => ({}))) as { sessionId?: string; workspaceId?: string };
+    const body = (await request.json().catch(() => ({}))) as { sessionId?: string };
     const sessionId = body.sessionId || crypto.randomUUID();
     const workflowId = crypto.randomUUID();
-    // Use provided workspaceId or default - Phase 6 adds workspace scoping
-    const workspaceId = body.workspaceId || DEFAULT_WORKSPACE_ID;
+    // Use workspace from request context
+    const workspaceId = requestContext.workspace.id;
 
     const data = getDataLayer(env);
 

@@ -2,13 +2,18 @@
 // Inspect session details from D1
 
 import type { Env } from "../../internal-types/index.js";
-import { json, badRequest, notFound, serverError } from "../responses.js";
+import { json, badRequest, notFound, serverError, forbidden } from "../responses.js";
 import { getDataLayer } from "../../data/index.js";
+import type { RequestContext } from "../request-context.js";
 
 /**
  * Inspect session details from D1
  */
-export async function handleCfDebug(env: Env, url: URL): Promise<Response> {
+export async function handleCfDebug(
+  env: Env,
+  url: URL,
+  requestContext: RequestContext
+): Promise<Response> {
   try {
     const sessionId = url.searchParams.get("sessionId");
 
@@ -18,8 +23,11 @@ export async function handleCfDebug(env: Env, url: URL): Promise<Response> {
 
     const dataLayer = getDataLayer(env);
 
-    // Get session metadata
-    const session = await dataLayer.sessions.findById(sessionId);
+    // Get session metadata scoped to workspace
+    const session = await dataLayer.sessions.findByIdInWorkspace(
+      requestContext.workspace.id,
+      sessionId
+    );
     if (!session) {
       return notFound("Session");
     }
@@ -34,6 +42,7 @@ export async function handleCfDebug(env: Env, url: URL): Promise<Response> {
     const debugInfo = {
       timestamp: Date.now(),
       sessionId,
+      workspaceId: requestContext.workspace.id,
       session: {
         ...session,
         isActive: session.status === "idle" || session.status === "processing",

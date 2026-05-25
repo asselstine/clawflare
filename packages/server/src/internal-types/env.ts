@@ -55,7 +55,11 @@ export interface Env {
   CODING_CONTAINER: DurableObjectNamespace<Container<Env>>;
   CLOUDFLARE_ACCOUNT_ID: string;
 
-  // GitHub token (optional)
+  // GitHub OAuth credentials for authentication
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
+  
+  // Legacy GitHub token for egress (optional)
   GITHUB_TOKEN?: string;
 
   // AI Provider configuration

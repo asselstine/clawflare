@@ -7,15 +7,17 @@ import type { SessionInputEvent } from "../../data/index.js";
 import { json, badRequest, gone, tooManyRequests, serverError } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
-
-// Default workspace for sessions until full auth is in place
-const DEFAULT_WORKSPACE_ID = "default-workspace";
+import type { RequestContext } from "../request-context.js";
 
 /**
  * Handle session-based chat submission
  * Returns session handle immediately; workflow processes async
  */
-export async function handleChat(request: Request, env: Env): Promise<Response> {
+export async function handleChat(
+  request: Request,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
   const requestStart = timingStart();
   let sessionIdVar: string | undefined;
 
@@ -30,8 +32,8 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
     const maxTurns = body.maxTurns;
     sessionIdVar = body.sessionId || crypto.randomUUID();
     const sessionId: string = sessionIdVar;
-    // Use provided workspaceId or default - Phase 6 adds workspace scoping
-    const workspaceId = (body as unknown as { workspaceId?: string }).workspaceId || DEFAULT_WORKSPACE_ID;
+    // Use workspace from request context
+    const workspaceId = requestContext.workspace.id;
 
     logTiming(env, sessionId, "chat.request.parsed", requestStart, {
       hasExistingSession: Boolean(body.sessionId),
@@ -41,7 +43,9 @@ export async function handleChat(request: Request, env: Env): Promise<Response> 
     });
 
     const data = getDataLayer(env);
-    const existingSession = body.sessionId ? await data.sessions.findById(body.sessionId) : null;
+    const existingSession = body.sessionId
+      ? await data.sessions.findByIdInWorkspace(workspaceId, body.sessionId)
+      : null;
 
     if (existingSession) {
       return handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession, requestStart);

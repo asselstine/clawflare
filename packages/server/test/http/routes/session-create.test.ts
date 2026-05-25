@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { handleCreateSession } from "../../../src/http/routes/session-create.js";
 import type { Env } from "../../../src/internal-types/index.js";
+import type { RequestContext } from "../../../src/http/request-context.js";
+import type { Workspace } from "../../../src/data/interfaces.js";
 
 // Mock environment and dependencies
 function createMockEnv(): Env {
@@ -25,24 +27,48 @@ function createMockEnv(): Env {
       }),
     } as unknown as Env["AGENT_WORKFLOW"],
     API_TOKEN: "test-token",
+    CLAWFLARE_API_TOKEN: "test-token",
   } as unknown as Env;
+}
+
+function createMockRequestContext(): RequestContext {
+  const workspace: Workspace = {
+    id: "default-workspace",
+    slug: "default",
+    name: "Default Workspace",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  return {
+    user: {
+      id: "test-user",
+      email: "test@example.com",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    },
+    workspace,
+    role: "owner",
+  };
 }
 
 interface CreateSessionResponse {
   id: string;
   messages: unknown[];
   createdAt: number;
+  workspaceId?: string;
 }
 
 describe("handleCreateSession", () => {
   it("creates a new session with generated ID when no sessionId provided", async () => {
     const env = createMockEnv();
+    const requestContext = createMockRequestContext();
     const request = new Request("http://localhost/v1/session", {
       method: "POST",
       body: JSON.stringify({}),
     });
 
-    const response = await handleCreateSession(request, env);
+    const response = await handleCreateSession(request, env, requestContext);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);
@@ -50,17 +76,19 @@ describe("handleCreateSession", () => {
     expect(data.id).toMatch(/^[0-9a-f-]{36}$/); // UUID format
     expect(data.messages).toEqual([]);
     expect(data.createdAt).toBeDefined();
+    expect(data.workspaceId).toBe("default-workspace");
   });
 
   it("creates a new session with provided sessionId", async () => {
     const env = createMockEnv();
+    const requestContext = createMockRequestContext();
     const customId = "custom-session-id-123";
     const request = new Request("http://localhost/v1/session", {
       method: "POST",
       body: JSON.stringify({ sessionId: customId }),
     });
 
-    const response = await handleCreateSession(request, env);
+    const response = await handleCreateSession(request, env, requestContext);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);
@@ -69,12 +97,13 @@ describe("handleCreateSession", () => {
 
   it("handles empty body gracefully", async () => {
     const env = createMockEnv();
+    const requestContext = createMockRequestContext();
     const request = new Request("http://localhost/v1/session", {
       method: "POST",
       body: "",
     });
 
-    const response = await handleCreateSession(request, env);
+    const response = await handleCreateSession(request, env, requestContext);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);
