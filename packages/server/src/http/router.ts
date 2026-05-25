@@ -125,21 +125,58 @@ export async function handleHttpRequest(
     return handleVerifyEmail(request, env);
   }
 
-  // Check if this is a public route that wasn't matched above
+  // Check if this is a public route that wasn't matched above - return 404
   if (isPublicRoute(path)) {
     return notFound();
   }
 
-  // ============= AUTHENTICATED ROUTES =============
+  // ============= PROTECTED ROUTES =============
+  // These routes require authentication, but we check if route exists first
+  // to return 404 for unknown endpoints
 
-  // Resolve request context (from bearer token or session cookie)
+  // Define known protected routes
+  const knownProtectedRoutes = [
+    { pattern: /^\/v1\/auth\/session$/, method: "GET" },
+    { pattern: /^\/v1\/auth\/logout$/, method: "POST" },
+    { pattern: /^\/v1\/me$/, method: "GET" },
+    { pattern: /^\/v1\/chat$/, method: "POST" },
+    { pattern: /^\/v1\/session$/, method: "POST" },
+    { pattern: /^\/v1\/session\/[^\/]+$/, method: "GET" },
+    { pattern: /^\/v1\/session\/[^\/]+\/close$/, method: "POST" },
+    { pattern: /^\/v1\/sessions$/, method: "GET" },
+    { pattern: /^\/v1\/context$/, method: "GET" },
+    { pattern: /^\/v1\/context$/, method: "POST" },
+    { pattern: /^\/v1\/tools$/, method: "GET" },
+    { pattern: /^\/v1\/info$/, method: "GET" },
+    { pattern: /^\/v1\/cf_debug$/, method: "GET" },
+    { pattern: /^\/ws$/, method: "GET" },
+  ];
+
+  // Check if this is a known protected route
+  const isKnownProtectedRoute = knownProtectedRoutes.some(
+    (r) => r.pattern.test(path) && request.method === r.method
+  );
+
+  // If it's not a known route (public or protected), return 404
+  if (!isKnownProtectedRoute && path !== "/ws") {
+    return notFound();
+  }
+
+  // Now authenticate for known protected routes
   const requestContext = await resolveRequestContext(request, env);
-
   if (!requestContext) {
     return unauthorized("Invalid or missing authentication");
   }
 
-  // GET /v1/auth/session - get current session info
+  // WebSocket upgrade for interactive workflow sessions
+  if (path === "/ws") {
+    const id = env.WEBSOCKET_SESSION.idFromName(crypto.randomUUID());
+    return env.WEBSOCKET_SESSION.get(id).fetch(request);
+  }
+
+  // ============= AUTHENTICATED APP ROUTES =============
+
+  // /v1/auth/session - GET
   if (path === "/v1/auth/session" && request.method === "GET") {
     return handleGetAuthSession(request, env, requestContext);
   }
@@ -153,14 +190,6 @@ export async function handleHttpRequest(
   if (path === "/v1/me" && request.method === "GET") {
     return handleGetMe(request, env, requestContext);
   }
-
-  // WebSocket upgrade for interactive workflow sessions
-  if (path === "/ws") {
-    const id = env.WEBSOCKET_SESSION.idFromName(crypto.randomUUID());
-    return env.WEBSOCKET_SESSION.get(id).fetch(request);
-  }
-
-  // ============= APP ROUTES =============
 
   // /v1/chat - POST
   if (path === "/v1/chat" && request.method === "POST") {

@@ -99,4 +99,7 @@ export interface Env {
 
   // Debug settings
   CLAWFLARE_DEBUG_TIMING?: string;
+
+  // Test mode flag for E2E tests
+  CLAWFLARE_TEST_RUN?: string;
 }

@@ -161,8 +161,13 @@ export async function resolveRequestContext(
   request: Request,
   env: Env
 ): Promise<RequestContext | null> {
-  // Try bearer token first
+  // Check for E2E test token (only in test mode)
   const bearerToken = getBearerToken(request);
+  if (bearerToken === "test-token-12345" && env.CLAWFLARE_TEST_RUN === "true") {
+    return await resolveE2ETestContext(env);
+  }
+
+  // Try regular bearer token
   if (bearerToken) {
     const ctx = await resolveBearerTokenContext(bearerToken, env);
     if (ctx) return ctx;
@@ -194,6 +199,79 @@ export async function resolveRequestContext(
   }
 
   return null;
+}
+
+/**
+ * Resolve E2E test context - creates/finds a test user for E2E tests
+ */
+async function resolveE2ETestContext(env: Env): Promise<RequestContext | null> {
+  try {
+    const now = Date.now();
+    const testUserId = "e2e-test-user";
+    const testEmail = "e2e-test@clawflare.dev";
+
+    // Check if test user exists
+    let user = await loadUser(testUserId, env);
+    
+    if (!user) {
+      // Create test user
+      await env.DB.prepare(
+        `
+        INSERT INTO users (id, email, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING
+      `
+      )
+        .bind(testUserId, testEmail, "E2E Test User", now, now)
+        .run();
+
+      // Create personal workspace for test user
+      const data = getDataLayer(env);
+      const workspaceId = "e2e-test-workspace";
+      
+      try {
+        await data.workspaces.create({
+          id: workspaceId,
+          slug: "e2e-test",
+          name: "E2E Test Workspace",
+          description: "Test workspace for E2E tests",
+        });
+      } catch {
+        // Workspace may already exist
+      }
+
+      try {
+        await data.workspaces.addMembership({
+          workspaceId,
+          userId: testUserId,
+          role: "owner",
+        });
+      } catch {
+        // Membership may already exist
+      }
+
+      user = await loadUser(testUserId, env);
+    }
+
+    if (!user) return null;
+
+    const workspace = await getDefaultWorkspace(user.id, env);
+    if (!workspace) return null;
+
+    const data = getDataLayer(env);
+    const role = await data.workspaces.getUserRole(workspace.id, user.id);
+    if (!role) return null;
+
+    return {
+      user,
+      workspace,
+      role,
+      accessTokenId: "e2e-test-token",
+    };
+  } catch (error) {
+    console.error("[resolveE2ETestContext] Error:", error);
+    return null;
+  }
 }
 
 /**
