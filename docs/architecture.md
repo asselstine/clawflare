@@ -87,7 +87,7 @@ Users can still self-host by:
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │   sessions   │  │    users     │  │  workspaces  │      │
-│  │ session_events│ │   cli_tokens │  │memberships   │      │
+│  │ session_events│ │   tokens │  │memberships   │      │
 │  │ stored_code  │  │ oauth_accounts│                │      │
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 │                                                             │

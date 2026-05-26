@@ -1,93 +1,95 @@
 // wrangler.jsonc - Checked-in source of truth for Wrangler configuration
 // Edit this file directly for configuration changes
 {
-  "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "clawflare-runtime",
-  "compatibility_date": "2025-01-01",
-  "compatibility_flags": ["nodejs_compat", "enable_ctx_exports"],
-  "main": "src/index.ts",
-
-  "minify": true,
-  "define": {
-    "process.env.NODE_ENV": "\"production\"",
-    "__DEV__": "false"
-  },
-
-  "services": [
-    {
-      "binding": "HTTP_GATEWAY",
-      "service": "clawflare-runtime",
-      "entrypoint": "HttpGateway"
-    }
-  ],
-
-  "worker_loaders": [
-    {
-      "binding": "LOADER"
-    }
-  ],
-
-  "containers": [
-    {
-      "class_name": "CodingContainer",
-      "image": "./container-runtime/Dockerfile",
-      "max_instances": 10,
-      "instance_type": "standard-2"
-    }
-  ],
-
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "clawflare",
-      "database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
-      "preview_database_id": "eb5d119b-7dd9-4b79-8d3d-e78bdbaa9352",
-      "migrations_dir": "migrations"
-    }
-  ],
-
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "WEBSOCKET_SESSION",
-        "class_name": "ClawflareWebSocketSession"
-      },
-      {
-        "name": "CODING_CONTAINER",
-        "class_name": "CodingContainer"
-      }
-    ]
-  },
-
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["ClawflareDatastore"]
-    },
-    {
-      "tag": "v2",
-      "new_classes": ["ClawflareWebSocketSession"]
-    },
-    {
-      "tag": "v3",
-      "deleted_classes": ["ClawflareDatastore"]
-    },
-    {
-      "tag": "v4",
-      "new_sqlite_classes": ["CodingContainer"]
-    }
-  ],
-
-  "workflows": [
-    {
-      "name": "clawflare-agent-workflow",
-      "binding": "AGENT_WORKFLOW",
-      "class_name": "PersistentSessionWorkflow"
-    }
-  ],
-
-  "vars": {
-    "AI_PROVIDER": "amazon-bedrock",
-    "AI_MODEL": "minimax.minimax-m2.5"
-  }
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"name": "clawflare-runtime",
+	"compatibility_date": "2025-01-01",
+	"compatibility_flags": [
+		"nodejs_compat",
+		"enable_ctx_exports"
+	],
+	"main": "src/index.ts",
+	"minify": true,
+	"define": {
+		"process.env.NODE_ENV": "\"production\"",
+		"__DEV__": "false"
+	},
+	"services": [
+		{
+			"binding": "HTTP_GATEWAY",
+			"service": "clawflare-runtime",
+			"entrypoint": "HttpGateway"
+		}
+	],
+	"worker_loaders": [
+		{
+			"binding": "LOADER"
+		}
+	],
+	"containers": [
+		{
+			"class_name": "CodingContainer",
+			"image": "./container-runtime/Dockerfile",
+			"max_instances": 10,
+			"instance_type": "standard-2"
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "clawflare",
+			"database_id": "cf8dc5b0-975e-4fea-b6bb-601c37fb168f",
+			"preview_database_id": "cf8dc5b0-975e-4fea-b6bb-601c37fb168f",
+			"migrations_dir": "migrations"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "WEBSOCKET_SESSION",
+				"class_name": "ClawflareWebSocketSession"
+			},
+			{
+				"name": "CODING_CONTAINER",
+				"class_name": "CodingContainer"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"ClawflareDatastore"
+			]
+		},
+		{
+			"tag": "v2",
+			"new_classes": [
+				"ClawflareWebSocketSession"
+			]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": [
+				"ClawflareDatastore"
+			]
+		},
+		{
+			"tag": "v4",
+			"new_sqlite_classes": [
+				"CodingContainer"
+			]
+		}
+	],
+	"workflows": [
+		{
+			"name": "clawflare-agent-workflow",
+			"binding": "AGENT_WORKFLOW",
+			"class_name": "PersistentSessionWorkflow"
+		}
+	],
+	"vars": {
+		"AI_PROVIDER": "amazon-bedrock",
+		"AI_MODEL": "minimax.minimax-m2.5"
+	}
 }

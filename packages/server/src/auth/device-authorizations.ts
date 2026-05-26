@@ -150,6 +150,8 @@ export async function getDeviceAuthorizationByUserCode(
   expiresAt: number;
 } | null> {
   try {
+    // Normalize input: uppercase, allow hyphen to match stored format XXXX-XXXX
+    const normalizedCode = userCode.toUpperCase().replace(/[^A-Z0-9-]/g, "");
     const row = await env.DB.prepare(
       `
       SELECT device_code, client_name, status, expires_at
@@ -157,7 +159,7 @@ export async function getDeviceAuthorizationByUserCode(
       WHERE user_code = ?
     `
     )
-      .bind(userCode.toUpperCase().replace(/[^A-Z0-9]/g, ""))
+      .bind(normalizedCode)
       .first<{
         device_code: string;
         client_name: string;

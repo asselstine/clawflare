@@ -10,7 +10,7 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { rm, writeFile } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli/client";
 import { DEFAULT_SERVER_NAMES as runtimeNames } from "../../server/src/server-names.js";
@@ -270,6 +270,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
     const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
     const d1DatabaseId = extractD1DatabaseId(d1Output);
     configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+    pendingConfigPath = configPath;
     await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
 
     const deployOutput = await runWrangler(
@@ -284,6 +285,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
       ],
       { capture: true }
     );
+    pendingConfigPath = null; // Deployment succeeded, config will be tracked in deployment object
     const url = extractWorkerUrl(deployOutput, workerName);
 
     console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
@@ -291,8 +293,14 @@ async function deployRemote(): Promise<RemoteDeployment> {
   } catch (error) {
     await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
     await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
-    if (configPath) {
-      await rm(configPath, { force: true }).catch(() => undefined);
+    // Always clean up the config file on error (even if it's the same as pendingConfigPath)
+    try {
+      if (configPath) {
+        pendingConfigPath = null;
+        await rm(configPath, { force: true });
+      }
+    } catch {
+      // Ignore cleanup errors
     }
     throw error;
   }
@@ -929,7 +937,21 @@ async function cleanupOldContainerImages(currentWorkerName?: string): Promise<vo
   }
 }
 
-async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keepAlive: boolean): Promise<void> {
+let pendingConfigPath: string | null = null;
+
+async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keepAlive: boolean, configPathOverride?: string | null): Promise<void> {
+  const configPathToDelete = configPathOverride ?? deployment?.configPath;
+  
+  // Always clean up the config file if present and not keeping alive
+  if (!keepAlive && configPathToDelete) {
+    try {
+      await rm(configPathToDelete, { force: true });
+      console.log("   ✓ Temp config removed");
+    } catch (error) {
+      // Config might already be deleted or never created
+    }
+  }
+  
   if (!deployment) return;
 
   if (keepAlive) {
@@ -972,9 +994,35 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   } catch (error) {
     console.error(`   ✗ Failed to remove temp config ${pathResolve(HARNESS_DIR, deployment.configPath)}:`, error instanceof Error ? error.message : String(error));
   }
-  
+
   // Clean up old container images from the registry
   await cleanupOldContainerImages(deployment.workerName);
+  
+  // Clean up any other lingering E2E config files
+  await cleanupOldE2EConfigs();
+}
+
+async function cleanupOldE2EConfigs(): Promise<void> {
+  try {
+    const entries = await readdir(HARNESS_DIR);
+    const e2eConfigPattern = /^wrangler\.e2e\.clawflare-.+\.jsonc$/;
+    const oldConfigs = entries.filter((entry) => e2eConfigPattern.test(entry));
+    
+    if (oldConfigs.length === 0) return;
+    
+    console.log(`   Cleaning up ${oldConfigs.length} old E2E config file(s)...`);
+    for (const config of oldConfigs) {
+      const configPath = pathResolve(HARNESS_DIR, config);
+      try {
+        await rm(configPath, { force: true });
+        console.log(`     ✓ Removed ${config}`);
+      } catch {
+        // Ignore errors for old configs
+      }
+    }
+  } catch {
+    // Directory might not exist or be readable
+  }
 }
 
 async function main(): Promise<void> {
@@ -1004,7 +1052,7 @@ async function main(): Promise<void> {
     console.error("\n❌ Fatal error:", error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   } finally {
-    await cleanupRemoteDeployment(deployment, keepAlive);
+    await cleanupRemoteDeployment(deployment, keepAlive, pendingConfigPath);
     if (!keepAlive) process.exit(process.exitCode || 0);
   }
 }

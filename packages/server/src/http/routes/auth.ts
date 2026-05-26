@@ -344,7 +344,8 @@ export async function handleDeviceVerify(
 ): Promise<Response> {
   try {
     const url = new URL(request.url);
-    const userCode = url.searchParams.get("code")?.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    // Normalize user code: uppercase, keep hyphen, remove invalid chars
+    const userCode = url.searchParams.get("code")?.toUpperCase().replace(/[^A-Z0-9-]/g, "");
 
     if (!userCode) {
       return new Response(
@@ -452,7 +453,8 @@ export async function handleDeviceApprove(
 ): Promise<Response> {
   try {
     const formData = await request.formData();
-    const userCode = formData.get("code")?.toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    // Normalize user code: uppercase, keep hyphen, remove invalid chars
+    const userCode = formData.get("code")?.toString().toUpperCase().replace(/[^A-Z0-9-]/g, "");
     const action = formData.get("action")?.toString();
 
     if (!userCode) {
