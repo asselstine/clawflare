@@ -6,6 +6,7 @@
 import { AgentClient } from "../client.js";
 import { createTUI } from "../tui-app.js";
 import { loadConfig } from "./login.js";
+import { DEFAULT_SERVER } from "../constants.js";
 
 interface OpenOptions {
   server?: string;
@@ -14,28 +15,16 @@ interface OpenOptions {
 }
 
 export async function openCommand(options: OpenOptions): Promise<void> {
-  // Priority: 1) CLI options, 2) env vars, 3) saved config, 4) defaults
-  let server = options.server || process.env.CLAWFLARE_URL;
-  let token = options.token || process.env.CLAWFLARE_API_TOKEN;
-  let workspace = options.workspace || process.env.CLAWFLARE_WORKSPACE;
+  // Priority: 1) CLI options, 2) saved config, 3) env vars, 4) defaults
+  const config = await loadConfig();
   
-  // Try loading from saved config
-  if (!server || !token || !workspace) {
-    const config = await loadConfig();
-    if (!server) {
-      server = config.server;
-    }
-    if (!token) {
-      token = config.token;
-    }
-    if (!workspace) {
-      workspace = config.workspace;
-    }
-  }
+  let server = options.server || config.server || process.env.CLAWFLARE_URL;
+  let token = options.token || config.token || process.env.CLAWFLARE_API_TOKEN;
+  let workspace = options.workspace || config.workspace || process.env.CLAWFLARE_WORKSPACE;
   
   // Default to hosted service if no server specified
   if (!server) {
-    server = "https://app.clawflare.dev";
+    server = DEFAULT_SERVER;
   }
   
   if (!token) {

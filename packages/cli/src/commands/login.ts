@@ -7,6 +7,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { spawn } from "child_process";
+import { DEFAULT_SERVER } from "../constants.js";
 
 // =============================================================================
 // Types
@@ -81,6 +82,10 @@ interface LoginOptions {
   provider?: "github";
   open?: boolean;
   timeout?: number;
+}
+
+interface WhoamiOptions {
+  server?: string;
 }
 
 interface LogoutOptions {
@@ -290,7 +295,7 @@ async function pollDeviceAuthorization(
 
 export async function loginCommand(options: LoginOptions): Promise<void> {
   // Resolve server
-  const server = options.server?.replace(/\/$/, "") || "https://app.clawflare.dev";
+  const server = options.server?.replace(/\/$/, "") || DEFAULT_SERVER;
   const timeout = options.timeout ?? 600; // Default 10 minutes
   
   console.log(`Authenticating with ${server}...\n`);
@@ -410,7 +415,7 @@ export async function logoutCommand(options: LogoutOptions): Promise<void> {
     return;
   }
   
-  const server = options.server || config.server || "https://app.clawflare.dev";
+  const server = options.server || config.server || DEFAULT_SERVER;
   
   // Try to revoke server-side (best effort)
   try {
@@ -445,21 +450,17 @@ export async function logoutCommand(options: LogoutOptions): Promise<void> {
   console.log("Logged out.");
 }
 
-export async function whoamiCommand(): Promise<void> {
+export async function whoamiCommand(options: WhoamiOptions = {}): Promise<void> {
   const config = await loadConfig();
   
-  if (!config.server) {
-    console.log("Server: https://app.clawflare.dev (default)");
-  } else {
-    console.log(`Server: ${config.server}`);
-  }
+  // Use provided server option, or fall back to config, then default
+  const server = options.server || config.server || DEFAULT_SERVER;  
+  console.log(`Server: ${server}`);
   
   if (!config.token) {
     console.log("\nNot logged in. Run 'clawflare login' to authenticate.");
     return;
   }
-  
-  const server = config.server || "https://app.clawflare.dev";
   
   try {
     const me = await authenticatedRequestJson<MeResponse>(
@@ -475,6 +476,7 @@ export async function whoamiCommand(): Promise<void> {
     // Also update cached info
     const updatedConfig: AuthConfig = {
       ...config,
+      server, // Update server if it was provided via option
       user: {
         id: me.user.id,
         email: me.user.email,
