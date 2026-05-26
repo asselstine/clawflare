@@ -565,26 +565,39 @@ export async function handleDeviceAuthPoll(
       return json({ status: "pending" });
     }
 
-    // Complete - get user info if available
-    if (result.userId) {
-      const userRow = await env.DB.prepare(
-        `SELECT id, email, display_name FROM users WHERE id = ?`
-      ).bind(result.userId).first<{
-        id: string;
-        email: string;
-        display_name: string | null;
-      }>();
+    // Complete - get user info and return access token
+    if (result.status === "complete") {
+      const response: { 
+        status: "complete"; 
+        accessToken?: string; 
+        user?: { id: string; email: string; displayName?: string };
+      } = { status: "complete" };
+      
+      // Include access token if available (one-time retrieval)
+      if (result.accessToken) {
+        response.accessToken = result.accessToken;
+      }
+      
+      // Include user info if available
+      if (result.userId) {
+        const userRow = await env.DB.prepare(
+          `SELECT id, email, display_name FROM users WHERE id = ?`
+        ).bind(result.userId).first<{
+          id: string;
+          email: string;
+          display_name: string | null;
+        }>();
 
-      if (userRow) {
-        return json({
-          status: "complete",
-          user: {
+        if (userRow) {
+          response.user = {
             id: userRow.id,
             email: userRow.email,
             displayName: userRow.display_name ?? undefined,
-          },
-        });
+          };
+        }
       }
+      
+      return json(response);
     }
 
     return json({ status: "complete" });
@@ -691,32 +704,59 @@ export async function handleGithubCallback(
       );
     }
 
+    // Calculate base URL for redirect_uri
+    const baseUrl = url.origin;
+
     const tokenResponse = await fetch(GITHUB_TOKEN_URL, {
       method: "POST",
       headers: {
         Accept: "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Clawflare-Auth",
       },
       body: JSON.stringify({
         client_id: clientId,
         client_secret: clientSecret,
         code,
+        redirect_uri: `${baseUrl}/v1/auth/github/callback`,
       }),
     });
 
-    const tokenData = (await tokenResponse.json()) as {
-      access_token?: string;
-      error?: string;
-    };
-
-    if (tokenData.error || !tokenData.access_token) {
+    // Check if response is JSON before parsing
+    const contentType = tokenResponse.headers.get("content-type");
+    if (!contentType?.includes("application/json")) {
+      const text = await tokenResponse.text();
+      console.error(`[handleGithubCallback] Non-JSON response from GitHub: ${tokenResponse.status} ${tokenResponse.statusText}`, text.slice(0, 500));
       return new Response(
         `<!DOCTYPE html>
 <html>
 <head><title>Authentication Failed</title></head>
 <body>
 <h1>Authentication Failed</h1>
-<p>Could not exchange authorization code with GitHub.</p>
+<p>GitHub returned an unexpected response (${tokenResponse.status}).</p>
+<p>Please try again.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
+    }
+
+    const tokenData = (await tokenResponse.json()) as {
+      access_token?: string;
+      error?: string;
+      error_description?: string;
+    };
+
+    if (tokenData.error || !tokenData.access_token) {
+      console.error(`[handleGithubCallback] GitHub OAuth error: ${tokenData.error} - ${tokenData.error_description}`);
+      const errorMsg = tokenData.error_description || tokenData.error || "Unknown error";
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title></head>
+<body>
+<h1>Authentication Failed</h1>
+<p>GitHub returned an error: ${escapeHtml(errorMsg)}</p>
 <p>Please try again.</p>
 </body>
 </html>`,
@@ -731,8 +771,26 @@ export async function handleGithubCallback(
       headers: {
         Authorization: `Bearer ${githubAccessToken}`,
         Accept: "application/vnd.github.v3+json",
+        "User-Agent": "Clawflare-Auth",
       },
     });
+
+    if (!userResponse.ok) {
+      const errorText = await userResponse.text();
+      console.error(`[handleGithubCallback] GitHub API error: ${userResponse.status} ${userResponse.statusText}`, errorText.slice(0, 500));
+      return new Response(
+        `<!DOCTYPE html>
+<html>
+<head><title>Authentication Failed</title></head>
+<body>
+<h1>Authentication Failed</h1>
+<p>Failed to fetch user data from GitHub (${userResponse.status}).</p>
+<p>Please try again.</p>
+</body>
+</html>`,
+        { headers: { "Content-Type": "text/html" }, status: 400 }
+      );
+    }
 
     const githubUser = (await userResponse.json()) as {
       id: number;
@@ -748,16 +806,22 @@ export async function handleGithubCallback(
         headers: {
           Authorization: `Bearer ${githubAccessToken}`,
           Accept: "application/vnd.github.v3+json",
+          "User-Agent": "Clawflare-Auth",
         },
       });
-      const emails = (await emailsResponse.json()) as Array<{
-        email: string;
-        primary: boolean;
-        verified: boolean;
-      }>;
-      const primaryEmail = emails.find((e) => e.primary && e.verified);
-      if (primaryEmail) {
-        email = primaryEmail.email;
+
+      if (!emailsResponse.ok) {
+        console.error(`[handleGithubCallback] GitHub emails API error: ${emailsResponse.status} ${emailsResponse.statusText}`);
+      } else {
+        const emails = (await emailsResponse.json()) as Array<{
+          email: string;
+          primary: boolean;
+          verified: boolean;
+        }>;
+        const primaryEmail = emails.find((e) => e.primary && e.verified);
+        if (primaryEmail) {
+          email = primaryEmail.email;
+        }
       }
     }
 

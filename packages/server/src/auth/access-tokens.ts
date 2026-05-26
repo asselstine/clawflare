@@ -2,6 +2,7 @@
 // CLI, API clients, etc.
 
 import type { Env } from "../internal-types/index.js";
+import { logger } from "../logger.js";
 
 const TOKEN_PREFIX = "clf_";
 
@@ -68,7 +69,7 @@ export async function createAccessToken(
     
     return { id, token };
   } catch (error) {
-    console.error("[createAccessToken] Error:", error);
+    logger.error("Failed to create access token", { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
@@ -84,8 +85,9 @@ export async function verifyAccessToken(
   userId: string;
 } | null> {
   try {
+    logger.debug("Verifying access token", { tokenLength: token.length, tokenPrefix: token.slice(0, 15) });
     const tokenHash = await hashToken(token);
-    
+
     const row = await env.DB.prepare(
       `
       SELECT id, user_id, expires_at, revoked_at
@@ -100,19 +102,26 @@ export async function verifyAccessToken(
         expires_at: number | null;
         revoked_at: number | null;
       }>();
-    
-    if (!row) return null;
-    
+
+    if (!row) {
+      logger.debug("Access token not found", { tokenHashPrefix: tokenHash.slice(0, 16) });
+      return null;
+    }
+
     // Check if token is expired
     if (row.expires_at && Date.now() > row.expires_at) {
+      logger.debug("Access token expired", { tokenId: row.id, expiresAt: row.expires_at });
       return null;
     }
-    
+
     // Check if token is revoked
     if (row.revoked_at) {
+      logger.debug("Access token revoked", { tokenId: row.id, revokedAt: row.revoked_at });
       return null;
     }
-    
+
+    logger.debug("Access token verified", { tokenId: row.id, userId: row.user_id });
+
     // Update last_used_at
     await env.DB.prepare(
       `
@@ -123,10 +132,10 @@ export async function verifyAccessToken(
     )
       .bind(Date.now(), row.id)
       .run();
-    
+
     return { tokenId: row.id, userId: row.user_id };
   } catch (error) {
-    console.error("[verifyAccessToken] Error:", error);
+    logger.error("Failed to verify access token", { error: error instanceof Error ? error.message : String(error) });
     return null;
   }
 }
@@ -151,7 +160,7 @@ export async function revokeAccessToken(
       .run();
     return true;
   } catch (error) {
-    console.error("[revokeAccessToken] Error:", error);
+    logger.error("Failed to revoke access token", { error: error instanceof Error ? error.message : String(error) });
     return false;
   }
 }
@@ -197,7 +206,7 @@ export async function listAccessTokens(
       lastUsedAt: row.last_used_at,
     }));
   } catch (error) {
-    console.error("[listAccessTokens] Error:", error);
+    logger.error("Failed to list access tokens", { error: error instanceof Error ? error.message : String(error) });
     return [];
   }
 }

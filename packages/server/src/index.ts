@@ -106,6 +106,9 @@ export { normalizeBedrockBearerToken } from "./agent-config.js";
 // Export diagnostics
 export { logTiming, timingStart } from "./diagnostics.js";
 
+// Export logger
+export { logger, log } from "./logger.js";
+
 // Export auth utilities
 export {
   hashPassword,
