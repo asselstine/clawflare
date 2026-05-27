@@ -1,121 +1,210 @@
-// Cloudflare Secret Store Adapter
-// Manages workspace-scoped model connection secrets
+/**
+ * Secret Store Adapter using Secret Broker
+ *
+ * This is the client-side interface that the main Clawflare worker uses.
+ * It communicates with the Secret Broker worker via service bindings to
+ * store and retrieve envelope-encrypted secrets.
+ */
 
 import type { Env } from "./internal-types/index.js";
+import type { AuthorizationContext } from "./secret-broker/types.js";
+import { getJobSnapshotRepository, createJobSnapshot } from "./secret-broker/job-snapshot.js";
+
+/**
+ * Auth Session - can be immediate (AuthorizationContext) or async (Job Snapshot)
+ */
+export type AuthSession =
+  | { type: "immediate"; context: AuthorizationContext }
+  | { type: "async"; jobId: string };
 
 /**
  * Secret Store Adapter interface
- * Abstracts Cloudflare Secret Store operations
+ * Abstracts secret operations from the rest of the codebase
  */
 export interface SecretStoreAdapter {
   /**
    * Store a model connection secret
-   * Returns the secret reference/name
+   * Returns the key that was stored
    */
-  putModelConnectionSecret(args: {
-    workspaceId: string;
-    connectionId: string;
-    key: string;
-    value: string;
-  }): Promise<string>;
+  putModelConnectionSecret(
+    auth: AuthSession,
+    args: {
+      workspaceId: string;
+      connectionId: string;
+      key: string;
+      value: string;
+    }
+  ): Promise<string>;
 
   /**
-   * Retrieve a secret by its reference/name
+   * Retrieve a secret by its reference (which is the key)
    */
-  getModelConnectionSecret(ref: string): Promise<string | undefined>;
+  getModelConnectionSecret(
+    auth: AuthSession,
+    ref: string
+  ): Promise<string | undefined>;
 
   /**
-   * Delete a secret by its reference/name
+   * Delete a secret by its reference
    */
-  deleteModelConnectionSecret(ref: string): Promise<void>;
+  deleteModelConnectionSecret(
+    auth: AuthSession,
+    ref: string
+  ): Promise<void>;
 
   /**
    * Get multiple secrets for a connection
+   * The refs map contains { secretKey: ref } pairs
+   * Returns { secretKey: value } pairs
    */
   getConnectionSecrets(
+    auth: AuthSession,
     workspaceId: string,
     connectionId: string,
     keys: string[],
     refs: Record<string, string>
   ): Promise<Record<string, string>>;
+
+  /**
+   * Create a job authorization snapshot for async operations (workflows).
+   * Returns the jobId to pass to async operations.
+   */
+  createJobAuthorization(
+    userId: string,
+    workspaceId: string,
+    allowedOperations: string[],
+    expiryMs?: number
+  ): Promise<string>;
 }
 
 /**
- * Create a deterministic secret name for a model connection secret
+ * Create the storage key for a model connection secret
+ * This becomes both the "ref" and the actual key in storage
  */
 function createSecretName(
   workspaceId: string,
   connectionId: string,
   key: string
 ): string {
-  // Format: workspaces/{workspaceId}/model-connections/{connectionId}/{key}
-  // Using underscores instead of / to avoid path-like issues
   return `workspaces_${workspaceId}_mc_${connectionId}_${key}`;
 }
 
 /**
- * Secret Store using Cloudflare Secret Store binding
- * This is the production implementation
+ * Parse a secret name to extract workspace and connection info
+ * Returns null if the ref format is unrecognized
  */
-class CloudflareSecretStore implements SecretStoreAdapter {
+function parseSecretName(
+  ref: string
+): { workspaceId: string; connectionId: string; key: string } | null {
+  const match = ref.match(/^workspaces_(.+)_mc_(.+)_(.+)$/);
+  if (!match) return null;
+  const [_, workspaceId, connectionId, key] = match;
+  if (!workspaceId || !connectionId || !key) return null;
+  return { workspaceId, connectionId, key };
+}
+
+/**
+ * Secret Store client using Secret Broker service binding
+ */
+class SecretBrokerClient implements SecretStoreAdapter {
   constructor(private readonly env: Env) {}
 
-  async putModelConnectionSecret(args: {
-    workspaceId: string;
-    connectionId: string;
-    key: string;
-    value: string;
-  }): Promise<string> {
-    const secretName = createSecretName(args.workspaceId, args.connectionId, args.key);
-
-    // Cloudflare Secret Store binding API
-    // The exact API depends on the binding type, this is a placeholder
-    const store = this.env.MODEL_SECRET_STORE;
-    if (!store) {
-      throw new Error("MODEL_SECRET_STORE binding not configured");
+  private async callBroker(
+    endpoint: string,
+    body: unknown
+  ): Promise<{ ok: true; value?: string } | { ok: false; error: string }> {
+    const broker = this.env.SECRET_BROKER;
+    if (!broker) {
+      throw new Error("SECRET_BROKER service binding not configured");
     }
 
-    // Placeholder for Secret Store API
-    // Real implementation will depend on Cloudflare's specific binding
-    // @ts-expect-error - Secret Store API not yet typed
-    if (typeof store.put === "function") {
-      // @ts-expect-error
-      await store.put(secretName, args.value);
-    }
+    const response = await broker.fetch(`https://secret-broker/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
-    return secretName;
+    return response.json() as Promise<{ ok: true; value?: string } | { ok: false; error: string }>;
   }
 
-  async getModelConnectionSecret(ref: string): Promise<string | undefined> {
-    const store = this.env.MODEL_SECRET_STORE;
-    if (!store) {
-      return undefined;
+  async putModelConnectionSecret(
+    auth: AuthSession,
+    args: {
+      workspaceId: string;
+      connectionId: string;
+      key: string;
+      value: string;
+    }
+  ): Promise<string> {
+    const secretKey = createSecretName(args.workspaceId, args.connectionId, args.key);
+
+    const authParam = auth.type === "immediate"
+      ? auth.context
+      : { jobId: auth.jobId };
+
+    const result = await this.callBroker("store", {
+      auth: authParam,
+      key: secretKey,
+      value: args.value,
+    });
+
+    if (!result.ok) {
+      throw new Error(`Failed to store secret: ${result.error}`);
     }
 
-    // @ts-expect-error - Secret Store API not yet typed
-    if (typeof store.get === "function") {
-      // @ts-expect-error
-      const result = await store.get(ref);
-      return result;
-    }
-
-    return undefined;
+    return secretKey;
   }
 
-  async deleteModelConnectionSecret(ref: string): Promise<void> {
-    const store = this.env.MODEL_SECRET_STORE;
-    if (!store) {
-      throw new Error("MODEL_SECRET_STORE binding not configured");
+  async getModelConnectionSecret(
+    auth: AuthSession,
+    ref: string
+  ): Promise<string | undefined> {
+    const parsed = parseSecretName(ref);
+    if (!parsed) {
+      throw new Error(`Invalid secret reference format: ${ref}`);
     }
 
-    // @ts-expect-error - Secret Store API not yet typed
-    if (typeof store.delete === "function") {
-      // @ts-expect-error
-      await store.delete(ref);
+    const authParam = auth.type === "immediate"
+      ? auth.context
+      : { jobId: auth.jobId };
+
+    const result = await this.callBroker("get", {
+      auth: authParam,
+      key: ref,
+    });
+
+    if (!result.ok) {
+      if (result.error === "Secret not found") {
+        return undefined;
+      }
+      throw new Error(`Failed to retrieve secret: ${result.error}`);
+    }
+
+    return result.value;
+  }
+
+  async deleteModelConnectionSecret(auth: AuthSession, ref: string): Promise<void> {
+    const parsed = parseSecretName(ref);
+    if (!parsed) {
+      throw new Error(`Invalid secret reference format: ${ref}`);
+    }
+
+    const authParam = auth.type === "immediate"
+      ? auth.context
+      : { jobId: auth.jobId };
+
+    const result = await this.callBroker("delete", {
+      auth: authParam,
+      key: ref,
+    });
+
+    if (!result.ok) {
+      throw new Error(`Failed to delete secret: ${result.error}`);
     }
   }
 
   async getConnectionSecrets(
+    auth: AuthSession,
     _workspaceId: string,
     _connectionId: string,
     keys: string[],
@@ -126,7 +215,7 @@ class CloudflareSecretStore implements SecretStoreAdapter {
     for (const key of keys) {
       const ref = refs[key];
       if (ref) {
-        const value = await this.getModelConnectionSecret(ref);
+        const value = await this.getModelConnectionSecret(auth, ref);
         if (value) {
           secrets[key] = value;
         }
@@ -135,13 +224,34 @@ class CloudflareSecretStore implements SecretStoreAdapter {
 
     return secrets;
   }
+
+  async createJobAuthorization(
+    userId: string,
+    workspaceId: string,
+    allowedOperations: string[],
+    expiryMs?: number
+  ): Promise<string> {
+    const jobId = crypto.randomUUID();
+    const snapshot = createJobSnapshot(
+      jobId,
+      userId,
+      workspaceId,
+      allowedOperations,
+      expiryMs
+    );
+    
+    const repo = getJobSnapshotRepository(this.env.DB);
+    await repo.put(snapshot);
+    
+    return jobId;
+  }
 }
 
 /**
  * Create a Secret Store adapter for the given environment
  */
 export function createSecretStore(env: Env): SecretStoreAdapter {
-  return new CloudflareSecretStore(env);
+  return new SecretBrokerClient(env);
 }
 
 /**
@@ -160,3 +270,6 @@ export function getSecretStore(env: Env): SecretStoreAdapter {
   }
   return store;
 }
+
+// Re-export AuthorizationContext for convenience
+export { type AuthorizationContext } from "./secret-broker/types.js";

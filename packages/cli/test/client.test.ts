@@ -24,11 +24,11 @@ describe("AgentClient", () => {
 
       global.fetch = mockFetch;
 
-      const client = new AgentClient("http://localhost", "test-token");
+      const client = new AgentClient("https://localhost", "test-token");
       const result = await client.createSession();
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost/v1/session",
+        "https://localhost/v1/session",
         expect.objectContaining({
           method: "POST",
           headers: expect.objectContaining({
@@ -52,7 +52,7 @@ describe("AgentClient", () => {
 
       global.fetch = mockFetch;
 
-      const client = new AgentClient("http://localhost", "test-token");
+      const client = new AgentClient("https://localhost", "test-token");
       await client.createSession();
       
       expect(client.getCurrentContextId()).toBe("new-session-id");
@@ -65,7 +65,7 @@ describe("AgentClient", () => {
 
       global.fetch = mockFetch;
 
-      const client = new AgentClient("http://localhost", "test-token");
+      const client = new AgentClient("https://localhost", "test-token");
       
       await expect(client.createSession()).rejects.toThrow("Server error");
     });
@@ -83,11 +83,11 @@ describe("AgentClient", () => {
 
       global.fetch = mockFetch;
 
-      const client = new AgentClient("http://localhost", "test-token");
+      const client = new AgentClient("https://localhost", "test-token");
       await client.warmupSession();
 
       expect(mockFetch).toHaveBeenCalledWith(
-        "http://localhost/v1/session",
+        "https://localhost/v1/session",
         expect.objectContaining({
           method: "POST",
         })
@@ -101,7 +101,7 @@ describe("AgentClient", () => {
 
       global.fetch = mockFetch;
 
-      const client = new AgentClient("http://localhost", "test-token");
+      const client = new AgentClient("https://localhost", "test-token");
       
       await expect(client.warmupSession()).resolves.toBeUndefined();
     });

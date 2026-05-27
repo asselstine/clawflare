@@ -68,6 +68,9 @@ export {
   ContainerProxy,
 };
 
+// Export Secret Broker as separate entrypoint
+export { default as SecretBroker } from "./secret-broker/index.js";
+
 // Export HTTP utilities
 export {
   handleHttpRequest,
@@ -199,12 +202,22 @@ export {
   type PublicModelConnection,
 } from "./model-providers.js";
 
-// Export secret store adapter
+// Export secret store adapter and authorization types
 export {
   createSecretStore,
   getSecretStore,
   type SecretStoreAdapter,
+  type AuthSession,
+  type AuthorizationContext,
 } from "./secret-store.js";
+
+// Export Secret Broker types for workflow integration
+export type { JobAuthorizationSnapshot } from "./secret-broker/types.js";
+export {
+  createJobSnapshot,
+  getJobSnapshotRepository,
+  type JobSnapshotRepository,
+} from "./secret-broker/job-snapshot.js";
 
 // Main Cloudflare Worker export
 export default {

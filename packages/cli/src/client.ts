@@ -81,6 +81,13 @@ export class AgentClient {
   private currentSessionId: string | null = null;
 
   constructor(url: string, token: string, workspace?: string) {
+    // Require HTTPS for security - reject plain HTTP
+    const urlObj = new URL(url);
+    if (urlObj.protocol !== "https:") {
+      throw new Error(
+        `Insecure server URL: ${url}. HTTPS is required. Clawflare CLI does not support HTTP servers.`
+      );
+    }
     this.url = url;
     this.token = token;
     this.workspace = workspace;
@@ -249,8 +256,17 @@ export class AgentClient {
 
   // WebSocket for streaming responses
   async connectWebSocket(): Promise<WebSocket> {
+    const wsUrl = `${this.url.replace(/^https/, "wss")}/ws`;
+    
+    // Ensure we're using secure WebSocket (WSS)
+    if (!wsUrl.startsWith("wss://")) {
+      throw new Error(
+        `Insecure WebSocket URL: ${wsUrl}. WSS (secure WebSocket) is required.`
+      );
+    }
+    
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`${this.url.replace(/^http/, "ws")}/ws`, {
+      const ws = new WebSocket(wsUrl, {
         headers: this.getHeaders(),
       });
 

@@ -9,15 +9,30 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
-const MIGRATION_PATH = join(MIGRATIONS_DIR, "0001_initial_data_layer.sql");
+const MIGRATION_PATH = join(MIGRATIONS_DIR, "0001_initial_schema.sql");
 
+/**
+ * Parse SQL migration file into executable statements.
+ * Handles inline comments and multi-line statements.
+ */
 function executableMigrationStatements(path = MIGRATION_PATH): string[] {
-  return readFileSync(path, "utf-8")
-    .replace(/^--.*$/gm, "")
-    .replace(/^PRAGMA\s+foreign_keys\s*=\s*ON;$/gim, "")
-    .split(";")
-    .map((statement) => statement.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+  let content = readFileSync(path, "utf-8");
+  
+  // Remove PRAGMA statements (D1 handles these separately)
+  content = content.replace(/^PRAGMA\s+foreign_keys\s*=\s*ON;$/gim, "");
+  
+  // Remove all SQL comments (-- style)
+  content = content.replace(/--[^\n]*/g, "");
+  
+  // Split on semicolons to get statements
+  const rawStatements = content.split(';');
+  
+  // Clean up each statement
+  return rawStatements
+    .map(stmt => stmt.trim())
+    .filter(stmt => stmt.length > 0)
+    // Normalize whitespace
+    .map(stmt => stmt.replace(/\s+/g, ' '));
 }
 
 /**
@@ -148,8 +163,8 @@ describe("migrations", () => {
       "idx_session_events_timestamp",
       "idx_session_input_queue_session_sequence",
       "idx_session_runtime_active",
-      "idx_stored_code_updated",
-      "idx_stored_code_name",
+      "idx_stored_code_workspace_updated",
+      "idx_stored_code_workspace_name",
       "idx_egress_handlers_enabled",
       "idx_egress_handlers_name",
       "idx_egress_handlers_updated",

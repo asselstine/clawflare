@@ -3,7 +3,7 @@
  * Manage AI model providers for your workspace
  */
 
-import { input, select, confirm } from "@inquirer/prompts";
+import { password, select, confirm } from "@inquirer/prompts";
 import { loadConfig } from "./login.js";
 import { DEFAULT_SERVER } from "../constants.js";
 import { AgentClient } from "../client.js";
@@ -13,6 +13,7 @@ interface ProviderInfo {
   id: string;
   name: string;
   requiredSecrets: string[];
+  optionalSecrets: string[];
 }
 
 interface AddOptions {
@@ -100,7 +101,9 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
     value: p,
     description: p.requiredSecrets.length > 0
       ? `Requires: ${p.requiredSecrets.join(", ")}`
-      : "No credentials required",
+      : p.optionalSecrets.length > 0
+        ? `Optional: ${p.optionalSecrets.join(", ")}`
+        : "No credentials required",
   }));
 
   const selectedProvider = await select({
@@ -113,9 +116,20 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
   // Prompt for each required secret
   const secrets: Record<string, string> = {};
   for (const secretKey of selectedProvider.requiredSecrets) {
-    const secretValue = await input({
-      message: `${secretKey}:`,
-      transformer: (input: string) => "*".repeat(input.length),
+    const secretValue = await password({
+      message: `${secretKey} (required):`,
+      mask: true,
+    });
+    if (secretValue.trim()) {
+      secrets[secretKey] = secretValue.trim();
+    }
+  }
+
+  // Prompt for optional secrets
+  for (const secretKey of selectedProvider.optionalSecrets) {
+    const secretValue = await password({
+      message: `${secretKey} (optional):`,
+      mask: true,
     });
     if (secretValue.trim()) {
       secrets[secretKey] = secretValue.trim();

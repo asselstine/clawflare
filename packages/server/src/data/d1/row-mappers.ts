@@ -56,6 +56,7 @@ export interface SessionRow {
   model_connection_id: string | null;
   model_provider: string | null;
   model_name: string | null;
+  workflow_auth_job_id: string | null;
 }
 
 // Extended row type including event count from JOIN
@@ -186,6 +187,7 @@ export function mapSessionRow(row: SessionRow): SessionMetadataState {
     modelConnectionId: row.model_connection_id ?? undefined,
     modelProvider: (row.model_provider as ModelProvider | undefined) ?? undefined,
     modelName: row.model_name ?? undefined,
+    workflowAuthJobId: row.workflow_auth_job_id ?? undefined,
   };
 }
 
@@ -199,6 +201,10 @@ export function mapSessionSummaryRow(row: SessionRow): SessionSummary {
     messageCount: 0, // Will need to query events for this
     updatedAt: row.updated_at,
     isActive: status === "idle" || status === "processing",
+    modelConnectionId: row.model_connection_id ?? undefined,
+    modelProvider: (row.model_provider as ModelProvider | undefined) ?? undefined,
+    modelName: row.model_name ?? undefined,
+    workflowAuthJobId: row.workflow_auth_job_id ?? undefined,
   };
 }
 
@@ -215,6 +221,7 @@ export function mapSessionSummaryRowWithCount(row: SessionWithCountRow): Session
     modelConnectionId: row.model_connection_id ?? undefined,
     modelProvider: (row.model_provider as ModelProvider | undefined) ?? undefined,
     modelName: row.model_name ?? undefined,
+    workflowAuthJobId: row.workflow_auth_job_id ?? undefined,
   };
 }
 

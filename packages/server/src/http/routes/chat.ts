@@ -9,6 +9,23 @@ import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
+import { getSecretStore } from "../../secret-store.js";
+
+/**
+ * Create an immediate authorization context from the request context
+ */
+function createAuthSession(ctx: RequestContext) {
+  return {
+    type: "immediate" as const,
+    context: {
+      userId: ctx.user.id,
+      workspaceId: ctx.workspace.id,
+      authTime: Date.now(),
+      requestId: crypto.randomUUID(),
+      version: 1,
+    },
+  };
+}
 
 /**
  * Handle session-based chat submission
@@ -65,7 +82,8 @@ export async function handleChat(
         content,
         maxTurns,
         body.modelConnectionId,
-        requestStart
+        requestStart,
+        requestContext
       );
     }
   } catch (error) {
@@ -154,16 +172,22 @@ async function handleNewSession(
   content: string,
   maxTurns: number | undefined,
   modelConnectionId: string | undefined,
-  requestStart: number
+  requestStart: number,
+  requestContext: RequestContext
 ): Promise<Response> {
   logTiming(env, sessionId, "chat.workflow.create.start", requestStart);
   const data = getDataLayer(env);
+  const secretStore = getSecretStore(env);
+
+  // Create authorization context for this request
+  const auth = createAuthSession(requestContext);
 
   // Resolve model connection for the new session
   const resolvedModel = await resolveModelConnectionForNewSession(
     env,
     workspaceId,
-    modelConnectionId
+    modelConnectionId,
+    auth
   );
 
   // If no model connection is configured, return 422 error immediately
@@ -186,6 +210,15 @@ async function handleNewSession(
   const initialEventCursor = await data.events.latestCursor(sessionId);
   const workflowId = crypto.randomUUID();
 
+  // Create job authorization snapshot for the workflow
+  // This allows the workflow to access secrets without storing the user's token
+  const workflowAuthJobId = await secretStore.createJobAuthorization(
+    requestContext.user.id,
+    workspaceId,
+    ["get"], // Only allow reading secrets
+    60 * 60 * 1000 // 1 hour expiry
+  );
+
   // Initialize session state with workspace and model info
   const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
@@ -199,6 +232,7 @@ async function handleNewSession(
     modelConnectionId: resolvedModel?.id,
     modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
     modelName: resolvedModel?.modelName,
+    workflowAuthJobId,
   };
   await data.sessions.save(initialState);
   logTiming(env, sessionId, "chat.session_state.saved", requestStart);

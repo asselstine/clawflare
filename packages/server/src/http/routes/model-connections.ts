@@ -14,6 +14,27 @@ import {
   getWorkspaceDefaultModelConnection,
   setWorkspaceDefaultModelConnection,
 } from "../../model-connection-service.js";
+import type { AuthSession } from "../../secret-store.js";
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/**
+ * Create an immediate authorization context from the request context
+ */
+function createAuthSession(ctx: RequestContext): AuthSession {
+  return {
+    type: "immediate",
+    context: {
+      userId: ctx.user.id,
+      workspaceId: ctx.workspace.id,
+      authTime: Date.now(),
+      requestId: crypto.randomUUID(),
+      version: 1,
+    },
+  };
+}
 
 // =============================================================================
 // Response Types
@@ -86,15 +107,23 @@ export async function handleCreateModelConnection(
     return badRequest("secrets object is required");
   }
 
+  // Create authorization context for this request
+  const auth = createAuthSession(requestContext);
+
   try {
-    const result = await createModelConnection(env, requestContext.workspace.id, {
-      displayName: body.displayName,
-      provider: body.provider,
-      modelName: body.modelName,
-      secrets: body.secrets,
-      config: body.config,
-      setAsDefault: body.setAsDefault,
-    });
+    const result = await createModelConnection(
+      env,
+      requestContext.workspace.id,
+      auth,
+      {
+        displayName: body.displayName,
+        provider: body.provider,
+        modelName: body.modelName,
+        secrets: body.secrets,
+        config: body.config,
+        setAsDefault: body.setAsDefault,
+      }
+    );
 
     const response: ModelConnectionResponse = {
       modelConnection: {
@@ -131,14 +160,21 @@ export async function handleGetModelConnection(
   requestContext: RequestContext,
   id: string
 ): Promise<Response> {
+  // Create authorization context for this request
+  const auth = createAuthSession(requestContext);
+
   try {
-    const connection = await resolveModelConnection(env, requestContext.workspace.id, id);
+    const connection = await resolveModelConnection(
+      env,
+      requestContext.workspace.id,
+      id,
+      auth
+    );
     if (!connection) {
       return notFound("Model connection");
     }
 
-    // TODO: Return public/redacted version
-    // For now, return minimal info
+    // Return redacted version without secret values
     return json({
       id: connection.id,
       provider: connection.provider,
@@ -174,14 +210,23 @@ export async function handleUpdateModelConnection(
   // Any authenticated user can update model connections for their workspace
   const body = (await request.json().catch(() => ({}))) as UpdateModelConnectionRequest;
 
+  // Create authorization context for this request
+  const auth = createAuthSession(requestContext);
+
   try {
-    const result = await updateModelConnection(env, requestContext.workspace.id, id, {
-      displayName: body.displayName,
-      provider: body.provider,
-      modelName: body.modelName,
-      secrets: body.secrets,
-      config: body.config,
-    });
+    const result = await updateModelConnection(
+      env,
+      requestContext.workspace.id,
+      id,
+      auth,
+      {
+        displayName: body.displayName,
+        provider: body.provider,
+        modelName: body.modelName,
+        secrets: body.secrets,
+        config: body.config,
+      }
+    );
 
     const { redactModelConnection } = await import("../../model-providers.js");
     const response: ModelConnectionResponse = {
@@ -209,8 +254,11 @@ export async function handleDeleteModelConnection(
   id: string
 ): Promise<Response> {
   // Any authenticated user can delete model connections for their workspace
+  // Create authorization context for this request
+  const auth = createAuthSession(requestContext);
+
   try {
-    await deleteModelConnection(env, requestContext.workspace.id, id);
+    await deleteModelConnection(env, requestContext.workspace.id, id, auth);
     return json({ ok: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

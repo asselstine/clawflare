@@ -48,6 +48,9 @@ export interface Env {
   // Workflow for durable agent execution
   AGENT_WORKFLOW: Workflow;
 
+  // Secret Broker service for envelope-encrypted secrets
+  SECRET_BROKER: Fetcher;
+
   // Cloudflare Container for isolated development environment
   CODING_CONTAINER: DurableObjectNamespace<Container<Env>>;
 
@@ -57,6 +60,9 @@ export interface Env {
   
   // Legacy GitHub token for egress (optional)
   GITHUB_TOKEN?: string;
+
+  // Clawflare API token - used for Secret Broker authentication
+  CLAWFLARE_API_TOKEN: string;
 
   // AWS region setting (optional, for Bedrock)
   AWS_REGION?: string;

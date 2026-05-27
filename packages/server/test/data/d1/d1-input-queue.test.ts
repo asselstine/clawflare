@@ -15,24 +15,36 @@ const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
 // Default workspace for testing - Phase 6 adds workspace scoping
 const DEFAULT_WORKSPACE_ID = "test-workspace";
 
+/**
+ * Parse SQL migration file into executable statements.
+ * Handles inline comments and multi-line statements.
+ */
 function migrationStatements(migrationFile: string): string[] {
-  return readFileSync(join(MIGRATIONS_DIR, migrationFile), "utf-8")
-    .replace(/^--.*$/gm, "")
-    .replace(/^PRAGMA\s+foreign_keys\s*=\s*ON;$/gim, "")
-    .split(";")
-    .map((statement) => statement.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+  let content = readFileSync(join(MIGRATIONS_DIR, migrationFile), "utf-8");
+  
+  // Remove PRAGMA statements (D1 handles these separately)
+  content = content.replace(/^PRAGMA\s+foreign_keys\s*=\s*ON;$/gim, "");
+  
+  // Remove all SQL comments (-- style)
+  content = content.replace(/--[^\n]*/g, "");
+  
+  // Split on semicolons to get statements
+  const rawStatements = content.split(';');
+  
+  // Clean up each statement
+  return rawStatements
+    .map(stmt => stmt.trim())
+    .filter(stmt => stmt.length > 0)
+    // Normalize whitespace
+    .map(stmt => stmt.replace(/\s+/g, ' '));
 }
 
 function allMigrationStatements(): string[] {
   const files = [
-    "0001_initial_data_layer.sql",
-    "0002_add_session_counters.sql",
-    "0003_add_workspace_scoping.sql",
-    "0004_complete_workspace_migration.sql",
-    "0005_add_auth_tables.sql",
-    "0006_complete_auth_schema.sql",
-    "0007_model_connections.sql"
+    "0001_initial_schema.sql",
+    "007_encrypted_secrets.sql",
+    "008_job_authorization_snapshots.sql",
+    "009_add_workflow_auth_job_id.sql",
   ];
   return files.flatMap((file) => migrationStatements(file));
 }

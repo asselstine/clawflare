@@ -1,16 +1,18 @@
 // AI Providers HTTP Routes
-// Returns supported AI providers from pi-ai
+// Returns supported AI providers with their required secrets
 
 import { json } from "../responses.js";
-import { getProviders, findEnvKeys } from "@earendil-works/pi-ai";
+import { getProviders } from "@earendil-works/pi-ai";
+import { requiredSecretsForProvider, optionalSecretsForProvider } from "../../model-providers.js";
 
 /**
- * Provider info from pi-ai
+ * Provider info for API response
  */
 export interface ProviderInfo {
   id: string;
   name: string;
   requiredSecrets: string[];
+  optionalSecrets: string[];
 }
 
 /**
@@ -21,11 +23,11 @@ export async function handleListProviders(): Promise<Response> {
     const providerIds = getProviders();
 
     const providers: ProviderInfo[] = providerIds.map((id) => {
-      const envKeys = findEnvKeys(id) ?? [];
       return {
         id,
-        name: id, // pi-ai uses the provider ID as the display name
-        requiredSecrets: envKeys,
+        name: id,
+        requiredSecrets: requiredSecretsForProvider(id),
+        optionalSecrets: optionalSecretsForProvider(id),
       };
     });
 

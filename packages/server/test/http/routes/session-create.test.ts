@@ -52,7 +52,7 @@ function createMockRequestContext(): RequestContext {
 
 interface CreateSessionResponse {
   id: string;
-  messages: unknown[];
+  eventCursor: string;
   createdAt: number;
   workspaceId?: string;
 }
@@ -72,7 +72,7 @@ describe("handleCreateSession", () => {
     expect(response.status).toBe(200);
     expect(data.id).toBeDefined();
     expect(data.id).toMatch(/^[0-9a-f-]{36}$/); // UUID format
-    expect(data.messages).toEqual([]);
+    expect(data.eventCursor).toBeDefined();
     expect(data.createdAt).toBeDefined();
     expect(data.workspaceId).toBe("default-workspace");
   });
@@ -106,6 +106,6 @@ describe("handleCreateSession", () => {
 
     expect(response.status).toBe(200);
     expect(data.id).toBeDefined();
-    expect(data.messages).toEqual([]);
+    expect(data.eventCursor).toBeDefined();
   });
 });

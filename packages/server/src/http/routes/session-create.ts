@@ -10,6 +10,23 @@ import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
+import { getSecretStore } from "../../secret-store.js";
+
+/**
+ * Create an immediate authorization context from the request context
+ */
+function createAuthSession(ctx: RequestContext) {
+  return {
+    type: "immediate" as const,
+    context: {
+      userId: ctx.user.id,
+      workspaceId: ctx.workspace.id,
+      authTime: Date.now(),
+      requestId: crypto.randomUUID(),
+      version: 1,
+    },
+  };
+}
 
 /**
  * Create a new empty session with workflow
@@ -33,12 +50,17 @@ export async function handleCreateSession(
     const workspaceId = requestContext.workspace.id;
 
     const data = getDataLayer(env);
+    const secretStore = getSecretStore(env);
+
+    // Create authorization context for this request
+    const auth = createAuthSession(requestContext);
 
     // Resolve model connection for the session
     const resolvedModel = await resolveModelConnectionForNewSession(
       env,
       workspaceId,
-      body.modelConnectionId
+      body.modelConnectionId,
+      auth
     );
 
     // If explicit model requested but not found, return error
@@ -47,6 +69,15 @@ export async function handleCreateSession(
         `Model connection "${body.modelConnectionId}" not found or not available`
       );
     }
+
+    // Create job authorization snapshot for the workflow
+    // This allows the workflow to access secrets without storing the user's token
+    const workflowAuthJobId = await secretStore.createJobAuthorization(
+      requestContext.user.id,
+      workspaceId,
+      ["get"], // Only allow reading secrets
+      60 * 60 * 1000 // 1 hour expiry
+    );
 
     // Initialize session state with workspace and model info
     const initialState: SessionMetadataState = {
@@ -61,48 +92,35 @@ export async function handleCreateSession(
       modelConnectionId: resolvedModel?.id,
       modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
       modelName: resolvedModel?.modelName,
+      workflowAuthJobId,
     };
     await data.sessions.save(initialState);
-    logTiming(env, sessionId, "session.create.saved", requestStart);
 
-    // Create persistent workflow - this warms up the workflow isolate
+    // Create persistent workflow (initially idle)
     await env.AGENT_WORKFLOW.create({
       id: workflowId,
       params: { sessionId },
     });
-    logTiming(env, sessionId, "session.create.workflow_done", requestStart);
+    logTiming(env, sessionId, "session.create.workflows.create.done", requestStart);
 
-    const response: {
-      id: string;
-      workspaceId: string;
-      messages: [];
-      createdAt: number;
-      modelConnection?: { id: string; provider: string; modelName: string };
-    } = {
+    logTiming(env, sessionId, "session.create.response", requestStart);
+
+    return json({
       id: sessionId,
       workspaceId,
-      messages: [],
-      createdAt: initialState.updatedAt,
-    };
-
-    // Include model connection info if available
-    if (resolvedModel) {
-      response.modelConnection = {
-        id: resolvedModel.id,
-        provider: resolvedModel.provider,
-        modelName: resolvedModel.modelName,
-      };
-    }
-
-    return json(response);
-  } catch (error) {
-    logTiming(env, "unknown", "session.create.error", requestStart, {
-      error: error instanceof Error ? error.message : String(error),
+      eventCursor: initialState.nextEventCursor,
+      createdAt: Date.now(),
+      modelConnection: resolvedModel
+        ? {
+            id: resolvedModel.id,
+            provider: resolvedModel.provider,
+            modelName: resolvedModel.modelName,
+          }
+        : undefined,
     });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     console.error("[handleCreateSession] Error:", error);
-    return json(
-      { error: error instanceof Error ? error.message : "Unknown error" },
-      { status: 500 }
-    );
+    return badRequest(message);
   }
 }

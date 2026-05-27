@@ -4,7 +4,7 @@
 import type { Env } from "./internal-types/index.js";
 import type { ModelConnection } from "./data/index.js";
 import { getDataLayer } from "./data/index.js";
-import { getSecretStore } from "./secret-store.js";
+import { getSecretStore, type AuthSession } from "./secret-store.js";
 import {
   validateModelConnectionInput,
   requiredSecretsForProvider,
@@ -38,6 +38,7 @@ export interface CreateModelConnectionResult {
 export async function createModelConnection(
   env: Env,
   workspaceId: string,
+  auth: AuthSession,
   input: {
     displayName?: string;
     provider: string;
@@ -83,7 +84,7 @@ export async function createModelConnection(
 
   for (const [key, value] of Object.entries(input.secrets)) {
     if (value) {
-      const ref = await secretStore.putModelConnectionSecret({
+      const ref = await secretStore.putModelConnectionSecret(auth, {
         workspaceId,
         connectionId: connection.id,
         key,
@@ -95,9 +96,13 @@ export async function createModelConnection(
   }
 
   // Update connection with secret refs
-  const updatedConnection = await data.modelConnections.update(workspaceId, connection.id, {
-    secretRefs,
-  });
+  const updatedConnection = await data.modelConnections.update(
+    workspaceId,
+    connection.id,
+    {
+      secretRefs,
+    }
+  );
 
   // Set as default if requested
   if (input.setAsDefault) {
@@ -117,6 +122,7 @@ export async function updateModelConnection(
   env: Env,
   workspaceId: string,
   id: string,
+  auth: AuthSession,
   input: {
     displayName?: string | null;
     provider?: string;
@@ -151,7 +157,7 @@ export async function updateModelConnection(
     // Store new secrets
     for (const [key, value] of Object.entries(input.secrets)) {
       if (value) {
-        const ref = await secretStore.putModelConnectionSecret({
+        const ref = await secretStore.putModelConnectionSecret(auth, {
           workspaceId,
           connectionId: id,
           key,
@@ -187,7 +193,8 @@ export async function updateModelConnection(
 export async function deleteModelConnection(
   env: Env,
   workspaceId: string,
-  id: string
+  id: string,
+  auth: AuthSession
 ): Promise<void> {
   const data = getDataLayer(env);
   const secretStore = getSecretStore(env);
@@ -202,11 +209,9 @@ export async function deleteModelConnection(
   const deleteErrors: string[] = [];
   for (const ref of Object.values(connection.secretRefs)) {
     try {
-      await secretStore.deleteModelConnectionSecret(ref);
+      await secretStore.deleteModelConnectionSecret(auth, ref);
     } catch (error) {
-      deleteErrors.push(
-        error instanceof Error ? error.message : String(error)
-      );
+      deleteErrors.push(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -227,7 +232,7 @@ export async function deleteModelConnection(
   // but not fail the operation since D1 is already soft-deleted
   if (deleteErrors.length > 0) {
     console.warn(
-      `[deleteModelConnection] Failed to delete some secrets:`,
+      "[deleteModelConnection] Failed to delete some secrets:",
       deleteErrors
     );
   }
@@ -240,7 +245,8 @@ export async function deleteModelConnection(
 export async function resolveModelConnection(
   env: Env,
   workspaceId: string,
-  connectionId: string
+  connectionId: string,
+  auth: AuthSession
 ): Promise<ResolvedModelConnection> {
   const data = getDataLayer(env);
   const secretStore = getSecretStore(env);
@@ -257,7 +263,7 @@ export async function resolveModelConnection(
   for (const key of requiredSecrets) {
     const ref = connection.secretRefs[key];
     if (ref) {
-      const value = await secretStore.getModelConnectionSecret(ref);
+      const value = await secretStore.getModelConnectionSecret(auth, ref);
       if (value) {
         secrets[key] = value;
       }
@@ -281,19 +287,31 @@ export async function resolveModelConnection(
 export async function resolveModelConnectionForNewSession(
   env: Env,
   workspaceId: string,
-  requestedId?: string
+  requestedId: string | undefined,
+  auth: AuthSession
 ): Promise<ResolvedModelConnection | null> {
   const data = getDataLayer(env);
 
   // Try explicit request
   if (requestedId) {
-    return await resolveModelConnection(env, workspaceId, requestedId);
+    const connection = await data.modelConnections.get(workspaceId, requestedId);
+    if (!connection) {
+      return null;
+    }
+    return await resolveModelConnection(env, workspaceId, requestedId, auth);
   }
 
   // Try workspace default
-  const defaultConnection = await data.modelConnections.getWorkspaceDefault(workspaceId);
+  const defaultConnection = await data.modelConnections.getWorkspaceDefault(
+    workspaceId
+  );
   if (defaultConnection) {
-    return await resolveModelConnection(env, workspaceId, defaultConnection.id);
+    return await resolveModelConnection(
+      env,
+      workspaceId,
+      defaultConnection.id,
+      auth
+    );
   }
 
   // No env fallback - explicit model connection required
@@ -305,7 +323,8 @@ export async function resolveModelConnectionForNewSession(
  */
 export async function resolveModelConnectionForSession(
   env: Env,
-  sessionId: string
+  sessionId: string,
+  auth: AuthSession
 ): Promise<ResolvedModelConnection | null> {
   const data = getDataLayer(env);
 
@@ -316,13 +335,25 @@ export async function resolveModelConnectionForSession(
 
   // If session has a model connection, use it
   if (session.modelConnectionId) {
-    return await resolveModelConnection(env, session.workspaceId, session.modelConnectionId);
+    return await resolveModelConnection(
+      env,
+      session.workspaceId,
+      session.modelConnectionId,
+      auth
+    );
   }
 
   // Fallback to workspace default
-  const defaultConnection = await data.modelConnections.getWorkspaceDefault(session.workspaceId);
+  const defaultConnection = await data.modelConnections.getWorkspaceDefault(
+    session.workspaceId
+  );
   if (defaultConnection) {
-    return await resolveModelConnection(env, session.workspaceId, defaultConnection.id);
+    return await resolveModelConnection(
+      env,
+      session.workspaceId,
+      defaultConnection.id,
+      auth
+    );
   }
 
   // No env fallback - explicit model connection required
@@ -331,6 +362,7 @@ export async function resolveModelConnectionForSession(
 
 /**
  * Set workspace default model connection
+ * Note: This doesn't require secret access, so no auth parameter needed
  */
 export async function setWorkspaceDefaultModelConnection(
   env: Env,
@@ -343,6 +375,7 @@ export async function setWorkspaceDefaultModelConnection(
 
 /**
  * Check if a workspace has any model connections configured
+ * Note: This doesn't require secret access, so no auth parameter needed
  */
 export async function hasModelConnections(
   env: Env,
@@ -355,18 +388,22 @@ export async function hasModelConnections(
 
 /**
  * Get workspace default model connection (public/redacted)
+ * Note: This doesn't require secret access, so no auth parameter needed
  */
 export async function getWorkspaceDefaultModelConnection(
   env: Env,
   workspaceId: string
 ): Promise<PublicModelConnection | null> {
   const data = getDataLayer(env);
-  const defaultConnection = await data.modelConnections.getWorkspaceDefault(workspaceId);
+  const defaultConnection = await data.modelConnections.getWorkspaceDefault(
+    workspaceId
+  );
   return defaultConnection ? redactModelConnection(defaultConnection) : null;
 }
 
 /**
  * List model connections for workspace (public/redacted)
+ * Note: This doesn't require secret access, so no auth parameter needed
  */
 export async function listModelConnections(
   env: Env,

@@ -73,6 +73,7 @@ export interface SessionMetadataState {
   modelConnectionId?: string;
   modelProvider?: ModelProvider;
   modelName?: string;
+  workflowAuthJobId?: string;
 }
 
 /**
@@ -89,6 +90,7 @@ export interface SessionSummary {
   modelConnectionId?: string;
   modelProvider?: ModelProvider;
   modelName?: string;
+  workflowAuthJobId?: string;
 }
 
 /**
