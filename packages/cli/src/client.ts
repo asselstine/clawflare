@@ -271,8 +271,12 @@ export class AgentClient {
     return this.url;
   }
 
-  async getServerInfo(): Promise<ServerInfo> {
-    return this.requestJson<ServerInfo>("/v1/info");
+  getToken(): string {
+    return this.token;
+  }
+
+  async getServerInfo(): Promise<ServerInfo & { workspace?: { hasModelConnections: boolean } }> {
+    return this.requestJson<ServerInfo & { workspace?: { hasModelConnections: boolean } }>("/v1/info");
   }
 
   // Debug endpoint - inspect DO storage

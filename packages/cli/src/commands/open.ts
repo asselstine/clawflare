@@ -15,11 +15,11 @@ interface OpenOptions {
 }
 
 export async function openCommand(options: OpenOptions): Promise<void> {
-  // Priority: 1) CLI options, 2) saved config, 3) env vars, 4) defaults
+  // Priority: 1) CLI options, 2) saved config, 3) env vars (CLAWFLARE_URL only), 4) defaults
   const config = await loadConfig();
   
   let server = options.server || config.server || process.env.CLAWFLARE_URL;
-  let token = options.token || config.token || process.env.CLAWFLARE_API_TOKEN;
+  let token = options.token || config.token;
   let workspace = options.workspace || config.workspace || process.env.CLAWFLARE_WORKSPACE;
   
   // Default to hosted service if no server specified

@@ -9,6 +9,11 @@ import { DEFAULT_SERVER } from "./constants.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./commands/login.js";
 import { openCommand } from "./commands/open.js";
 import { doctorCommand } from "./commands/doctor.js";
+import {
+  providersAddCommand,
+  providersRemoveCommand,
+  providersListCommand,
+} from "./commands/providers.js";
 
 const program = new Command()
   .name("clawflare")
@@ -81,6 +86,39 @@ program
       workspace: options.workspace,
     });
   });
+
+// providers command
+program
+  .command("providers")
+  .description("Manage AI model providers")
+  .addCommand(
+    new Command("add")
+      .description("Add a new model provider")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (options: { server?: string; token?: string }) => {
+        await providersAddCommand(options);
+      })
+  )
+  .addCommand(
+    new Command("remove")
+      .description("Remove a model provider")
+      .argument("[name]", "Name or ID of the model connection to remove")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (name: string | undefined, options: { server?: string; token?: string }) => {
+        await providersRemoveCommand({ ...options, name });
+      })
+  )
+  .addCommand(
+    new Command("list")
+      .description("List configured model providers")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (options: { server?: string; token?: string }) => {
+        await providersListCommand(options);
+      })
+  );
 
 // doctor command
 program

@@ -81,6 +81,7 @@ const slashCommands = [
   { name: "fork", description: "Fork the current context" },
   { name: "name", description: "Name the current session" },
   { name: "tools", description: "List available tools" },
+  { name: "models", description: "Select workspace default model" },
   { name: "clear", description: "Clear the chat history" },
   { name: "help", description: "Show help" },
   { name: "exit", description: "Exit the CLI" },
@@ -578,6 +579,21 @@ export class ClawflareTUIApp {
       this.serverInfo.provider = serverInfo.provider;
       this.serverInfo.model = serverInfo.model;
       this.serverInfo.contextTotal = serverInfo.contextWindow;
+
+      // Check if workspace has model connections configured
+      const hasModelConnections = serverInfo.workspace?.hasModelConnections ?? true;
+
+      if (!hasModelConnections) {
+        // Show helpful message when no models configured
+        this.messages.push({
+          role: "assistant",
+          content: `Model not configured. Use \`clawflare providers add\` to add model providers. Use /models to choose your model shortlist.`,
+        });
+        this.updateHeader();
+        this.renderMessages();
+        this.setStatus("No model configured", "yellow");
+        return;
+      }
       
       // Create session and start background warmup
       const ctx = await this.client.createSession();
@@ -1289,6 +1305,41 @@ export class ClawflareTUIApp {
           }
           break;
 
+        case "models":
+          this.setStatus("Loading model connections...", "yellow");
+          try {
+            const { modelConnections, defaultModelConnectionId } = await this.client.listModelConnections();
+            
+            if (modelConnections.length === 0) {
+              this.messages.push({
+                role: "assistant",
+                content: "No model connections configured. Use `clawflare providers add` to add a provider.",
+              });
+              this.renderMessages();
+              this.setStatus("No models available", "yellow");
+              return;
+            }
+
+            // Build model list message
+            const modelList = modelConnections.map((m) => {
+              const isDefault = m.id === defaultModelConnectionId;
+              const displayName = m.displayName || `${m.provider} - ${m.modelName}`;
+              return `- ${displayName}${isDefault ? " [DEFAULT]" : ""}`;
+            }).join("\n");
+
+            this.messages.push({
+              role: "assistant",
+              content: `Available model connections:\n${modelList}\n\nTo set a default, use the CLI: clawflare providers list`,
+            });
+            this.renderMessages();
+            this.setStatus("Ready", "green");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Failed to load model connections";
+            this.renderMessages();
+            this.setStatus(`Error: ${this.error}`, "red");
+          }
+          break;
+
         case "clear":
           this.messages = [];
           this.renderMessages();
@@ -1303,6 +1354,7 @@ export class ClawflareTUIApp {
 /fork - Fork the current context
 /name <name> - Name the current session
 /tools - List available tools
+/models - Show available model connections
 /skill:<name> [args] - Invoke a local Agent Skill
 /cf_debug [key] - Debug DO storage for current session
 /clear - Clear chat history

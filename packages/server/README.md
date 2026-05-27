@@ -62,24 +62,14 @@ The server uses:
 
 `wrangler.jsonc` configures these bindings directly.
 
-## Secrets and Variables
+## Model Connections
 
-Set production secrets via Wrangler:
+AI providers are configured per-workspace via the API, not via Wrangler secrets. Users must:
 
-```bash
-npx wrangler secret put CLAWFLARE_API_TOKEN
-npx wrangler secret put AWS_BEARER_TOKEN_BEDROCK
-npx wrangler secret put CLOUDFLARE_API_TOKEN
-npx wrangler secret put CLOUDFLARE_ACCOUNT_ID
-npx wrangler secret put GITHUB_TOKEN  # optional
-```
+1. Use `clawflare providers add` CLI command to add a provider
+2. Use `/models` in the TUI to select the default model
 
-For local development, create `.dev.vars`:
-
-```bash
-CLAWFLARE_API_TOKEN=your-token
-AWS_BEARER_TOKEN_BEDROCK=your-aws-token
-```
+Supported providers include: amazon-bedrock, anthropic, openai, and others from pi-ai.
 
 ## Database Migrations
 

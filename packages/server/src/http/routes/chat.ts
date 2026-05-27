@@ -4,7 +4,7 @@
 import type { Env } from "../../internal-types/index.js";
 import type { ChatRequest, ModelProvider } from "../../types.js";
 import type { SessionInputEvent } from "../../data/index.js";
-import { json, badRequest, gone, tooManyRequests, serverError } from "../responses.js";
+import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
@@ -165,6 +165,16 @@ async function handleNewSession(
     workspaceId,
     modelConnectionId
   );
+
+  // If no model connection is configured, return 422 error immediately
+  if (!resolvedModel) {
+    return unprocessable(
+      "No model connection configured for this workspace",
+      {
+        hint: "Use 'clawflare providers add' to add a model provider, then '/models' in the TUI to select it",
+      }
+    );
+  }
 
   // If explicit model requested but not found, return error
   if (modelConnectionId && !resolvedModel) {

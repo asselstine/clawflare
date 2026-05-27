@@ -9,6 +9,7 @@ import { handleCreateSession } from "./routes/session-create.js";
 import { handleGetContext, handleNewContext } from "./routes/context.js";
 import { handleListTools } from "./routes/tools.js";
 import { handleGetInfo } from "./routes/info.js";
+import { handleListProviders } from "./routes/providers.js";
 import { handleCfDebug } from "./routes/debug.js";
 import {
   handleListModelConnections,
@@ -24,6 +25,7 @@ import {
   handleDeviceVerify,
   handleDeviceApprove,
   handleGithubCallback,
+  handleMockOAuthAutoApprove,
   handleRegister,
   handleLogin,
   handleLogout,
@@ -47,6 +49,7 @@ const PUBLIC_ROUTES = [
   /^\/v1\/auth\/device\/verify$/,
   /^\/v1\/auth\/device\/approve$/,
   /^\/v1\/auth\/github\/callback$/,
+  /^\/v1\/auth\/mock\/auto-approve$/,
   /^\/v1\/auth\/password\/forgot$/,
   /^\/v1\/auth\/password\/reset$/,
   /^\/v1\/auth\/email\/verify$/,
@@ -133,6 +136,11 @@ export async function handleHttpRequest(
     return handleVerifyEmail(request, env);
   }
 
+  // GET /v1/auth/mock/auto-approve - Mock OAuth auto-approve (test mode only)
+  if (path === "/v1/auth/mock/auto-approve" && request.method === "GET") {
+    return handleMockOAuthAutoApprove(request, env);
+  }
+
   // Check if this is a public route that wasn't matched above - return 404
   if (isPublicRoute(path)) {
     return notFound();
@@ -157,6 +165,7 @@ export async function handleHttpRequest(
     { pattern: /^\/v1\/tools$/, method: "GET" },
     { pattern: /^\/v1\/info$/, method: "GET" },
     { pattern: /^\/v1\/cf_debug$/, method: "GET" },
+    { pattern: /^\/v1\/providers$/, method: "GET" },
     { pattern: /^\/v1\/model-connections$/, method: "GET" },
     { pattern: /^\/v1\/model-connections$/, method: "POST" },
     { pattern: /^\/v1\/model-connections\/[^\/]+$/, method: "GET" },
@@ -251,12 +260,17 @@ export async function handleHttpRequest(
 
   // /v1/info - GET
   if (path === "/v1/info" && request.method === "GET") {
-    return handleGetInfo(env);
+    return handleGetInfo(env, requestContext ? { workspaceId: requestContext.workspace.id } : undefined);
   }
 
   // /v1/cf_debug - GET
   if (path === "/v1/cf_debug" && request.method === "GET") {
     return handleCfDebug(env, url, requestContext);
+  }
+
+  // /v1/providers - GET
+  if (path === "/v1/providers" && request.method === "GET") {
+    return handleListProviders();
   }
 
   // /v1/model-connections - GET

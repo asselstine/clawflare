@@ -93,6 +93,13 @@ export function serviceUnavailable(message: string = "Service unavailable"): Res
 }
 
 /**
+ * 422 Unprocessable Entity response
+ */
+export function unprocessable(message: string, details?: Record<string, unknown>): Response {
+  return errorJson(message, 422, details);
+}
+
+/**
  * 413 Payload Too Large response (with storage quota details)
  */
 export function payloadTooLarge(details: {

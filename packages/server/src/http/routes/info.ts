@@ -3,45 +3,46 @@
 
 import type { Env } from "../../internal-types/index.js";
 import { json, serverError } from "../responses.js";
-import { normalizeBedrockBearerToken } from "../../agent-config.js";
 import { getSupportedProviders } from "../../model-providers.js";
 
-/**
- * Get server info (provider, model, context window, model connection support)
- */
-export async function handleGetInfo(env: Env): Promise<Response> {
-  try {
-    const provider = env.AI_PROVIDER || "amazon-bedrock";
-    const model = env.AI_MODEL || "minimax.minimax-m2.5";
-    const contextWindow = 128000;
-    const rawBedrockToken = env.AWS_BEARER_TOKEN_BEDROCK || "";
-    const normalizedBedrockToken = normalizeBedrockBearerToken(rawBedrockToken) || "";
+interface InfoRequestContext {
+  workspaceId: string;
+}
 
-    return json({
-      provider,
-      model,
+/**
+ * Get server info (supported providers, model connection support)
+ * Also returns workspace-specific info if authenticated
+ */
+export async function handleGetInfo(
+  env: Env,
+  requestContext?: InfoRequestContext
+): Promise<Response> {
+  try {
+    const contextWindow = 128000;
+
+    const response: {
+      contextWindow: number;
+      supportsWorkspaceModelConnections: boolean;
+      supportedProviders: string[];
+      workspace?: {
+        hasModelConnections: boolean;
+      };
+    } = {
       contextWindow,
-      mockAi: env.MOCK_AI,
       supportsWorkspaceModelConnections: true,
       supportedProviders: getSupportedProviders(),
-      bedrockAuth: {
-        configured: normalizedBedrockToken.length > 0,
-        rawLength: rawBedrockToken.length,
-        normalizedLength: normalizedBedrockToken.length,
-        hadBearerPrefix: /\s*Bearer\s+/i.test(rawBedrockToken),
-        fingerprint: normalizedBedrockToken ? await sha256Prefix(normalizedBedrockToken) : undefined,
-      },
-    });
+    };
+
+    // Include workspace-specific info if available
+    if (requestContext?.workspaceId) {
+      const { hasModelConnections } = await import("../../model-connection-service.js");
+      response.workspace = {
+        hasModelConnections: await hasModelConnections(env, requestContext.workspaceId),
+      };
+    }
+
+    return json(response);
   } catch (error) {
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
-}
-
-async function sha256Prefix(value: string): Promise<string> {
-  const bytes = new TextEncoder().encode(value);
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash))
-    .slice(0, 8)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 }

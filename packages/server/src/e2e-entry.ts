@@ -10,6 +10,7 @@ import { getDataLayer } from "./data/index.js";
 import { executeDynamicWorker } from "./tools/dynamic-worker.js";
 import { containerBash, containerLs, destroyContainer, getContainerHealth } from "./container/client.js";
 import { createAccessToken } from "./auth/access-tokens.js";
+import { handleMockOAuthAutoApprove } from "./http/routes/auth.js";
 
 export { HttpGateway, PersistentSessionWorkflow, ClawflareWebSocketSession, CodingContainer, ContainerProxy };
 
@@ -172,6 +173,11 @@ export default {
           error: error instanceof Error ? error.message : String(error),
         }, { status: 500 });
       }
+    }
+
+    // Mock OAuth auto-approve endpoint (E2E tests only)
+    if (path === "/v1/auth/mock/auto-approve" && request.method === "GET") {
+      return handleMockOAuthAutoApprove(request, env);
     }
 
     // Delegate to main handler for other endpoints

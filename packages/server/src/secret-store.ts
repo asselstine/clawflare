@@ -72,12 +72,6 @@ class CloudflareSecretStore implements SecretStoreAdapter {
     // The exact API depends on the binding type, this is a placeholder
     const store = this.env.MODEL_SECRET_STORE;
     if (!store) {
-      // Fallback to env-based storage if Secret Store not configured
-      if (this.env.CLAWFLARE_ALLOW_ENV_MODEL_SECRETS === "true") {
-        // In dev mode, we can store in a local cache or env
-        // This is NOT for production
-        return secretName;
-      }
       throw new Error("MODEL_SECRET_STORE binding not configured");
     }
 
@@ -93,16 +87,6 @@ class CloudflareSecretStore implements SecretStoreAdapter {
   }
 
   async getModelConnectionSecret(ref: string): Promise<string | undefined> {
-    // Check for env-based fallback (development only)
-    if (this.env.CLAWFLARE_ALLOW_ENV_MODEL_SECRETS === "true") {
-      // Map secret name to env var
-      const envKey = secretNameToEnvKey(ref);
-      const value = envKey ? this.env[envKey as keyof Env] : undefined;
-      if (typeof value === "string") {
-        return value;
-      }
-    }
-
     const store = this.env.MODEL_SECRET_STORE;
     if (!store) {
       return undefined;
@@ -151,26 +135,6 @@ class CloudflareSecretStore implements SecretStoreAdapter {
 
     return secrets;
   }
-}
-
-/**
- * Map a secret name to the corresponding environment variable key
- * Used for development fallback
- */
-function secretNameToEnvKey(secretName: string): string | undefined {
-  // Extract key from name format: workspaces_{workspaceId}_mc_{connectionId}_{key}
-  const parts = secretName.split("_");
-  const key = parts[parts.length - 1];
-  if (key) {
-    // Map known secret keys to env vars
-    const envKeyMap: Record<string, string> = {
-      AWS_BEARER_TOKEN_BEDROCK: "AWS_BEARER_TOKEN_BEDROCK",
-      ANTHROPIC_API_KEY: "ANTHROPIC_API_KEY",
-      OPENAI_API_KEY: "OPENAI_API_KEY",
-    };
-    return envKeyMap[key] || key;
-  }
-  return undefined;
 }
 
 /**

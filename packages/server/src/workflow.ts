@@ -135,8 +135,8 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
   
   // Build agent components - prefer session model, fallback to env
   const components = resolvedModel
-    ? await buildAgentComponentsFromResolved(env, resolvedModel)
-    : await buildAgentComponents(env);
+    ? await buildAgentComponentsFromResolved(resolvedModel)
+    : await buildAgentComponents();
   
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
   
@@ -174,8 +174,8 @@ async function loadAgentSession(
   
   // Build agent components - prefer session model, fallback to env
   const components = resolvedModel
-    ? await buildAgentComponentsFromResolved(env, resolvedModel)
-    : await buildAgentComponents(env);
+    ? await buildAgentComponentsFromResolved(resolvedModel)
+    : await buildAgentComponents();
     
   const stored = await dataLayer.runtime.getWorkflowSession(sessionId);
   logTiming(env, sessionId, "workflow.session.loaded", loadStart, {

@@ -20,11 +20,10 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
   const config = await loadConfig();
   
   const server = options.server || config.server || process.env.CLAWFLARE_URL || DEFAULT_SERVER;
-  const token = config.token || process.env.CLAWFLARE_API_TOKEN;
+  const token = config.token;
   
   console.log(`   Server: ${server}`);
   console.log(`   Token from config: ${config.token ? "Yes (" + config.token.slice(0, 10) + "...)" : "No"}`);
-  console.log(`   Token from env: ${process.env.CLAWFLARE_API_TOKEN ? "Yes" : "No"}`);
   console.log(`   Token to use: ${token ? "Yes (" + token.slice(0, 10) + "...)" : "No"}`);
   console.log();
 

@@ -15,6 +15,13 @@ import type {
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 /**
+ * Mock AI provider and model for testing
+ * Used when no real model connection is configured
+ */
+export const MOCK_AI_PROVIDER = "amazon-bedrock";
+export const MOCK_AI_MODEL = "minimax.minimax-m2.5";
+
+/**
  * Creates a mock stream function that simulates AI responses
  * without making actual API calls. This allows full testing of
  * the agent loop, tool execution, and event handling.
@@ -173,11 +180,10 @@ export function createMockStream(options?: {
 
 /**
  * Determines if we should use mock AI mode based on environment
+ * Only returns true if MOCK_AI is explicitly set to "true"
+ * CLAWFLARE_API_TOKEN is no longer used for this purpose.
  */
-export function shouldUseMockAI(env: { MOCK_AI?: string; CLOUDFLARE_API_TOKEN?: string }): boolean {
+export function shouldUseMockAI(env: { MOCK_AI?: string }): boolean {
   // Only use mock if explicitly enabled
-  if (env.MOCK_AI === "true") return true;
-  
-  // Otherwise use real AI (don't fall back to mock)
-  return false;
+  return env.MOCK_AI === "true";
 }

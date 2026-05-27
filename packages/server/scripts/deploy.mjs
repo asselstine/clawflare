@@ -2,7 +2,9 @@
 /**
  * Deploy script.
  *
- * Sets required secrets from environment variables when needed, then delegates to wrangler deploy.
+ * Deploys the Clawflare server via Wrangler.
+ * Note: Model provider secrets are now configured per-workspace via the API,
+ * not via Wrangler secrets. See README.md for details.
  */
 
 import { spawn } from "node:child_process";
@@ -11,33 +13,20 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SECRETS = ["AWS_BEARER_TOKEN_BEDROCK", "CLOUDFLARE_API_TOKEN", "CLAWFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"];
 
-async function runWrangler(args, { capture = false, input = undefined, stdio = undefined } = {}) {
+async function runWrangler(args, { stdio } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn("npx", ["wrangler", ...args], {
-      stdio: stdio ?? (input !== undefined ? ["pipe", "inherit", "inherit"] : capture ? "pipe" : "inherit"),
+      stdio: stdio ?? "inherit",
       cwd: join(__dirname, ".."),
       env: process.env,
     });
-
-    let stdout = "";
-    if (capture && proc.stdout) {
-      proc.stdout.on("data", (data) => {
-        stdout += data.toString();
-      });
-    }
-
-    if (input !== undefined && proc.stdin) {
-      proc.stdin.write(input.endsWith("\n") ? input : `${input}\n`);
-      proc.stdin.end();
-    }
 
     proc.on("close", (code) => {
       if (code !== 0) {
         reject(new Error(`wrangler ${args.join(" ")} exited with code ${code}`));
       } else {
-        resolve(capture ? stdout : undefined);
+        resolve();
       }
     });
 
@@ -45,25 +34,15 @@ async function runWrangler(args, { capture = false, input = undefined, stdio = u
   });
 }
 
-async function listSecrets() {
-  try {
-    const output = await runWrangler(["secret", "list"], { capture: true });
-    return JSON.parse(output);
-  } catch {
-    return [];
-  }
-}
-
 function parseArgs() {
   const args = process.argv.slice(2);
-  const forceSecrets = args.includes("--force-secrets");
   const help = args.includes("-h") || args.includes("--help");
-  return { forceSecrets, help };
+  return { help };
 }
 
 async function main() {
-  const { forceSecrets, help } = parseArgs();
-  
+  const { help } = parseArgs();
+
   if (help) {
     console.log(`
 Clawflare Deploy Script
@@ -72,39 +51,14 @@ Usage:
   node scripts/deploy.mjs [options]
 
 Options:
-  --force-secrets  Force update all secrets even if already set
   -h, --help       Show this help message
 
-The script will:
-  1. Set secrets from environment variables (skips if already set, unless --force-secrets)
-  2. Run wrangler deploy
-
-Required environment variables for missing/forced secrets:
-  ${SECRETS.join("\n  ")}
+Note: Model provider secrets are now configured per-workspace via the API.
+Users should run 'clawflare providers add' to configure providers.
 `);
     process.exit(0);
   }
 
-  console.log("🔐 Checking secrets...\n");
-  const existingSecrets = await listSecrets();
-  const existingSecretNames = new Set(existingSecrets.map(s => s.name));
-  
-  for (const secret of SECRETS) {
-    if (!forceSecrets && existingSecretNames.has(secret)) {
-      console.log(`  ⏭️  ${secret} already set, skipping (use --force-secrets to update)`);
-      continue;
-    }
-    
-    const value = process.env[secret];
-    if (!value) {
-      throw new Error(`${secret} is not set in the environment and is not already configured as a Wrangler secret`);
-    }
-
-    console.log(`  ${forceSecrets && existingSecretNames.has(secret) ? "🔄 Updating" : "📝 Setting"} ${secret}...`);
-    await runWrangler(["secret", "put", secret], { input: value });
-  }
-  
-  console.log();
   console.log("🚀 Deploying...\n");
   await runWrangler(["deploy"]);
   console.log("\n✅ Deployed successfully!");

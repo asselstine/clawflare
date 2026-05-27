@@ -50,7 +50,6 @@ export interface Env {
 
   // Cloudflare Container for isolated development environment
   CODING_CONTAINER: DurableObjectNamespace<Container<Env>>;
-  CLOUDFLARE_ACCOUNT_ID: string;
 
   // GitHub OAuth credentials for authentication
   GITHUB_CLIENT_ID?: string;
@@ -59,50 +58,15 @@ export interface Env {
   // Legacy GitHub token for egress (optional)
   GITHUB_TOKEN?: string;
 
-  // AI Provider configuration
-  AI_PROVIDER: string;
-  AI_MODEL?: string;
-  MOCK_AI?: string;
-
-  // AWS Bedrock settings
-  AWS_BEARER_TOKEN_BEDROCK?: string;
+  // AWS region setting (optional, for Bedrock)
   AWS_REGION?: string;
-  AWS_PROFILE?: string;
 
   // Cloudflare Secret Store for model connection secrets
   // Using unknown as placeholder until exact binding type is confirmed
   MODEL_SECRET_STORE?: unknown;
 
-  // Allow env-based model secrets in development
-  CLAWFLARE_ALLOW_ENV_MODEL_SECRETS?: string;
-
-  // Optional provider API keys for non-default AI providers
-  ANTHROPIC_OAUTH_TOKEN?: string;
-  ANTHROPIC_API_KEY?: string;
-  OPENAI_API_KEY?: string;
-  AZURE_OPENAI_API_KEY?: string;
-  DEEPSEEK_API_KEY?: string;
-  GEMINI_API_KEY?: string;
-  GOOGLE_CLOUD_API_KEY?: string;
-  GROQ_API_KEY?: string;
-  CEREBRAS_API_KEY?: string;
-  XAI_API_KEY?: string;
-  OPENROUTER_API_KEY?: string;
-  AI_GATEWAY_API_KEY?: string;
-  ZAI_API_KEY?: string;
-  MISTRAL_API_KEY?: string;
-  MINIMAX_API_KEY?: string;
-  MINIMAX_CN_API_KEY?: string;
-  MOONSHOT_API_KEY?: string;
-  HF_TOKEN?: string;
-  FIREWORKS_API_KEY?: string;
-  OPENCODE_API_KEY?: string;
-  KIMI_API_KEY?: string;
-  CLOUDFLARE_API_KEY?: string;
-  XIAOMI_API_KEY?: string;
-  XIAOMI_TOKEN_PLAN_CN_API_KEY?: string;
-  XIAOMI_TOKEN_PLAN_AMS_API_KEY?: string;
-  XIAOMI_TOKEN_PLAN_SGP_API_KEY?: string;
+  // Test mode flag - enables mock AI responses when no model connection is configured
+  MOCK_AI?: string;
 
   // Debug settings
   CLAWFLARE_DEBUG_TIMING?: string;

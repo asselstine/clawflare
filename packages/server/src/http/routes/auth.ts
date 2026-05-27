@@ -33,6 +33,145 @@ const GITHUB_API_URL = "https://api.github.com";
 const POLL_INTERVAL_SECONDS = 2;
 const GITHUB_SCOPES = "read:user user:email";
 
+// Mock OAuth configuration (for E2E tests only)
+const MOCK_OAUTH_USER = {
+  email: "e2e-test@clawflare.dev",
+  displayName: "E2E Test User",
+};
+
+/**
+ * GET /v1/auth/mock/auto-approve
+ * Auto-approve endpoint for mock OAuth (E2E tests only)
+ * Immediately approves the device authorization and creates the test user
+ */
+export async function handleMockOAuthAutoApprove(
+  request: Request,
+  env: Env
+): Promise<Response> {
+  try {
+    const url = new URL(request.url);
+    const deviceCode = url.searchParams.get("code");
+
+    if (!deviceCode) {
+      return badRequest("Missing code parameter");
+    }
+
+    // Look up the device authorization directly by device code
+    const deviceAuth = await env.DB.prepare(
+      `SELECT device_code, status, expires_at FROM device_authorizations WHERE device_code = ?`
+    ).bind(deviceCode).first<{ device_code: string; status: string; expires_at: number }>();
+
+    if (!deviceAuth) {
+      return badRequest("Invalid or expired device code");
+    }
+
+    if (deviceAuth.status !== "pending") {
+      return badRequest(`Device authorization is ${deviceAuth.status}`);
+    }
+
+    if (Date.now() > deviceAuth.expires_at) {
+      return badRequest("Device code expired");
+    }
+
+    // Create the test user if they don't exist
+    const now = Date.now();
+    let userId: string;
+
+    // Check if mock user exists
+    const existingUser = await env.DB.prepare(
+      `SELECT id FROM users WHERE email = ?`
+    ).bind(MOCK_OAUTH_USER.email).first<{ id: string }>();
+
+    if (existingUser) {
+      userId = existingUser.id;
+    } else {
+      // Create the mock user
+      userId = crypto.randomUUID();
+      await env.DB.prepare(
+        `
+        INSERT INTO users (id, email, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+      `
+      )
+        .bind(userId, MOCK_OAUTH_USER.email, MOCK_OAUTH_USER.displayName, now, now)
+        .run();
+
+      // Create default workspace for E2E tests (matches test endpoint expectations)
+      const data = getDataLayer(env);
+      const workspaceId = "default-workspace";
+      const slug = "e2e-test";
+
+      await data.workspaces.create({
+        id: workspaceId,
+        slug,
+        name: "E2E Test Workspace",
+        description: "Auto-created for E2E tests",
+      });
+
+      await data.workspaces.addMembership({
+        workspaceId,
+        userId,
+        role: "owner",
+      });
+
+      // Create a test model connection for the workspace (required for chat tests)
+      const modelConnectionId = crypto.randomUUID();
+      await env.DB.prepare(`
+        INSERT INTO model_connections 
+          (id, workspace_id, provider, model_name, display_name, secret_refs_json, config_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        modelConnectionId,
+        workspaceId,
+        "amazon-bedrock",
+        "minimax.minimax-m2.5",
+        "E2E Test Model",
+        "{}",
+        "{}",
+        now,
+        now
+      ).run();
+
+      // Set the model connection as the workspace default
+      await env.DB.prepare(`
+        UPDATE workspaces SET default_model_connection_id = ? WHERE id = ?
+      `).bind(modelConnectionId, workspaceId).run();
+    }
+
+    // Approve the device authorization
+    const approveResult = await approveDeviceAuthorization(env, deviceCode, userId);
+    if (!approveResult) {
+      return serverError("Failed to approve device authorization");
+    }
+
+    // Return success HTML page
+    return new Response(
+      `<!DOCTYPE html>
+<html>
+<head>
+<title>Authorization Complete</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 500px; margin: 50px auto; padding: 20px; text-align: center; }
+h1 { color: #4CAF50; }
+.success { background: #e8f5e9; padding: 20px; border-radius: 8px; margin-top: 20px; }
+</style>
+</head>
+<body>
+<h1>✓ Authorization Complete</h1>
+<div class="success">
+<p>Device authorization approved for <strong>${MOCK_OAUTH_USER.email}</strong>.</p>
+<p>You can close this window and return to the CLI.</p>
+</div>
+</body>
+</html>`,
+      { headers: { "Content-Type": "text/html" } }
+    );
+  } catch (error) {
+    console.error("[handleMockOAuthAutoApprove] Error:", error);
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
 // Email validation regex (basic)
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -297,8 +436,13 @@ export async function handleDeviceAuthStart(
     const provider = body.provider || "github";
 
     // Validate provider
-    if (provider !== "github") {
-      return badRequest("Only 'github' provider is supported");
+    if (provider !== "github" && provider !== "mock") {
+      return badRequest("Only 'github' and 'mock' providers are supported");
+    }
+
+    // For mock provider, require test mode
+    if (provider === "mock" && env.CLAWFLARE_TEST_RUN !== "true") {
+      return badRequest("Mock OAuth is only available in test mode");
     }
 
     const result = await createDeviceAuthorization(env, clientName);
@@ -309,15 +453,21 @@ export async function handleDeviceAuthStart(
     const baseUrl = new URL(request.url).origin;
     const verificationUrl = `${baseUrl}/v1/auth/device/verify?code=${result.userCode}`;
 
-    // Build GitHub OAuth authorize URL
-    const clientId = env.GITHUB_CLIENT_ID;
     let authorizationUrl: string | undefined;
 
-    if (clientId) {
-      const redirectUri = `${baseUrl}/v1/auth/github/callback`;
-      const state = result.oauthState; // Use the secure random state
-      const scope = encodeURIComponent(GITHUB_SCOPES);
-      authorizationUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&state=${encodeURIComponent(state)}`;
+    if (provider === "mock") {
+      // For mock OAuth, use the device code directly (stored in D1, persistent across requests)
+      authorizationUrl = `${baseUrl}/v1/auth/mock/auto-approve?code=${result.deviceCode}`;
+    } else if (provider === "github") {
+      // Build GitHub OAuth authorize URL
+      const clientId = env.GITHUB_CLIENT_ID;
+
+      if (clientId) {
+        const redirectUri = `${baseUrl}/v1/auth/github/callback`;
+        const state = result.oauthState; // Use the secure random state
+        const scope = encodeURIComponent(GITHUB_SCOPES);
+        authorizationUrl = `https://github.com/login/oauth/authorize?client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${scope}&state=${encodeURIComponent(state)}`;
+      }
     }
 
     return json({

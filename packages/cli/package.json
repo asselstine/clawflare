@@ -36,6 +36,7 @@
     "@clawflare/types": "workspace:*",
     "@earendil-works/pi-agent-core": "^0.74.0",
     "@earendil-works/pi-tui": "^0.74.0",
+    "@inquirer/prompts": "^7.0.0",
     "chalk": "^5.6.2",
     "commander": "^13.1.0",
     "ws": "^8.18.0",

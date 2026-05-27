@@ -324,53 +324,95 @@ async function runTests(url: string): Promise<void> {
 
   const ready = await waitForServer(url);
   if (!ready) throw new Error("Remote Worker failed to become responsive");
-  console.log("✅ Remote Worker is responsive, authenticating...\n");
+  console.log("✅ Remote Worker is responsive, authenticating via mock OAuth...\n");
 
-  // Register a test user and create an access token
-  const testEmail = `e2e-test-${Date.now()}@clawflare.dev`;
-  const testPassword = `TestPass_${randomUUID().slice(0, 8)}!`;
-
-  console.log("🔑 Creating test user account...");
-  const registerResponse = await fetch(`${url}/v1/auth/register`, {
+  // Start mock OAuth device flow
+  console.log("🔑 Starting mock OAuth device flow...");
+  const deviceStartResponse = await fetch(`${url}/v1/auth/device/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: testEmail,
-      password: testPassword,
-      displayName: "E2E Test User",
+      clientName: "E2E Test Suite",
+      provider: "mock",
     }),
   });
-  const registerData = await readJsonResponse<{ user?: { id: string }; error?: string }>(registerResponse);
-  if (!registerData.user?.id) {
-    throw new Error(`Failed to register test user: ${registerData.error || "unknown error"}`);
+  const deviceStart = await readJsonResponse<{
+    deviceCode?: string;
+    userCode?: string;
+    authorizationUrl?: string;
+    verificationUrl?: string;
+    interval?: number;
+    error?: string;
+  }>(deviceStartResponse);
+  
+  if (!deviceStart.deviceCode || !deviceStart.authorizationUrl) {
+    throw new Error(`Failed to start device authorization: ${deviceStart.error || "unknown error"}`);
   }
-  const testUserId = registerData.user.id;
-  console.log(`   ✓ Registered test user: ${testEmail} (${testUserId})`);
+  
+  console.log(`   ✓ Device flow started`);
+  console.log(`   Device Code: ${deviceStart.deviceCode.slice(0, 20)}...`);
+  console.log(`   User Code: ${deviceStart.userCode}`);
 
-  // Create access token for the test user (using __test endpoint)
-  console.log("🔑 Creating access token...");
-  const tokenResponse = await fetch(`${url}/__test/create-access-token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      userId: testUserId,
-      name: "E2E Test Token",
-      clientName: "e2e-test-suite",
-    }),
-  });
-  const tokenData = await readJsonResponse<{ token?: string; ok: boolean; error?: string }>(tokenResponse);
-  if (!tokenData.ok || !tokenData.token) {
-    throw new Error(`Failed to create access token: ${tokenData.error || "unknown error"}`);
+  // Auto-approve via the mock OAuth endpoint
+  console.log("🔑 Auto-approving via mock OAuth...");
+  const autoApproveResponse = await fetch(deviceStart.authorizationUrl, { method: "GET" });
+  if (!autoApproveResponse.ok) {
+    const errorText = await autoApproveResponse.text();
+    throw new Error(`Mock OAuth auto-approve failed: ${autoApproveResponse.status} ${errorText.slice(0, 200)}`);
   }
-  const token = tokenData.token;
-  console.log(`   ✓ Got access token: ${token.slice(0, 16)}...\n`);
+  console.log(`   ✓ Mock OAuth approval completed`);
+
+  // Poll for the access token
+  console.log("🔑 Polling for access token...");
+  let token: string | undefined;
+  let userId: string | undefined;
+  const maxPolls = 30;
+  const pollInterval = (deviceStart.interval || 2) * 1000;
+  
+  for (let i = 0; i < maxPolls; i++) {
+    const pollResponse = await fetch(`${url}/v1/auth/device/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceCode: deviceStart.deviceCode }),
+    });
+    const pollResult = await readJsonResponse<{
+      status?: string;
+      accessToken?: string;
+      user?: { id: string; email: string };
+      error?: string;
+    }>(pollResponse);
+    
+    if (pollResult.status === "complete") {
+      token = pollResult.accessToken;
+      userId = pollResult.user?.id;
+      console.log(`   ✓ Access token received after ${i + 1} poll(s)`);
+      break;
+    }
+    
+    if (pollResult.status === "denied") {
+      throw new Error("Device authorization was denied");
+    }
+    
+    if (pollResult.status === "expired") {
+      throw new Error("Device code expired");
+    }
+    
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+  
+  if (!token) {
+    throw new Error("Failed to get access token after polling");
+  }
+  
+  console.log(`   User ID: ${userId?.slice(0, 16)}...`);
+  console.log(`   Token: ${token.slice(0, 16)}...\n`);
 
   // Now create the client with the token
   const client = new AgentClient(url, token);
 
   console.log("🧪 Starting remote E2E Tests");
   console.log(`   Target: ${url}`);
-  console.log(`   User: ${testEmail}`);
+  console.log(`   User: ${userId}`);
   console.log(`   Token: ${token.substring(0, 10)}...\n`);
 
   await runner.runTest("Unauthorized - missing auth header", async () => {
@@ -1058,42 +1100,70 @@ async function main(): Promise<void> {
 }
 
 async function authenticateForManualTesting(url: string): Promise<string> {
-  const testEmail = `e2e-manual-${Date.now()}@clawflare.dev`;
-  const testPassword = `TestPass_${randomUUID().slice(0, 8)}!`;
-
-  console.log("🔑 Creating test user account for manual testing...");
-  const registerResponse = await fetch(`${url}/v1/auth/register`, {
+  console.log("🔑 Authenticating via mock OAuth for manual testing...");
+  
+  // Start mock OAuth device flow
+  const deviceStartResponse = await fetch(`${url}/v1/auth/device/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      email: testEmail,
-      password: testPassword,
-      displayName: "E2E Manual Test User",
+      clientName: "E2E Manual Test",
+      provider: "mock",
     }),
   });
-  const registerData = await readJsonResponse<{ user?: { id: string }; error?: string }>(registerResponse);
-  if (!registerData.user?.id) {
-    throw new Error(`Failed to register test user: ${registerData.error || "unknown error"}`);
+  const deviceStart = await readJsonResponse<{
+    deviceCode?: string;
+    authorizationUrl?: string;
+    interval?: number;
+    error?: string;
+  }>(deviceStartResponse);
+  
+  if (!deviceStart.deviceCode || !deviceStart.authorizationUrl) {
+    throw new Error(`Failed to start device authorization: ${deviceStart.error || "unknown error"}`);
   }
 
-  // Create access token
-  const tokenResponse = await fetch(`${url}/__test/create-access-token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      userId: registerData.user.id,
-      name: "E2E Manual Test Token",
-      clientName: "e2e-manual-test",
-    }),
-  });
-  const tokenData = await readJsonResponse<{ token?: string; ok: boolean; error?: string }>(tokenResponse);
-  if (!tokenData.ok || !tokenData.token) {
-    throw new Error(`Failed to create access token: ${tokenData.error || "unknown error"}`);
+  // Auto-approve via the mock OAuth endpoint
+  const autoApproveResponse = await fetch(deviceStart.authorizationUrl, { method: "GET" });
+  if (!autoApproveResponse.ok) {
+    const errorText = await autoApproveResponse.text();
+    throw new Error(`Mock OAuth auto-approve failed: ${autoApproveResponse.status}`);
   }
 
-  console.log(`   ✓ Created test user: ${testEmail}`);
-  console.log(`   ✓ Token: ${tokenData.token.slice(0, 16)}...\n`);
-  return tokenData.token;
+  // Poll for the access token
+  let token: string | undefined;
+  const maxPolls = 30;
+  const pollInterval = (deviceStart.interval || 2) * 1000;
+  
+  for (let i = 0; i < maxPolls; i++) {
+    const pollResponse = await fetch(`${url}/v1/auth/device/poll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceCode: deviceStart.deviceCode }),
+    });
+    const pollResult = await readJsonResponse<{
+      status?: string;
+      accessToken?: string;
+      user?: { id: string; email: string };
+    }>(pollResponse);
+    
+    if (pollResult.status === "complete") {
+      token = pollResult.accessToken;
+      break;
+    }
+    
+    if (pollResult.status === "denied" || pollResult.status === "expired") {
+      throw new Error(`Authorization ${pollResult.status}`);
+    }
+    
+    await new Promise((resolve) => setTimeout(resolve, pollInterval));
+  }
+  
+  if (!token) {
+    throw new Error("Failed to get access token after polling");
+  }
+
+  console.log(`   ✓ Got access token: ${token.slice(0, 16)}...\n`);
+  return token;
 }
 
 main();

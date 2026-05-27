@@ -3,8 +3,7 @@
 
 import type { Env } from "../../internal-types/index.js";
 import type { RequestContext } from "../request-context.js";
-import { json, badRequest, notFound, forbidden } from "../responses.js";
-import { hasPermission } from "../request-context.js";
+import { json, badRequest, notFound } from "../responses.js";
 import type { PublicModelConnection } from "../../model-providers.js";
 import {
   createModelConnection,
@@ -71,11 +70,7 @@ export async function handleCreateModelConnection(
   env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
-  // Require admin or owner role
-  if (!hasPermission(requestContext, "admin")) {
-    return forbidden("Admin permission required to create model connections");
-  }
-
+  // Any authenticated user can create model connections for their workspace
   const body = (await request.json().catch(() => ({}))) as CreateModelConnectionRequest;
 
   // Validate required fields
@@ -176,11 +171,7 @@ export async function handleUpdateModelConnection(
   requestContext: RequestContext,
   id: string
 ): Promise<Response> {
-  // Require admin or owner role
-  if (!hasPermission(requestContext, "admin")) {
-    return forbidden("Admin permission required to update model connections");
-  }
-
+  // Any authenticated user can update model connections for their workspace
   const body = (await request.json().catch(() => ({}))) as UpdateModelConnectionRequest;
 
   try {
@@ -217,11 +208,7 @@ export async function handleDeleteModelConnection(
   requestContext: RequestContext,
   id: string
 ): Promise<Response> {
-  // Require admin or owner role
-  if (!hasPermission(requestContext, "admin")) {
-    return forbidden("Admin permission required to delete model connections");
-  }
-
+  // Any authenticated user can delete model connections for their workspace
   try {
     await deleteModelConnection(env, requestContext.workspace.id, id);
     return json({ ok: true });
@@ -250,11 +237,7 @@ export async function handleSetDefaultModelConnection(
   env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
-  // Require admin or owner role
-  if (!hasPermission(requestContext, "admin")) {
-    return forbidden("Admin permission required to set default model connection");
-  }
-
+  // Any authenticated user can set the workspace default model connection
   const body = (await request.json().catch(() => ({}))) as SetDefaultRequest;
 
   try {

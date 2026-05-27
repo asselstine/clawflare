@@ -6,7 +6,6 @@ import type { ModelConnection } from "./data/index.js";
 import { getDataLayer } from "./data/index.js";
 import { getSecretStore } from "./secret-store.js";
 import {
-  getProviderDefinition,
   validateModelConnectionInput,
   requiredSecretsForProvider,
   defaultModelForProvider,
@@ -276,7 +275,8 @@ export async function resolveModelConnection(
 
 /**
  * Resolve model for a new session
- * Uses explicit connection ID, workspace default, or env fallback
+ * Uses explicit connection ID or workspace default
+ * NO env fallback - model connections must be explicitly configured
  */
 export async function resolveModelConnectionForNewSession(
   env: Env,
@@ -296,11 +296,7 @@ export async function resolveModelConnectionForNewSession(
     return await resolveModelConnection(env, workspaceId, defaultConnection.id);
   }
 
-  // Env fallback if explicitly allowed
-  if (env.CLAWFLARE_ALLOW_ENV_MODEL_SECRETS === "true") {
-    return resolveEnvFallback(env);
-  }
-
+  // No env fallback - explicit model connection required
   return null;
 }
 
@@ -329,11 +325,7 @@ export async function resolveModelConnectionForSession(
     return await resolveModelConnection(env, session.workspaceId, defaultConnection.id);
   }
 
-  // Env fallback if explicitly allowed
-  if (env.CLAWFLARE_ALLOW_ENV_MODEL_SECRETS === "true") {
-    return resolveEnvFallback(env);
-  }
-
+  // No env fallback - explicit model connection required
   return null;
 }
 
@@ -347,39 +339,6 @@ export async function setWorkspaceDefaultModelConnection(
 ): Promise<void> {
   const data = getDataLayer(env);
   await data.modelConnections.setWorkspaceDefault(workspaceId, id);
-}
-
-/**
- * Resolve environment-based fallback for local development
- */
-function resolveEnvFallback(env: Env): ResolvedModelConnection | null {
-  const provider = env.AI_PROVIDER || "amazon-bedrock";
-  const modelName = env.AI_MODEL || "minimax.minimax-m2.5";
-
-  const providerDef = getProviderDefinition(provider);
-  if (!providerDef) {
-    return null;
-  }
-
-  const secrets: Record<string, string> = {};
-  for (const key of providerDef.requiredSecrets) {
-    const value = env[key as keyof Env];
-    if (typeof value === "string" && value) {
-      secrets[key] = value;
-    }
-  }
-
-  if (Object.keys(secrets).length === 0) {
-    return null;
-  }
-
-  return {
-    id: "env-fallback",
-    provider,
-    modelName,
-    secrets,
-    config: {},
-  };
 }
 
 /**

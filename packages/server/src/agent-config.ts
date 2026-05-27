@@ -1,8 +1,8 @@
 import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@earendil-works/pi-ai";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Env } from "./internal-types/index.js";
 import type { ResolvedModelConnection } from "./model-connection-service.js";
+import { MOCK_AI_PROVIDER, MOCK_AI_MODEL } from "./mock-ai.js";
 
 // Eagerly register the bedrock provider module to prevent dynamic import issues in Workers
 setBedrockProviderModule(bedrockProviderModule);
@@ -16,23 +16,17 @@ export interface BuildAgentComponentsResult {
 
 /**
  * Build agent components from environment.
- * Currently focused on Bedrock with minimax-m2.5 as default.
+ * DEPRECATED: Use buildAgentComponentsFromResolved with a model connection instead.
+ * This function only works if env vars are set, which is no longer the default.
+ * @deprecated
  */
-export async function buildAgentComponents(env: Env): Promise<BuildAgentComponentsResult> {
-  const provider = env.AI_PROVIDER || "amazon-bedrock";
-  const modelId = env.AI_MODEL || "minimax.minimax-m2.5";
-  const mockMode = env.MOCK_AI === "true";
+export async function buildAgentComponents(): Promise<BuildAgentComponentsResult> {
+  const provider = MOCK_AI_PROVIDER;
+  const modelId = MOCK_AI_MODEL;
 
-  // Normalize bedrock token if present
-  const bedrockToken = normalizeBedrockBearerToken(env.AWS_BEARER_TOKEN_BEDROCK) || "";
-  // Log partial token for debugging, never log full token
-  // Token logging removed for security
-
-  // Create getApiKey function for the provider
+  // Create getApiKey function - only returns mock key, real keys must come from model connections
   const getApiKey = async () => {
-    if (mockMode) return "mock-key";
-    if (provider === "amazon-bedrock") return bedrockToken;
-    return undefined;
+    return "mock-key";
   };
 
   // Get the model
@@ -43,7 +37,7 @@ export async function buildAgentComponents(env: Env): Promise<BuildAgentComponen
 
   const streamFn = ((requestModel: Model<any>, context: any, options?: any) => {
     if (provider === "amazon-bedrock") {
-      const bearerToken = options?.bearerToken || options?.apiKey || bedrockToken || undefined;
+      const bearerToken = options?.bearerToken || options?.apiKey || undefined;
       return bedrockProviderModule.streamBedrock(requestModel as Model<"bedrock-converse-stream">, context, {
         ...options,
         bearerToken,
@@ -66,25 +60,20 @@ export async function buildAgentComponents(env: Env): Promise<BuildAgentComponen
  * Uses the model connection's provider, model, and secrets.
  */
 export async function buildAgentComponentsFromResolved(
-  env: Env,
   resolved: ResolvedModelConnection
 ): Promise<BuildAgentComponentsResult> {
-  const mockMode = env.MOCK_AI === "true";
   const provider = resolved.provider;
   const modelId = resolved.modelName;
 
   // Create getApiKey function using resolved secrets
   const getApiKey = async (): Promise<string | undefined> => {
-    if (mockMode) return "mock-key";
-    
     // Map provider to the appropriate secret key
     const secretKey = getProviderSecretKey(provider);
     if (secretKey && secretKey in resolved.secrets) {
       return resolved.secrets[secretKey];
     }
     
-    // Fallback to env vars
-    return getEnvSecret(env, provider);
+    return undefined;
   };
 
   // Get the model - only bedrock is fully typed in current implementation
@@ -144,23 +133,6 @@ function getProviderSecretKey(provider: string): string | undefined {
 }
 
 /**
- * Get secret from environment variables as fallback.
- */
-function getEnvSecret(env: Env, provider: string): string | undefined {
-  const keyMap: Record<string, keyof Env> = {
-    "amazon-bedrock": "AWS_BEARER_TOKEN_BEDROCK",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
-  };
-  const key = keyMap[provider];
-  if (key) {
-    const value = env[key];
-    return typeof value === "string" ? value : undefined;
-  }
-  return undefined;
-}
-
-/**
  * Normalize Bedrock bearer token - remove "Bearer " prefix if present.
  */
 export function normalizeBedrockBearerToken(token: string | undefined): string | undefined {
@@ -170,8 +142,10 @@ export function normalizeBedrockBearerToken(token: string | undefined): string |
 
 /**
  * Create streaming function for Bedrock.
+ * DEPRECATED: Use buildAgentComponentsFromResolved with a model connection instead.
+ * @deprecated
  */
-export async function createBedrockStreaming(env: Env): Promise<typeof streamSimple> {
-  const components = await buildAgentComponents(env);
+export async function createBedrockStreaming(): Promise<typeof streamSimple> {
+  const components = await buildAgentComponents();
   return components.streamFn;
 }
