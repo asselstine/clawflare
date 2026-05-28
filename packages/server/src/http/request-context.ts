@@ -97,31 +97,8 @@ async function loadUser(
   env: Env
 ): Promise<User | null> {
   try {
-    const row = await env.DB.prepare(
-      `
-      SELECT id, email, display_name, created_at, updated_at
-      FROM users
-      WHERE id = ?
-    `
-    )
-      .bind(userId)
-      .first<{
-        id: string;
-        email: string;
-        display_name: string | null;
-        created_at: number;
-        updated_at: number;
-      }>();
-
-    if (!row) return null;
-
-    return {
-      id: row.id,
-      email: row.email,
-      displayName: row.display_name ?? undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    const data = getDataLayer(env);
+    return await data.users.getById(userId);
   } catch (error) {
     logger.error("Load user failed", error, {
       function: "loadUser",

@@ -1,15 +1,10 @@
 /**
- * Job Authorization Snapshot Repository
- * Stores job authorization snapshots for async operations (workflows)
+ * D1 Job Snapshot Repository
+ * 
+ * D1-backed implementation of job authorization snapshot storage.
  */
 
-import type { JobAuthorizationSnapshot } from "./types.js";
-
-export interface JobSnapshotRepository {
-  get(jobId: string): Promise<JobAuthorizationSnapshot | null>;
-  put(snapshot: JobAuthorizationSnapshot): Promise<void>;
-  delete(jobId: string): Promise<void>;
-}
+import type { JobAuthorizationSnapshot, JobSnapshotRepository } from "../job-snapshots.js";
 
 /**
  * D1-based job snapshot repository
@@ -88,33 +83,4 @@ export class D1JobSnapshotRepository implements JobSnapshotRepository {
       .bind(jobId)
       .run();
   }
-}
-
-/**
- * Create or get the job snapshot repository
- */
-export function getJobSnapshotRepository(db: D1Database): JobSnapshotRepository {
-  return new D1JobSnapshotRepository(db);
-}
-
-/**
- * Create a job snapshot for the current time
- */
-export function createJobSnapshot(
-  jobId: string,
-  userId: string,
-  workspaceId: string,
-  allowedOperations: string[],
-  expiryMs: number = 60 * 60 * 1000 // 1 hour default
-): JobAuthorizationSnapshot {
-  const now = Date.now();
-  return {
-    jobId,
-    createdByUserId: userId,
-    workspaceId,
-    allowedOperations,
-    createdAt: now,
-    expiresAt: now + expiryMs,
-    authorizationVersion: 1,
-  };
 }

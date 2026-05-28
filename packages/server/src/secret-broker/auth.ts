@@ -4,12 +4,12 @@
  */
 
 import type { Env } from "../internal-types/index.js";
+import { getDataLayer } from "../data/index.js";
 import {
   type AuthorizationContext,
   validateAuthContext,
   validateJobSnapshot,
 } from "./types.js";
-import { getJobSnapshotRepository } from "./job-snapshot.js";
 
 export interface VerifiedAuth {
   userId: string;
@@ -111,9 +111,9 @@ export async function validateJobAuthorization(
   jobId: string,
   requiredOperation?: string
 ): Promise<{ valid: true; result: VerifiedAuth } | { valid: false; error: string }> {
-  // Load snapshot
-  const repo = getJobSnapshotRepository(env.DB);
-  const snapshot = await repo.get(jobId);
+  // Load snapshot via data layer
+  const data = getDataLayer(env);
+  const snapshot = await data.jobSnapshots.get(jobId);
 
   if (!snapshot) {
     return { valid: false, error: "Job authorization not found" };

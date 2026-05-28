@@ -1,7 +1,7 @@
 import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@earendil-works/pi-ai";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
-import type { ResolvedModelConnection } from "./model-connection-service.js";
+import type { ResolvedModelConnection } from "./services/model-connections.js";
 import { MOCK_AI_PROVIDER, MOCK_AI_MODEL } from "./mock-ai.js";
 
 // Eagerly register the bedrock provider module to prevent dynamic import issues in Workers

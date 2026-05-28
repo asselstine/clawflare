@@ -2,6 +2,7 @@
 // Uses HTTP-only cookies
 
 import type { Env } from "../internal-types/index.js";
+import { getDataLayer } from "../data/index.js";
 import { logger } from "../logger.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -49,17 +50,17 @@ export async function createWebSession(
     const csrfTokenHash = await hashToken(csrfToken);
     const now = Date.now();
     const expiresAt = now + SESSION_TTL_MS;
-    
-    await env.DB.prepare(
-      `
-      INSERT INTO web_sessions
-        (id, user_id, session_token_hash, csrf_token_hash, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `
-    )
-      .bind(sessionId, userId, sessionTokenHash, csrfTokenHash, expiresAt, now)
-      .run();
-    
+
+    const data = getDataLayer(env);
+    await data.webSessions.create({
+      id: sessionId,
+      userId,
+      sessionTokenHash,
+      csrfTokenHash,
+      expiresAt,
+      createdAt: now,
+    });
+
     return {
       sessionId,
       sessionToken,
@@ -88,50 +89,24 @@ export async function verifyWebSession(
 } | null> {
   try {
     const sessionTokenHash = await hashToken(sessionToken);
-    
-    const row = await env.DB.prepare(
-      `
-      SELECT id, user_id, csrf_token_hash, expires_at
-      FROM web_sessions
-      WHERE session_token_hash = ?
-    `
-    )
-      .bind(sessionTokenHash)
-      .first<{
-        id: string;
-        user_id: string;
-        csrf_token_hash: string;
-        expires_at: number;
-      }>();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.webSessions.findByTokenHash(sessionTokenHash);
+
     if (!row) return null;
-    
+
     // Check expiration
-    if (Date.now() > row.expires_at) {
+    if (Date.now() > row.expiresAt) {
       // Delete expired session
-      await env.DB.prepare(
-        `
-        DELETE FROM web_sessions WHERE id = ?
-      `
-      )
-        .bind(row.id)
-        .run();
+      await data.webSessions.delete(row.id);
       return null;
     }
-    
+
     // Update last_seen_at
-    await env.DB.prepare(
-      `
-      UPDATE web_sessions
-      SET last_seen_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(Date.now(), row.id)
-      .run();
-    
+    await data.webSessions.updateLastSeenAt(row.id);
+
     // Return CSRF validation function
-    const storedCsrfHash = row.csrf_token_hash;
+    const storedCsrfHash = row.csrfTokenHash;
     const csrfTokenValid = async (token: string): Promise<boolean> => {
       const hash = await hashToken(token);
       // Constant-time comparison
@@ -142,10 +117,10 @@ export async function verifyWebSession(
       }
       return result === 0;
     };
-    
+
     return {
       sessionId: row.id,
-      userId: row.user_id,
+      userId: row.userId,
       csrfTokenValid,
     };
   } catch (error) {
@@ -164,13 +139,8 @@ export async function destroyWebSession(
   sessionId: string
 ): Promise<boolean> {
   try {
-    await env.DB.prepare(
-      `
-      DELETE FROM web_sessions WHERE id = ?
-    `
-    )
-      .bind(sessionId)
-      .run();
+    const data = getDataLayer(env);
+    await data.webSessions.delete(sessionId);
     return true;
   } catch (error) {
     logger.error("Destroy web session failed", error, {
@@ -188,13 +158,8 @@ export async function destroyAllUserSessions(
   userId: string
 ): Promise<boolean> {
   try {
-    await env.DB.prepare(
-      `
-      DELETE FROM web_sessions WHERE user_id = ?
-    `
-    )
-      .bind(userId)
-      .run();
+    const data = getDataLayer(env);
+    await data.webSessions.deleteAllForUser(userId);
     return true;
   } catch (error) {
     logger.error("Destroy all user sessions failed", error, {
@@ -226,7 +191,7 @@ export function getClearSessionCookie(): string {
 export function extractSessionToken(request: Request): string | null {
   const cookie = request.headers.get("Cookie");
   if (!cookie) return null;
-  
+
   const match = cookie.match(/clawflare_session=([^;]+)/);
   return match?.[1] ?? null;
 }

@@ -6,10 +6,121 @@ import type {
   Workspace,
   WorkspaceMembership,
   WorkspaceRole,
-} from "../interfaces.js";
+  UserRepository,
+  User,
+  CreateUserParams,
+} from "../workspaces.js";
 import type { WorkspaceRow, WorkspaceMembershipRow } from "./row-mappers.js";
 import { mapWorkspaceRow, mapWorkspaceMembershipRow } from "./row-mappers.js";
 
+/**
+ * D1-based user repository
+ */
+export class D1UserRepository implements UserRepository {
+  constructor(private readonly db: D1Database) {}
+
+  async getById(id: string): Promise<User | null> {
+    const row = await this.db
+      .prepare(
+        `
+        SELECT id, email, display_name, email_verified_at, created_at, updated_at
+        FROM users
+        WHERE id = ?
+      `
+      )
+      .bind(id)
+      .first<{
+        id: string;
+        email: string;
+        display_name: string | null;
+        email_verified_at: number | null;
+        created_at: number;
+        updated_at: number;
+      }>();
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name ?? undefined,
+      emailVerifiedAt: row.email_verified_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async getByEmail(email: string): Promise<User | null> {
+    const row = await this.db
+      .prepare(
+        `
+        SELECT id, email, display_name, email_verified_at, created_at, updated_at
+        FROM users
+        WHERE email = ?
+      `
+      )
+      .bind(email)
+      .first<{
+        id: string;
+        email: string;
+        display_name: string | null;
+        email_verified_at: number | null;
+        created_at: number;
+        updated_at: number;
+      }>();
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name ?? undefined,
+      emailVerifiedAt: row.email_verified_at ?? undefined,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  async create(id: string, params: CreateUserParams): Promise<User> {
+    const now = Date.now();
+
+    await this.db
+      .prepare(
+        `
+        INSERT INTO users (id, email, display_name, email_verified_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+      )
+      .bind(id, params.email, params.displayName ?? null, params.emailVerifiedAt ?? null, now, now)
+      .run();
+
+    return {
+      id,
+      email: params.email,
+      displayName: params.displayName,
+      emailVerifiedAt: params.emailVerifiedAt,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async setEmailVerified(userId: string): Promise<void> {
+    await this.db
+      .prepare(
+        `
+        UPDATE users
+        SET email_verified_at = ?, updated_at = ?
+        WHERE id = ?
+      `
+      )
+      .bind(Date.now(), Date.now(), userId)
+      .run();
+  }
+}
+
+/**
+ * D1-based workspace repository
+ */
 export class D1WorkspaceRepository implements WorkspaceRepository {
   constructor(private readonly db: D1Database) {}
 

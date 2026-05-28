@@ -6,9 +6,10 @@
  * store and retrieve envelope-encrypted secrets.
  */
 
-import type { Env } from "./internal-types/index.js";
-import type { AuthorizationContext } from "./secret-broker/types.js";
-import { getJobSnapshotRepository, createJobSnapshot } from "./secret-broker/job-snapshot.js";
+import type { Env } from "../../internal-types/index.js";
+import type { AuthorizationContext } from "../../secret-broker/types.js";
+import { getDataLayer, createJobSnapshot } from "../index.js";
+import { createModelConnectionSecretRef, parseModelConnectionSecretRef } from "./secret-refs.js";
 
 /**
  * Auth Session - can be immediate (AuthorizationContext) or async (Job Snapshot)
@@ -21,7 +22,7 @@ export type AuthSession =
  * Secret Store Adapter interface
  * Abstracts secret operations from the rest of the codebase
  */
-export interface SecretStoreAdapter {
+export interface SecretStore {
   /**
    * Store a model connection secret
    * Returns the key that was stored
@@ -78,35 +79,9 @@ export interface SecretStoreAdapter {
 }
 
 /**
- * Create the storage key for a model connection secret
- * This becomes both the "ref" and the actual key in storage
+ * Secret Broker client using service binding
  */
-function createSecretName(
-  workspaceId: string,
-  connectionId: string,
-  key: string
-): string {
-  return `workspaces_${workspaceId}_mc_${connectionId}_${key}`;
-}
-
-/**
- * Parse a secret name to extract workspace and connection info
- * Returns null if the ref format is unrecognized
- */
-function parseSecretName(
-  ref: string
-): { workspaceId: string; connectionId: string; key: string } | null {
-  const match = ref.match(/^workspaces_(.+)_mc_(.+)_(.+)$/);
-  if (!match) return null;
-  const [_, workspaceId, connectionId, key] = match;
-  if (!workspaceId || !connectionId || !key) return null;
-  return { workspaceId, connectionId, key };
-}
-
-/**
- * Secret Store client using Secret Broker service binding
- */
-class SecretBrokerClient implements SecretStoreAdapter {
+class SecretBrokerClient implements SecretStore {
   constructor(private readonly env: Env) {}
 
   private async callBroker(
@@ -136,7 +111,7 @@ class SecretBrokerClient implements SecretStoreAdapter {
       value: string;
     }
   ): Promise<string> {
-    const secretKey = createSecretName(args.workspaceId, args.connectionId, args.key);
+    const secretKey = createModelConnectionSecretRef(args.workspaceId, args.connectionId, args.key);
 
     const authParam = auth.type === "immediate"
       ? auth.context
@@ -159,7 +134,7 @@ class SecretBrokerClient implements SecretStoreAdapter {
     auth: AuthSession,
     ref: string
   ): Promise<string | undefined> {
-    const parsed = parseSecretName(ref);
+    const parsed = parseModelConnectionSecretRef(ref);
     if (!parsed) {
       throw new Error(`Invalid secret reference format: ${ref}`);
     }
@@ -184,7 +159,7 @@ class SecretBrokerClient implements SecretStoreAdapter {
   }
 
   async deleteModelConnectionSecret(auth: AuthSession, ref: string): Promise<void> {
-    const parsed = parseSecretName(ref);
+    const parsed = parseModelConnectionSecretRef(ref);
     if (!parsed) {
       throw new Error(`Invalid secret reference format: ${ref}`);
     }
@@ -240,29 +215,29 @@ class SecretBrokerClient implements SecretStoreAdapter {
       expiryMs
     );
     
-    const repo = getJobSnapshotRepository(this.env.DB);
-    await repo.put(snapshot);
+    const data = getDataLayer(this.env);
+    await data.jobSnapshots.put(snapshot);
     
     return jobId;
   }
 }
 
 /**
- * Create a Secret Store adapter for the given environment
+ * Create a Secret Store for the given environment
  */
-export function createSecretStore(env: Env): SecretStoreAdapter {
+export function createSecretStore(env: Env): SecretStore {
   return new SecretBrokerClient(env);
 }
 
 /**
  * Cached secret store accessor
  */
-const secretStoreCache = new WeakMap<Env, SecretStoreAdapter>();
+const secretStoreCache = new WeakMap<Env, SecretStore>();
 
 /**
  * Get or create the secret store for the given environment
  */
-export function getSecretStore(env: Env): SecretStoreAdapter {
+export function getSecretStore(env: Env): SecretStore {
   let store = secretStoreCache.get(env);
   if (!store) {
     store = createSecretStore(env);
@@ -272,4 +247,4 @@ export function getSecretStore(env: Env): SecretStoreAdapter {
 }
 
 // Re-export AuthorizationContext for convenience
-export { type AuthorizationContext } from "./secret-broker/types.js";
+export { type AuthorizationContext } from "../../secret-broker/types.js";

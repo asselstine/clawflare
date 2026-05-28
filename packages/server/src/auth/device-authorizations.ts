@@ -2,6 +2,7 @@
 // For CLI, mobile apps, and other clients
 
 import type { Env } from "../internal-types/index.js";
+import { getDataLayer } from "../data/index.js";
 import { createAccessToken, hashToken } from "./access-tokens.js";
 import { logger } from "../logger.js";
 
@@ -29,7 +30,7 @@ function generateUserCode(): string {
   let code = "";
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  
+
   for (let i = 0; i < 8; i++) {
     const byte = bytes[i];
     if (byte === undefined) continue;
@@ -37,7 +38,7 @@ function generateUserCode(): string {
     code += chars.charAt(charIndex);
     if (i === 3) code += "-";
   }
-  
+
   return code;
 }
 
@@ -61,17 +62,10 @@ export async function createDeviceAuthorization(
     const oauthStateHash = await hashToken(oauthState);
     const now = Date.now();
     const expiresAt = now + DEVICE_CODE_TTL_MS;
-    
-    await env.DB.prepare(
-      `
-      INSERT INTO device_authorizations
-        (device_code, user_code, client_name, status, expires_at, created_at, oauth_state_hash)
-      VALUES (?, ?, ?, 'pending', ?, ?, ?)
-    `
-    )
-      .bind(deviceCode, userCode, clientName, expiresAt, now, oauthStateHash)
-      .run();
-    
+
+    const data = getDataLayer(env);
+    await data.deviceAuthorizations.create(deviceCode, userCode, clientName, oauthStateHash, expiresAt);
+
     return { deviceCode, userCode, oauthState, expiresAt };
   } catch (error) {
     logger.error("Create device authorization failed", error, {
@@ -97,43 +91,23 @@ export async function getDeviceAuthorizationByOAuthState(
 } | null> {
   try {
     const oauthStateHash = await hashToken(oauthState);
-    
-    const row = await env.DB.prepare(
-      `
-      SELECT device_code, client_name, status, expires_at
-      FROM device_authorizations
-      WHERE oauth_state_hash = ?
-    `
-    )
-      .bind(oauthStateHash)
-      .first<{
-        device_code: string;
-        client_name: string;
-        status: string;
-        expires_at: number;
-      }>();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.deviceAuthorizations.findByOAuthStateHash(oauthStateHash);
+
     if (!row) return null;
-    
+
     // Check if expired
-    if (Date.now() > row.expires_at && row.status === "pending") {
-      await env.DB.prepare(
-        `
-        UPDATE device_authorizations
-        SET status = 'expired'
-        WHERE device_code = ?
-      `
-      )
-        .bind(row.device_code)
-        .run();
+    if (Date.now() > row.expiresAt && row.status === "pending") {
+      await data.deviceAuthorizations.updateStatus(row.deviceCode, "expired");
       return null;
     }
-    
+
     return {
-      deviceCode: row.device_code,
-      clientName: row.client_name,
+      deviceCode: row.deviceCode,
+      clientName: row.clientName,
       status: row.status,
-      expiresAt: row.expires_at,
+      expiresAt: row.expiresAt,
     };
   } catch (error) {
     logger.error("Get device authorization by OAuth state failed", error, {
@@ -158,28 +132,17 @@ export async function getDeviceAuthorizationByUserCode(
   try {
     // Normalize input: uppercase, allow hyphen to match stored format XXXX-XXXX
     const normalizedCode = userCode.toUpperCase().replace(/[^A-Z0-9-]/g, "");
-    const row = await env.DB.prepare(
-      `
-      SELECT device_code, client_name, status, expires_at
-      FROM device_authorizations
-      WHERE user_code = ?
-    `
-    )
-      .bind(normalizedCode)
-      .first<{
-        device_code: string;
-        client_name: string;
-        status: string;
-        expires_at: number;
-      }>();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.deviceAuthorizations.findByUserCode(normalizedCode);
+
     if (!row) return null;
-    
+
     return {
-      deviceCode: row.device_code,
-      clientName: row.client_name,
+      deviceCode: row.deviceCode,
+      clientName: row.clientName,
       status: row.status,
-      expiresAt: row.expires_at,
+      expiresAt: row.expiresAt,
     };
   } catch (error) {
     logger.error("Get device authorization by user code failed", error, {
@@ -200,66 +163,36 @@ export async function approveDeviceAuthorization(
 ): Promise<{ accessToken: string } | null> {
   try {
     const now = Date.now();
-    
+
+    const data = getDataLayer(env);
+
     // Check if device authorization is still valid
-    const deviceAuth = await env.DB.prepare(
-      `
-      SELECT client_name, status, expires_at
-      FROM device_authorizations
-      WHERE device_code = ?
-    `
-    )
-      .bind(deviceCode)
-      .first<{
-        client_name: string;
-        status: string;
-        expires_at: number;
-      }>();
-    
+    const deviceAuth = await data.deviceAuthorizations.findByDeviceCode(deviceCode);
+
     if (!deviceAuth) return null;
-    
+
     if (deviceAuth.status !== "pending") {
       return null;
     }
-    
-    if (now > deviceAuth.expires_at) {
+
+    if (now > deviceAuth.expiresAt) {
       // Mark as expired
-      await env.DB.prepare(
-        `
-        UPDATE device_authorizations
-        SET status = 'expired'
-        WHERE device_code = ?
-      `
-      )
-        .bind(deviceCode)
-        .run();
+      await data.deviceAuthorizations.updateStatus(deviceCode, "expired");
       return null;
     }
-    
+
     // Create access token
     const tokenResult = await createAccessToken(env, {
       userId,
-      name: `Device Authorization - ${deviceAuth.client_name}`,
-      clientName: deviceAuth.client_name,
+      name: `Device Authorization - ${deviceAuth.clientName}`,
+      clientName: deviceAuth.clientName,
     });
-    
+
     if (!tokenResult) return null;
-    
+
     // Update device authorization with token for one-time retrieval
-    await env.DB.prepare(
-      `
-      UPDATE device_authorizations
-      SET user_id = ?,
-          access_token_id = ?,
-          access_token_plaintext = ?,
-          status = 'approved',
-          approved_at = ?
-      WHERE device_code = ?
-    `
-    )
-      .bind(userId, tokenResult.id, tokenResult.token, now, deviceCode)
-      .run();
-    
+    await data.deviceAuthorizations.approve(deviceCode, userId, tokenResult.id, tokenResult.token);
+
     return { accessToken: tokenResult.token };
   } catch (error) {
     logger.error("Approve device authorization failed", error, {
@@ -277,15 +210,8 @@ export async function denyDeviceAuthorization(
   deviceCode: string
 ): Promise<boolean> {
   try {
-    await env.DB.prepare(
-      `
-      UPDATE device_authorizations
-      SET status = 'denied'
-      WHERE device_code = ?
-    `
-    )
-      .bind(deviceCode)
-      .run();
+    const data = getDataLayer(env);
+    await data.deviceAuthorizations.updateStatus(deviceCode, "denied");
     return true;
   } catch (error) {
     logger.error("Deny device authorization failed", error, {
@@ -311,76 +237,44 @@ export async function pollDeviceAuthorization(
   | null
 > {
   try {
-    const row = await env.DB.prepare(
-      `
-      SELECT status, expires_at, user_id, access_token_id, access_token_plaintext, token_retrieved_at
-      FROM device_authorizations
-      WHERE device_code = ?
-    `
-    )
-      .bind(deviceCode)
-      .first<{
-        status: string;
-        expires_at: number;
-        user_id: string | null;
-        access_token_id: string | null;
-        access_token_plaintext: string | null;
-        token_retrieved_at: number | null;
-      }>();
-    
+    const data = getDataLayer(env);
+    const row = await data.deviceAuthorizations.findByDeviceCode(deviceCode);
+
     if (!row) return null;
-    
+
     const now = Date.now();
-    
+
     // Check expiration
-    if (now > row.expires_at && row.status === "pending") {
-      await env.DB.prepare(
-        `
-        UPDATE device_authorizations
-        SET status = 'expired'
-        WHERE device_code = ?
-      `
-      )
-        .bind(deviceCode)
-        .run();
-      
+    if (now > row.expiresAt && row.status === "pending") {
+      await data.deviceAuthorizations.updateStatus(deviceCode, "expired");
       return { status: "expired" };
     }
-    
+
     if (row.status === "denied") {
       return { status: "denied" };
     }
-    
-    if (row.status !== "approved" || !row.access_token_id) {
+
+    if (row.status !== "approved" || !row.accessTokenId) {
       return { status: "pending" };
     }
-    
+
     // Device is approved - handle one-time token retrieval
     // If token was already retrieved, return complete without token
-    if (row.token_retrieved_at || !row.access_token_plaintext) {
+    if (row.tokenRetrievedAt || !row.accessTokenPlaintext) {
       return {
         status: "complete",
-        userId: row.user_id ?? undefined,
+        userId: row.userId ?? undefined,
       };
     }
-    
+
     // One-time token retrieval: clear the plaintext token and mark as retrieved
-    const accessToken = row.access_token_plaintext;
-    await env.DB.prepare(
-      `
-      UPDATE device_authorizations
-      SET access_token_plaintext = NULL,
-          token_retrieved_at = ?
-      WHERE device_code = ?
-    `
-    )
-      .bind(now, deviceCode)
-      .run();
-    
+    const accessToken = row.accessTokenPlaintext;
+    await data.deviceAuthorizations.markTokenRetrieved(deviceCode);
+
     return {
       status: "complete",
       accessToken,
-      userId: row.user_id ?? undefined,
+      userId: row.userId ?? undefined,
     };
   } catch (error) {
     logger.error("Poll device authorization failed", error, {
@@ -398,17 +292,8 @@ export async function cleanupExpiredDeviceAuthorizations(
   env: Env
 ): Promise<number> {
   try {
-    const now = Date.now();
-    const result = await env.DB.prepare(
-      `
-      DELETE FROM device_authorizations
-      WHERE expires_at < ? AND status IN ('pending', 'expired')
-    `
-    )
-      .bind(now - DEVICE_CODE_TTL_MS) // Keep expired ones for a bit for debugging
-      .run();
-    
-    return result.meta?.changes ?? 0;
+    const data = getDataLayer(env);
+    return await data.deviceAuthorizations.cleanupExpired(Date.now() - DEVICE_CODE_TTL_MS);
   } catch (error) {
     logger.error("Cleanup expired device authorizations failed", error, {
       function: "cleanupExpiredDeviceAuthorizations",

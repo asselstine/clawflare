@@ -2,6 +2,7 @@
 // CLI, API clients, etc.
 
 import type { Env } from "../internal-types/index.js";
+import { getDataLayer } from "../data/index.js";
 import { logger } from "../logger.js";
 
 const TOKEN_PREFIX = "clf_";
@@ -47,26 +48,15 @@ export async function createAccessToken(
     const token = generateAccessToken();
     const tokenHash = await hashToken(token);
     const id = crypto.randomUUID();
-    const now = Date.now();
-    
-    await env.DB.prepare(
-      `
-      INSERT INTO access_tokens
-        (id, user_id, token_hash, name, client_name, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `
-    )
-      .bind(
-        id,
-        params.userId,
-        tokenHash,
-        params.name,
-        params.clientName ?? null,
-        now,
-        params.expiresAt ?? null
-      )
-      .run();
-    
+
+    const data = getDataLayer(env);
+    await data.accessTokens.create(id, tokenHash, {
+      userId: params.userId,
+      name: params.name,
+      clientName: params.clientName,
+      expiresAt: params.expiresAt,
+    });
+
     return { id, token };
   } catch (error) {
     logger.error("Failed to create access token", { error: error instanceof Error ? error.message : String(error) });
@@ -88,20 +78,8 @@ export async function verifyAccessToken(
     logger.debug("Verifying access token", { tokenLength: token.length, tokenPrefix: token.slice(0, 15) });
     const tokenHash = await hashToken(token);
 
-    const row = await env.DB.prepare(
-      `
-      SELECT id, user_id, expires_at, revoked_at
-      FROM access_tokens
-      WHERE token_hash = ?
-    `
-    )
-      .bind(tokenHash)
-      .first<{
-        id: string;
-        user_id: string;
-        expires_at: number | null;
-        revoked_at: number | null;
-      }>();
+    const data = getDataLayer(env);
+    const row = await data.accessTokens.findByTokenHash(tokenHash);
 
     if (!row) {
       logger.debug("Access token not found", { tokenHashPrefix: tokenHash.slice(0, 16) });
@@ -109,31 +87,23 @@ export async function verifyAccessToken(
     }
 
     // Check if token is expired
-    if (row.expires_at && Date.now() > row.expires_at) {
-      logger.debug("Access token expired", { tokenId: row.id, expiresAt: row.expires_at });
+    if (row.expiresAt && Date.now() > row.expiresAt) {
+      logger.debug("Access token expired", { tokenId: row.id, expiresAt: row.expiresAt });
       return null;
     }
 
     // Check if token is revoked
-    if (row.revoked_at) {
-      logger.debug("Access token revoked", { tokenId: row.id, revokedAt: row.revoked_at });
+    if (row.revokedAt) {
+      logger.debug("Access token revoked", { tokenId: row.id, revokedAt: row.revokedAt });
       return null;
     }
 
-    logger.debug("Access token verified", { tokenId: row.id, userId: row.user_id });
+    logger.debug("Access token verified", { tokenId: row.id, userId: row.userId });
 
     // Update last_used_at
-    await env.DB.prepare(
-      `
-      UPDATE access_tokens
-      SET last_used_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(Date.now(), row.id)
-      .run();
+    await data.accessTokens.updateLastUsedAt(row.id);
 
-    return { tokenId: row.id, userId: row.user_id };
+    return { tokenId: row.id, userId: row.userId };
   } catch (error) {
     logger.error("Failed to verify access token", { error: error instanceof Error ? error.message : String(error) });
     return null;
@@ -148,16 +118,8 @@ export async function revokeAccessToken(
   tokenId: string
 ): Promise<boolean> {
   try {
-    const now = Date.now();
-    await env.DB.prepare(
-      `
-      UPDATE access_tokens
-      SET revoked_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(now, tokenId)
-      .run();
+    const data = getDataLayer(env);
+    await data.accessTokens.revoke(tokenId);
     return true;
   } catch (error) {
     logger.error("Failed to revoke access token", { error: error instanceof Error ? error.message : String(error) });
@@ -181,30 +143,8 @@ export async function listAccessTokens(
   }>
 > {
   try {
-    const rows = await env.DB.prepare(
-      `
-      SELECT id, name, client_name, created_at, last_used_at
-      FROM access_tokens
-      WHERE user_id = ? AND revoked_at IS NULL
-      ORDER BY created_at DESC
-    `
-    )
-      .bind(userId)
-      .all<{
-        id: string;
-        name: string;
-        client_name: string | null;
-        created_at: number;
-        last_used_at: number | null;
-      }>();
-    
-    return (rows.results ?? []).map((row) => ({
-      id: row.id,
-      name: row.name,
-      clientName: row.client_name,
-      createdAt: row.created_at,
-      lastUsedAt: row.last_used_at,
-    }));
+    const data = getDataLayer(env);
+    return await data.accessTokens.listForUser(userId);
   } catch (error) {
     logger.error("Failed to list access tokens", { error: error instanceof Error ? error.message : String(error) });
     return [];

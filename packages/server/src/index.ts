@@ -186,7 +186,7 @@ export {
   resolveModelConnectionForNewSession,
   type ResolvedModelConnection,
   type CreateModelConnectionResult,
-} from "./model-connection-service.js";
+} from "./services/model-connections.js";
 
 // Export model provider utilities
 export {
@@ -206,18 +206,17 @@ export {
 export {
   createSecretStore,
   getSecretStore,
-  type SecretStoreAdapter,
+  type SecretStore,
   type AuthSession,
   type AuthorizationContext,
-} from "./secret-store.js";
+} from "./data/secrets/index.js";
 
 // Export Secret Broker types for workflow integration
 export type { JobAuthorizationSnapshot } from "./secret-broker/types.js";
 export {
   createJobSnapshot,
-  getJobSnapshotRepository,
   type JobSnapshotRepository,
-} from "./secret-broker/job-snapshot.js";
+} from "./data/index.js";
 
 // Main Cloudflare Worker export
 export default {

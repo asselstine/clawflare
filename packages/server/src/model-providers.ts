@@ -1,7 +1,7 @@
 // Model provider definitions and validation
 // Supports multiple AI providers with schema-based configuration
 
-import { z } from "zod";
+import * as z from "zod";
 
 // =============================================================================
 // Provider Schemas
@@ -11,7 +11,7 @@ const ProviderDefinitionSchema = z.object({
   provider: z.string(),
   requiredSecrets: z.array(z.string()),
   optionalSecrets: z.array(z.string()).default([]),
-  configSchema: z.record(z.unknown()),
+  configSchema: z.record(z.string(), z.any()),
   defaultModel: z.string().optional(),
 });
 
@@ -125,8 +125,8 @@ export function validateModelConnectionInput(
   const schema = z.object({
     provider: z.string().min(1),
     modelName: z.string().min(1),
-    secrets: z.record(z.string()).default({}),
-    config: z.record(z.unknown()).optional(),
+    secrets: z.record(z.string(), z.string()).default({}),
+    config: z.record(z.string(), z.unknown()).optional(),
   });
 
   const parsed = schema.safeParse(input);

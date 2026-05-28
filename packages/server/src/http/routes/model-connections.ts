@@ -13,8 +13,8 @@ import {
   listModelConnections,
   getWorkspaceDefaultModelConnection,
   setWorkspaceDefaultModelConnection,
-} from "../../model-connection-service.js";
-import type { AuthSession } from "../../secret-store.js";
+} from "../../services/model-connections.js";
+import type { AuthSession } from "../../data/secrets/index.js";
 import { logger } from "../../logger.js";
 
 // =============================================================================

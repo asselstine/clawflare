@@ -11,7 +11,10 @@ function delay(ms: number): Promise<void> {
 }
 
 function messageToText(message: AgentMessage): string {
-  const content = message.content;
+  // Check if message has content (standard pi-ai messages do, custom messages might not)
+  if (!("content" in message)) return "";
+
+  const content = (message as { content: unknown }).content;
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content

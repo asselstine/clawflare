@@ -1,6 +1,7 @@
 // Email verification and password reset token management
 
 import type { Env } from "../internal-types/index.js";
+import { getDataLayer } from "../data/index.js";
 import { logger } from "../logger.js";
 
 const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -46,28 +47,14 @@ export async function createEmailVerificationToken(
     const id = crypto.randomUUID();
     const now = Date.now();
     const expiresAt = now + EMAIL_VERIFICATION_TTL_MS;
-    
+
+    const data = getDataLayer(env);
+
     // Invalidate any existing tokens for this user
-    await env.DB.prepare(
-      `
-      UPDATE email_verification_tokens
-      SET consumed_at = ?
-      WHERE user_id = ? AND consumed_at IS NULL
-    `
-    )
-      .bind(now, userId)
-      .run();
-    
-    await env.DB.prepare(
-      `
-      INSERT INTO email_verification_tokens
-        (id, user_id, token_hash, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `
-    )
-      .bind(id, userId, tokenHash, expiresAt, now)
-      .run();
-    
+    await data.emailVerificationTokens.invalidateAllForUser(userId);
+
+    await data.emailVerificationTokens.create(id, tokenHash, userId, expiresAt);
+
     return token;
   } catch (error) {
     logger.error("Create email verification token failed", error, {
@@ -88,50 +75,21 @@ export async function verifyEmailToken(
   try {
     const tokenHash = await hashToken(token);
     const now = Date.now();
-    
-    const row = await env.DB.prepare(
-      `
-      SELECT id, user_id, expires_at, consumed_at
-      FROM email_verification_tokens
-      WHERE token_hash = ?
-    `
-    )
-      .bind(tokenHash)
-      .first<{
-        id: string;
-        user_id: string;
-        expires_at: number;
-        consumed_at: number | null;
-      }>();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.emailVerificationTokens.findByTokenHash(tokenHash);
+
     if (!row) return null;
-    
-    if (row.consumed_at) return null;
-    if (now > row.expires_at) return null;
-    
+    if (row.consumedAt) return null;
+    if (now > row.expiresAt) return null;
+
     // Mark as consumed
-    await env.DB.prepare(
-      `
-      UPDATE email_verification_tokens
-      SET consumed_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(now, row.id)
-      .run();
-    
+    await data.emailVerificationTokens.consume(row.id);
+
     // Update user as verified
-    await env.DB.prepare(
-      `
-      UPDATE users
-      SET email_verified_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(now, row.user_id)
-      .run();
-    
-    return row.user_id;
+    await data.users.setEmailVerified(row.userId);
+
+    return row.userId;
   } catch (error) {
     logger.error("Verify email token failed", error, {
       function: "verifyEmailToken",
@@ -157,28 +115,14 @@ export async function createPasswordResetToken(
     const id = crypto.randomUUID();
     const now = Date.now();
     const expiresAt = now + PASSWORD_RESET_TTL_MS;
-    
+
+    const data = getDataLayer(env);
+
     // Invalidate any existing tokens for this user
-    await env.DB.prepare(
-      `
-      UPDATE password_reset_tokens
-      SET consumed_at = ?
-      WHERE user_id = ? AND consumed_at IS NULL
-    `
-    )
-      .bind(now, userId)
-      .run();
-    
-    await env.DB.prepare(
-      `
-      INSERT INTO password_reset_tokens
-        (id, user_id, token_hash, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?)
-    `
-    )
-      .bind(id, userId, tokenHash, expiresAt, now)
-      .run();
-    
+    await data.passwordResetTokens.invalidateAllForUser(userId);
+
+    await data.passwordResetTokens.create(id, tokenHash, userId, expiresAt);
+
     return token;
   } catch (error) {
     logger.error("Create password reset token failed", error, {
@@ -198,29 +142,15 @@ export async function verifyPasswordResetToken(
 ): Promise<string | null> {
   try {
     const tokenHash = await hashToken(token);
-    const now = Date.now();
-    
-    const row = await env.DB.prepare(
-      `
-      SELECT id, user_id, expires_at, consumed_at
-      FROM password_reset_tokens
-      WHERE token_hash = ?
-    `
-    )
-      .bind(tokenHash)
-      .first<{
-        id: string;
-        user_id: string;
-        expires_at: number;
-        consumed_at: number | null;
-      }>();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.passwordResetTokens.findByTokenHash(tokenHash);
+
     if (!row) return null;
-    
-    if (row.consumed_at) return null;
-    if (now > row.expires_at) return null;
-    
-    return row.user_id;
+    if (row.consumedAt) return null;
+    if (Date.now() > row.expiresAt) return null;
+
+    return row.userId;
   } catch (error) {
     logger.error("Verify password reset token failed", error, {
       function: "verifyPasswordResetToken",
@@ -238,33 +168,14 @@ export async function consumePasswordResetToken(
 ): Promise<boolean> {
   try {
     const tokenHash = await hashToken(token);
-    const now = Date.now();
-    
-    const row = await env.DB.prepare(
-      `
-      SELECT id, consumed_at
-      FROM password_reset_tokens
-      WHERE token_hash = ?
-    `
-    )
-      .bind(tokenHash)
-      .first<{
-        id: string;
-        consumed_at: number | null;
-      }>();
-    
-    if (!row || row.consumed_at) return false;
-    
-    await env.DB.prepare(
-      `
-      UPDATE password_reset_tokens
-      SET consumed_at = ?
-      WHERE id = ?
-    `
-    )
-      .bind(now, row.id)
-      .run();
-    
+
+    const data = getDataLayer(env);
+    const row = await data.passwordResetTokens.findByTokenHash(tokenHash);
+
+    if (!row || row.consumedAt) return false;
+
+    await data.passwordResetTokens.consume(row.id);
+
     return true;
   } catch (error) {
     logger.error("Consume password reset token failed", error, {

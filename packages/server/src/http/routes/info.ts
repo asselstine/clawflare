@@ -35,7 +35,7 @@ export async function handleGetInfo(
 
     // Include workspace-specific info if available
     if (requestContext?.workspaceId) {
-      const { hasModelConnections } = await import("../../model-connection-service.js");
+      const { hasModelConnections } = await import("../../services/model-connections.js");
       response.workspace = {
         hasModelConnections: await hasModelConnections(env, requestContext.workspaceId),
       };

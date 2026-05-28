@@ -9,8 +9,8 @@ import { json, badRequest } from "../responses.js";
 import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
-import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
-import { getSecretStore } from "../../secret-store.js";
+import { resolveModelConnectionForNewSession } from "../../services/model-connections.js";
+import { getSecretStore } from "../../data/secrets/index.js";
 import { logger } from "../../logger.js";
 
 /**

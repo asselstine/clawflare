@@ -1,17 +1,17 @@
 // Model Connection Service
 // Coordinates D1 persistence and Secret Store for AI model connections
 
-import type { Env } from "./internal-types/index.js";
-import type { ModelConnection } from "./data/index.js";
-import { getDataLayer } from "./data/index.js";
-import { getSecretStore, type AuthSession } from "./secret-store.js";
+import type { Env } from "../internal-types/index.js";
+import type { ModelConnection } from "../data/index.js";
+import { getDataLayer } from "../data/index.js";
+import { getSecretStore, type AuthSession } from "../data/secrets/index.js";
 import {
   validateModelConnectionInput,
   requiredSecretsForProvider,
   defaultModelForProvider,
   redactModelConnection,
   type PublicModelConnection,
-} from "./model-providers.js";
+} from "../model-providers.js";
 
 /**
  * Resolved model connection with secrets loaded

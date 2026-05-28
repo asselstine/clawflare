@@ -121,9 +121,36 @@ function truncateContent(content: unknown[]): unknown[] {
 }
 
 /**
+ * Check if a message is a standard pi-ai message (with content, role, timestamp)
+ * vs a custom message type
+ */
+function isStandardMessage(msg: AgentMessage): msg is Extract<AgentMessage, { role: unknown; content: unknown; timestamp: number }> {
+  return (
+    typeof msg === "object" &&
+    msg !== null &&
+    "role" in msg &&
+    "content" in msg &&
+    "timestamp" in msg
+  );
+}
+
+/**
  * Convert a message to persisted form with size limits
  */
 export function persistMessage(msg: AgentMessage, id: string): PersistedAgentMessage {
+  if (!isStandardMessage(msg)) {
+    // Custom messages - store minimal representation
+    return {
+      id,
+      role: "custom",
+      content: [],
+      timestamp: Date.now(),
+      persistedAt: Date.now(),
+      contentTruncated: false,
+      originalSize: 0,
+    };
+  }
+
   const content = Array.isArray(msg.content)
     ? truncateContent(msg.content as unknown[])
     : [{ type: "text", text: String(msg.content).slice(0, MAX_MESSAGE_CONTENT_SIZE) }];
