@@ -1,12 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-  Env,
-  SessionMetadataState,
-} from "./internal-types/index.js";
+import type { Env, SessionMetadataState,} from "./internal-types/index.js";
 import type { ChatRequest } from "./types.js";
 import type { SessionInputEvent } from "./data/index.js";
 import { getDataLayer } from "./data/index.js";
+import { logger } from "./logger.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -69,6 +67,9 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
         await this.startWorkflowAndStream(ws, data);
 
       } catch (error) {
+        logger.error("WebSocket message handling failed", error, {
+          handler: "ClawflareWebSocketSession.handleWebSocket",
+        });
         ws.send(JSON.stringify({
           type: "error",
           message: error instanceof Error ? error.message : String(error)

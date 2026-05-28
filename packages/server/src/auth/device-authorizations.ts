@@ -3,6 +3,7 @@
 
 import type { Env } from "../internal-types/index.js";
 import { createAccessToken, hashToken } from "./access-tokens.js";
+import { logger } from "../logger.js";
 
 const DEVICE_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -73,7 +74,10 @@ export async function createDeviceAuthorization(
     
     return { deviceCode, userCode, oauthState, expiresAt };
   } catch (error) {
-    console.error("[createDeviceAuthorization] Error:", error);
+    logger.error("Create device authorization failed", error, {
+      function: "createDeviceAuthorization",
+      clientName,
+    });
     return null;
   }
 }
@@ -132,7 +136,9 @@ export async function getDeviceAuthorizationByOAuthState(
       expiresAt: row.expires_at,
     };
   } catch (error) {
-    console.error("[getDeviceAuthorizationByOAuthState] Error:", error);
+    logger.error("Get device authorization by OAuth state failed", error, {
+      function: "getDeviceAuthorizationByOAuthState",
+    });
     return null;
   }
 }
@@ -176,7 +182,9 @@ export async function getDeviceAuthorizationByUserCode(
       expiresAt: row.expires_at,
     };
   } catch (error) {
-    console.error("[getDeviceAuthorizationByUserCode] Error:", error);
+    logger.error("Get device authorization by user code failed", error, {
+      function: "getDeviceAuthorizationByUserCode",
+    });
     return null;
   }
 }
@@ -254,7 +262,9 @@ export async function approveDeviceAuthorization(
     
     return { accessToken: tokenResult.token };
   } catch (error) {
-    console.error("[approveDeviceAuthorization] Error:", error);
+    logger.error("Approve device authorization failed", error, {
+      function: "approveDeviceAuthorization",
+    });
     return null;
   }
 }
@@ -278,7 +288,9 @@ export async function denyDeviceAuthorization(
       .run();
     return true;
   } catch (error) {
-    console.error("[denyDeviceAuthorization] Error:", error);
+    logger.error("Deny device authorization failed", error, {
+      function: "denyDeviceAuthorization",
+    });
     return false;
   }
 }
@@ -371,7 +383,9 @@ export async function pollDeviceAuthorization(
       userId: row.user_id ?? undefined,
     };
   } catch (error) {
-    console.error("[pollDeviceAuthorization] Error:", error);
+    logger.error("Poll device authorization failed", error, {
+      function: "pollDeviceAuthorization",
+    });
     return null;
   }
 }
@@ -396,7 +410,9 @@ export async function cleanupExpiredDeviceAuthorizations(
     
     return result.meta?.changes ?? 0;
   } catch (error) {
-    console.error("[cleanupExpiredDeviceAuthorizations] Error:", error);
+    logger.error("Cleanup expired device authorizations failed", error, {
+      function: "cleanupExpiredDeviceAuthorizations",
+    });
     return 0;
   }
 }

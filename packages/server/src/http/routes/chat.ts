@@ -10,6 +10,7 @@ import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
 import { getSecretStore } from "../../secret-store.js";
+import { logger } from "../../logger.js";
 
 /**
  * Create an immediate authorization context from the request context
@@ -90,7 +91,12 @@ export async function handleChat(
     logTiming(env, sessionIdVar, "chat.request.error", requestStart, {
       error: error instanceof Error ? error.message : String(error),
     });
-    console.error("[handleChat] Error:", error);
+    logger.error("Chat request failed", error, {
+      handler: "handleChat",
+      route: "POST /v1/chat",
+      sessionId: sessionIdVar,
+      workspaceId: requestContext.workspace.id,
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }

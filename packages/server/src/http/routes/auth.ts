@@ -5,6 +5,7 @@ import type { Env } from "../../internal-types/index.js";
 import { json, badRequest, serverError } from "../responses.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
+import { logger } from "../../logger.js";
 import {
   hashPassword,
   verifyPassword,
@@ -167,7 +168,10 @@ h1 { color: #4CAF50; }
       { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
-    console.error("[handleMockOAuthAutoApprove] Error:", error);
+    logger.error("Mock OAuth auto-approve failed", error, {
+      handler: "handleMockOAuthAutoApprove",
+      route: "GET /v1/auth/mock/auto-approve",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -324,7 +328,10 @@ export async function handleRegister(
       headers: { "Set-Cookie": cookie },
     });
   } catch (error) {
-    console.error("[handleRegister] Error:", error);
+    logger.error("Registration failed", error, {
+      handler: "handleRegister",
+      route: "POST /v1/auth/register",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -413,7 +420,10 @@ export async function handleLogin(
       headers: { "Set-Cookie": cookie },
     });
   } catch (error) {
-    console.error("[handleLogin] Error:", error);
+    logger.error("Login failed", error, {
+      handler: "handleLogin",
+      route: "POST /v1/auth/login",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -479,7 +489,10 @@ export async function handleDeviceAuthStart(
       interval: POLL_INTERVAL_SECONDS,
     });
   } catch (error) {
-    console.error("[handleDeviceAuthStart] Error:", error);
+    logger.error("Device auth start failed", error, {
+      handler: "handleDeviceAuthStart",
+      route: "POST /v1/auth/device/start",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -588,7 +601,10 @@ button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; 
       { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
-    console.error("[handleDeviceVerify] Error:", error);
+    logger.error("Device verify failed", error, {
+      handler: "handleDeviceVerify",
+      route: "GET /v1/auth/device/verify",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -677,7 +693,10 @@ export async function handleDeviceApprove(
       { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
-    console.error("[handleDeviceApprove] Error:", error);
+    logger.error("Device approval failed", error, {
+      handler: "handleDeviceApprove",
+      route: "POST /v1/auth/device/approve",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -752,7 +771,10 @@ export async function handleDeviceAuthPoll(
 
     return json({ status: "complete" });
   } catch (error) {
-    console.error("[handleDeviceAuthPoll] Error:", error);
+    logger.error("Device auth poll failed", error, {
+      handler: "handleDeviceAuthPoll",
+      route: "POST /v1/auth/device/poll",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -876,7 +898,12 @@ export async function handleGithubCallback(
     const contentType = tokenResponse.headers.get("content-type");
     if (!contentType?.includes("application/json")) {
       const text = await tokenResponse.text();
-      console.error(`[handleGithubCallback] Non-JSON response from GitHub: ${tokenResponse.status} ${tokenResponse.statusText}`, text.slice(0, 500));
+      logger.warn("GitHub OAuth returned non-JSON response", {
+        handler: "handleGithubCallback",
+        status: tokenResponse.status,
+        statusText: tokenResponse.statusText,
+        bodyPreview: text.slice(0, 500),
+      });
       return new Response(
         `<!DOCTYPE html>
 <html>
@@ -898,7 +925,11 @@ export async function handleGithubCallback(
     };
 
     if (tokenData.error || !tokenData.access_token) {
-      console.error(`[handleGithubCallback] GitHub OAuth error: ${tokenData.error} - ${tokenData.error_description}`);
+      logger.warn("GitHub OAuth error response", {
+        handler: "handleGithubCallback",
+        error: tokenData.error,
+        errorDescription: tokenData.error_description,
+      });
       const errorMsg = tokenData.error_description || tokenData.error || "Unknown error";
       return new Response(
         `<!DOCTYPE html>
@@ -927,7 +958,12 @@ export async function handleGithubCallback(
 
     if (!userResponse.ok) {
       const errorText = await userResponse.text();
-      console.error(`[handleGithubCallback] GitHub API error: ${userResponse.status} ${userResponse.statusText}`, errorText.slice(0, 500));
+      logger.warn("GitHub API error", {
+        handler: "handleGithubCallback",
+        status: userResponse.status,
+        statusText: userResponse.statusText,
+        bodyPreview: errorText.slice(0, 500),
+      });
       return new Response(
         `<!DOCTYPE html>
 <html>
@@ -961,7 +997,11 @@ export async function handleGithubCallback(
       });
 
       if (!emailsResponse.ok) {
-        console.error(`[handleGithubCallback] GitHub emails API error: ${emailsResponse.status} ${emailsResponse.statusText}`);
+        logger.warn("GitHub emails API error", {
+          handler: "handleGithubCallback",
+          status: emailsResponse.status,
+          statusText: emailsResponse.statusText,
+        });
       } else {
         const emails = (await emailsResponse.json()) as Array<{
           email: string;
@@ -1086,7 +1126,10 @@ code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: m
       { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
-    console.error("[handleGithubCallback] Error:", error);
+    logger.error("GitHub callback failed", error, {
+      handler: "handleGithubCallback",
+      route: "GET /v1/auth/github/callback",
+    });
     return new Response(
       `<!DOCTYPE html>
 <html>
@@ -1144,7 +1187,10 @@ export async function handleForgotPassword(
       message: "If an account exists, a password reset email has been sent.",
     });
   } catch (error) {
-    console.error("[handleForgotPassword] Error:", error);
+    logger.error("Forgot password failed", error, {
+      handler: "handleForgotPassword",
+      route: "POST /v1/auth/password/forgot",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -1211,7 +1257,10 @@ export async function handleResetPassword(
 
     return json({ success: true, message: "Password reset successful" });
   } catch (error) {
-    console.error("[handleResetPassword] Error:", error);
+    logger.error("Reset password failed", error, {
+      handler: "handleResetPassword",
+      route: "POST /v1/auth/password/reset",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -1274,7 +1323,10 @@ export async function handleVerifyEmail(
       { headers: { "Content-Type": "text/html" } }
     );
   } catch (error) {
-    console.error("[handleVerifyEmail] Error:", error);
+    logger.error("Email verify failed", error, {
+      handler: "handleVerifyEmail",
+      route: "GET /v1/auth/email/verify",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -1312,7 +1364,10 @@ export async function handleGetAuthSession(
       })),
     });
   } catch (error) {
-    console.error("[handleGetAuthSession] Error:", error);
+    logger.error("Get auth session failed", error, {
+      handler: "handleGetAuthSession",
+      route: "GET /v1/auth/session",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -1351,7 +1406,10 @@ export async function handleLogout(
       headers: { "Set-Cookie": getClearSessionCookie() },
     });
   } catch (error) {
-    console.error("[handleLogout] Error:", error);
+    logger.error("Logout failed", error, {
+      handler: "handleLogout",
+      route: "POST /v1/auth/logout",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -1391,7 +1449,10 @@ export async function handleGetMe(
       },
     });
   } catch (error) {
-    console.error("[handleGetMe] Error:", error);
+    logger.error("Get current user failed", error, {
+      handler: "handleGetMe",
+      route: "GET /v1/me",
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }

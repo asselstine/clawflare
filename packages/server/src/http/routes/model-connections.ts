@@ -15,6 +15,7 @@ import {
   setWorkspaceDefaultModelConnection,
 } from "../../model-connection-service.js";
 import type { AuthSession } from "../../secret-store.js";
+import { logger } from "../../logger.js";
 
 // =============================================================================
 // Helpers
@@ -146,6 +147,11 @@ export async function handleCreateModelConnection(
     return json(response, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    logger.error("Model connection creation failed", error, {
+      handler: "handleCreateModelConnection",
+      route: "POST /v1/model-connections",
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }
@@ -185,6 +191,12 @@ export async function handleGetModelConnection(
     if (message.includes("not found")) {
       return notFound("Model connection");
     }
+    logger.error("Model connection get failed", error, {
+      handler: "handleGetModelConnection",
+      route: "GET /v1/model-connections/:id",
+      id,
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }
@@ -239,6 +251,12 @@ export async function handleUpdateModelConnection(
     if (message.includes("not found")) {
       return notFound("Model connection");
     }
+    logger.error("Model connection update failed", error, {
+      handler: "handleUpdateModelConnection",
+      route: "PATCH /v1/model-connections/:id",
+      id,
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }
@@ -268,6 +286,12 @@ export async function handleDeleteModelConnection(
     if (message.includes("active session")) {
       return badRequest(message);
     }
+    logger.error("Model connection delete failed", error, {
+      handler: "handleDeleteModelConnection",
+      route: "DELETE /v1/model-connections/:id",
+      id,
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }
@@ -304,6 +328,11 @@ export async function handleSetDefaultModelConnection(
     if (message.includes("not found")) {
       return notFound("Model connection");
     }
+    logger.error("Set default model connection failed", error, {
+      handler: "handleSetDefaultModelConnection",
+      route: "POST /v1/model-connections/default",
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }

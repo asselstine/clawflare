@@ -2,6 +2,7 @@
 // Uses HTTP-only cookies
 
 import type { Env } from "../internal-types/index.js";
+import { logger } from "../logger.js";
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -66,7 +67,10 @@ export async function createWebSession(
       expiresAt,
     };
   } catch (error) {
-    console.error("[createWebSession] Error:", error);
+    logger.error("Create web session failed", error, {
+      function: "createWebSession",
+      userId,
+    });
     return null;
   }
 }
@@ -145,7 +149,9 @@ export async function verifyWebSession(
       csrfTokenValid,
     };
   } catch (error) {
-    console.error("[verifyWebSession] Error:", error);
+    logger.error("Verify web session failed", error, {
+      function: "verifyWebSession",
+    });
     return null;
   }
 }
@@ -167,7 +173,9 @@ export async function destroyWebSession(
       .run();
     return true;
   } catch (error) {
-    console.error("[destroyWebSession] Error:", error);
+    logger.error("Destroy web session failed", error, {
+      function: "destroyWebSession",
+    });
     return false;
   }
 }
@@ -189,7 +197,10 @@ export async function destroyAllUserSessions(
       .run();
     return true;
   } catch (error) {
-    console.error("[destroyAllUserSessions] Error:", error);
+    logger.error("Destroy all user sessions failed", error, {
+      function: "destroyAllUserSessions",
+      userId,
+    });
     return false;
   }
 }

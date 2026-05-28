@@ -8,6 +8,7 @@ import { timingStart, logTiming } from "../../diagnostics.js";
 import { getDataLayer } from "../../data/index.js";
 import type { Env } from "../../internal-types/index.js";
 import type { RequestContext } from "../request-context.js";
+import { logger } from "../../logger.js";
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
@@ -81,7 +82,12 @@ export async function handleGetSession(
     logTiming(env, sessionId, "session.poll.error", pollStart, {
       error: error instanceof Error ? error.message : String(error),
     });
-    console.error("[handleGetSession] Error:", error);
+    logger.error("Session poll failed", error, {
+      handler: "handleGetSession",
+      route: "GET /v1/session/:id",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -130,7 +136,12 @@ export async function handleCloseSession(
 
     return json({ ok: true, sessionId, status: "closed", workspaceId: effectiveWorkspaceId });
   } catch (error) {
-    console.error("[handleCloseSession] Error:", error);
+    logger.error("Session close failed", error, {
+      handler: "handleCloseSession",
+      route: "POST /v1/session/:id/close",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
@@ -195,7 +206,11 @@ export async function handleListSessions(
     const response: SessionListResponse = { sessions, total };
     return json(response);
   } catch (error) {
-    console.error("[handleListSessions] Error:", error);
+    logger.error("Session list failed", error, {
+      handler: "handleListSessions",
+      route: "GET /v1/sessions",
+      workspaceId: effectiveWorkspaceId,
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }

@@ -11,6 +11,7 @@ import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
 import { resolveModelConnectionForNewSession } from "../../model-connection-service.js";
 import { getSecretStore } from "../../secret-store.js";
+import { logger } from "../../logger.js";
 
 /**
  * Create an immediate authorization context from the request context
@@ -120,7 +121,11 @@ export async function handleCreateSession(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.error("[handleCreateSession] Error:", error);
+    logger.error("Session creation failed", error, {
+      handler: "handleCreateSession",
+      route: "POST /v1/session",
+      workspaceId: requestContext.workspace.id,
+    });
     return badRequest(message);
   }
 }

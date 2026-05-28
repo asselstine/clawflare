@@ -5,6 +5,7 @@ import type { Env } from "../../internal-types/index.js";
 import type { AgentSession } from "../../types.js";
 import { json } from "../responses.js";
 import type { RequestContext } from "../request-context.js";
+import { logger } from "../../logger.js";
 
 /**
  * Get context - legacy compatibility endpoint
@@ -29,7 +30,11 @@ export async function handleGetContext(
       workspaceName: requestContext.workspace.name,
     });
   } catch (error) {
-    console.error("[handleGetContext] Error:", error);
+    logger.error("Get context failed", error, {
+      handler: "handleGetContext",
+      route: "GET /v1/context",
+      workspaceId: requestContext.workspace.id,
+    });
     return json(
       { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }
@@ -63,6 +68,11 @@ export async function handleNewContext(
       workspaceName: requestContext.workspace.name,
     });
   } catch (error) {
+    logger.error("New context failed", error, {
+      handler: "handleNewContext",
+      route: "POST /v1/context",
+      workspaceId: requestContext.workspace.id,
+    });
     return json(
       { error: error instanceof Error ? error.message : "Unknown error" },
       { status: 500 }

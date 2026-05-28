@@ -5,6 +5,7 @@ import type { Env } from "../../internal-types/index.js";
 import { json, badRequest, notFound, serverError } from "../responses.js";
 import { getDataLayer } from "../../data/index.js";
 import type { RequestContext } from "../request-context.js";
+import { logger } from "../../logger.js";
 
 /**
  * Inspect session details from D1
@@ -60,6 +61,12 @@ export async function handleCfDebug(
 
     return json(debugInfo);
   } catch (error) {
+    logger.error("Cloudflare debug route failed", error, {
+      handler: "handleCfDebug",
+      route: "GET /v1/cf_debug",
+      sessionId: url.searchParams.get("sessionId"),
+      workspaceId: requestContext.workspace.id,
+    });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }

@@ -1,6 +1,7 @@
 // Email verification and password reset token management
 
 import type { Env } from "../internal-types/index.js";
+import { logger } from "../logger.js";
 
 const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const PASSWORD_RESET_TTL_MS = 1 * 60 * 60 * 1000; // 1 hour
@@ -69,7 +70,10 @@ export async function createEmailVerificationToken(
     
     return token;
   } catch (error) {
-    console.error("[createEmailVerificationToken] Error:", error);
+    logger.error("Create email verification token failed", error, {
+      function: "createEmailVerificationToken",
+      userId,
+    });
     return null;
   }
 }
@@ -129,7 +133,9 @@ export async function verifyEmailToken(
     
     return row.user_id;
   } catch (error) {
-    console.error("[verifyEmailToken] Error:", error);
+    logger.error("Verify email token failed", error, {
+      function: "verifyEmailToken",
+    });
     return null;
   }
 }
@@ -175,7 +181,10 @@ export async function createPasswordResetToken(
     
     return token;
   } catch (error) {
-    console.error("[createPasswordResetToken] Error:", error);
+    logger.error("Create password reset token failed", error, {
+      function: "createPasswordResetToken",
+      userId,
+    });
     return null;
   }
 }
@@ -213,7 +222,9 @@ export async function verifyPasswordResetToken(
     
     return row.user_id;
   } catch (error) {
-    console.error("[verifyPasswordResetToken] Error:", error);
+    logger.error("Verify password reset token failed", error, {
+      function: "verifyPasswordResetToken",
+    });
     return null;
   }
 }
@@ -256,7 +267,9 @@ export async function consumePasswordResetToken(
     
     return true;
   } catch (error) {
-    console.error("[consumePasswordResetToken] Error:", error);
+    logger.error("Consume password reset token failed", error, {
+      function: "consumePasswordResetToken",
+    });
     return false;
   }
 }

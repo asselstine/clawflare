@@ -6,6 +6,7 @@ import { getDataLayer } from "../data/index.js";
 import type { User, Workspace, WorkspaceRole } from "../data/index.js";
 import { verifyAccessToken } from "../auth/access-tokens.js";
 import { verifyWebSession, extractSessionToken } from "../auth/sessions.js";
+import { logger } from "../logger.js";
 
 /**
  * Request context containing authenticated user and workspace information
@@ -80,7 +81,10 @@ async function getDefaultWorkspace(
 
     return workspace;
   } catch (error) {
-    console.error("[getDefaultWorkspace] Error:", error);
+    logger.error("Get default workspace failed", error, {
+      function: "getDefaultWorkspace",
+      userId,
+    });
     return null;
   }
 }
@@ -119,7 +123,10 @@ async function loadUser(
       updatedAt: row.updated_at,
     };
   } catch (error) {
-    console.error("[loadUser] Error:", error);
+    logger.error("Load user failed", error, {
+      function: "loadUser",
+      userId,
+    });
     return null;
   }
 }

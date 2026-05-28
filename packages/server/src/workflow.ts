@@ -8,6 +8,7 @@ import { buildAgentComponents, buildAgentComponentsFromResolved } from "./agent-
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
 import { createTools } from "./tools/index.js";
 import { logTiming, timingStart } from "./diagnostics.js";
+import { logger, errorMessage } from "./logger.js";
 import { resolveModelConnectionForSession } from "./model-connection-service.js";
 
 const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web service. Your core tools allow you to execute code, and egress handlers afford authorized fetches from HTTP APIs. When using code execution tools, provide JavaScript as an ES module with a default exported async function: export default async function(input, env) { ... }. Return values or write to console.log for any output that should be visible; do not infer or invent results that are absent from tool output.
@@ -508,8 +509,20 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         logTiming(this.env, sessionId, "workflow.prompt.finalized", finalizeStart, { status });
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      logTiming(this.env, sessionId, "workflow.prompt.error", undefined, { error: message });
+      const message = errorMessage(error);
+
+      // Always log errors to the server logs - this is NOT gated by CLAWFLARE_DEBUG_TIMING
+      logger.error("Workflow prompt failed", error, {
+        sessionId,
+        inputIndex,
+        maxTurns,
+      });
+
+      // Optional timing-only marker - this is gated by CLAWFLARE_DEBUG_TIMING
+      logTiming(this.env, sessionId, "workflow.prompt.error", undefined, {
+        error: message,
+      });
+
       await step.do(`prompt-error-${inputIndex}`, async () => {
         const errorStart = timingStart();
         await markPromptError(this.env, sessionId, message);
