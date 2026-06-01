@@ -7,14 +7,7 @@ import { password, select, confirm } from "@inquirer/prompts";
 import { loadConfig } from "./login.js";
 import { DEFAULT_SERVER } from "../constants.js";
 import { AgentClient } from "../client.js";
-import type { ModelConnection } from "@clawflare/types";
-
-interface ProviderInfo {
-  id: string;
-  name: string;
-  requiredSecrets: string[];
-  optionalSecrets: string[];
-}
+import type { ModelConnection, ProviderInfo, ProviderModelInfo } from "@clawflare/types";
 
 interface AddOptions {
   server?: string;
@@ -30,6 +23,7 @@ interface RemoveOptions {
 interface ListOptions {
   server?: string;
   token?: string;
+  available?: boolean;
 }
 
 async function getClient(options: { server?: string; token?: string }): Promise<AgentClient> {
@@ -50,18 +44,17 @@ async function getClient(options: { server?: string; token?: string }): Promise<
  * Fetch supported providers from the server
  */
 async function fetchProviders(client: AgentClient): Promise<ProviderInfo[]> {
-  const response = await fetch(`${client.getUrl()}/v1/providers`, {
-    headers: {
-      Authorization: `Bearer ${client.getToken()}`,
-    },
-  });
+  return client.listProviders();
+}
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch providers: ${response.statusText}`);
-  }
-
-  const data = (await response.json()) as { providers: ProviderInfo[] };
-  return data.providers || [];
+/**
+ * Fetch supported models for a provider from the server
+ */
+async function fetchProviderModels(
+  client: AgentClient,
+  providerId: string
+): Promise<ProviderModelInfo[]> {
+  return client.listProviderModels(providerId);
 }
 
 /**
@@ -113,6 +106,27 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
 
   console.log(`\nConfiguring ${selectedProvider.id}...\n`);
 
+  const models = await fetchProviderModels(client, selectedProvider.id);
+  if (models.length === 0) {
+    console.error(`No models available for provider "${selectedProvider.id}".`);
+    process.exit(1);
+  }
+
+  const selectedModel = await select({
+    message: "Select a model:",
+    pageSize: 20,
+    choices: models.map((model) => ({
+      name: `${model.name} (${model.id})`,
+      value: model,
+      description: [
+        model.api,
+        model.contextWindow ? `${model.contextWindow.toLocaleString()} ctx` : undefined,
+        model.maxTokens ? `${model.maxTokens.toLocaleString()} max` : undefined,
+        model.reasoning ? "reasoning" : undefined,
+      ].filter(Boolean).join(" • "),
+    })),
+  });
+
   // Prompt for each required secret
   const secrets: Record<string, string> = {};
   for (const secretKey of selectedProvider.requiredSecrets) {
@@ -154,18 +168,9 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
   console.log("\nCreating model connection...");
 
   try {
-    // Get the default model for this provider from the server
-    // We need to use the first available model or ask the user
-    // For now, we'll need to get models from the server
-    const modelName = await fetchDefaultModelForProvider(client, selectedProvider.id);
-
     const connection = await client.createModelConnection({
-      provider: selectedProvider.id as
-        | "amazon-bedrock"
-        | "anthropic"
-        | "openai"
-        | "cloudflare-workers-ai",
-      modelName,
+      provider: selectedProvider.id,
+      modelName: selectedModel.id,
       secrets,
       setAsDefault,
     });
@@ -185,41 +190,6 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
     );
     process.exit(1);
   }
-}
-
-/**
- * Fetch default model for a provider from pi-ai
- * Returns a reasonable default model for the provider
- */
-async function fetchDefaultModelForProvider(
-  _client: AgentClient,
-  providerId: string
-): Promise<string> {
-  // Map of provider defaults based on pi-ai
-  const defaults: Record<string, string> = {
-    "amazon-bedrock": "minimax.minimax-m2.5",
-    anthropic: "claude-3-opus-20240229",
-    openai: "gpt-4",
-    "cloudflare-workers-ai": "@cf/meta/llama-2-7b-chat-int8",
-    deepseek: "deepseek-chat",
-    "openai-codex": "codex-latest",
-    xai: "grok-2",
-    groq: "llama-3.3-70b-versatile",
-    cerebras: "llama-3.3-70b",
-    mistral: "mistral-large-latest",
-    minimax: "minimax-m2.5",
-    "minimax-cn": "minimax-m2.5",
-    moonshotai: "moonshot-v1-128k",
-    "moonshot-ai-cn": "moonshot-v1-128k",
-    fireworks: "accounts/fireworks/models/llama-v3p1-70b-instruct",
-    kimi: "kimi-k2",
-    "kimi-coding": "kimi-k2-coding",
-    google: "gemini-2.5-flash",
-    "google-vertex": "gemini-2.5-flash",
-    "azure-openai-responses": "gpt-4o",
-  };
-
-  return defaults[providerId] || "unknown";
 }
 
 /**
@@ -292,12 +262,48 @@ export async function providersRemoveCommand(options: RemoveOptions): Promise<vo
 export async function providersListCommand(options: ListOptions): Promise<void> {
   const client = await getClient(options);
 
+  if (!options.available) {
+    await modelsListCommand(options);
+    return;
+  }
+
+  try {
+    const providers = await fetchProviders(client);
+
+    if (providers.length === 0) {
+      console.log("\nNo providers available from server.\n");
+      return;
+    }
+
+    console.log("\nAvailable providers:\n");
+
+    for (const provider of providers) {
+      console.log(`  ${provider.name || provider.id}`);
+      console.log(`    ID: ${provider.id}`);
+      console.log(`    Required secrets: ${provider.requiredSecrets.join(", ") || "none"}`);
+      console.log(`    Optional secrets: ${provider.optionalSecrets.join(", ") || "none"}`);
+      console.log();
+    }
+  } catch (error) {
+    console.error(
+      `Error: ${error instanceof Error ? error.message : String(error)}`
+    );
+    process.exit(1);
+  }
+}
+
+/**
+ * List configured model connections
+ */
+export async function modelsListCommand(options: ListOptions): Promise<void> {
+  const client = await getClient(options);
+
   try {
     const connections = await fetchModelConnections(client);
 
     if (connections.length === 0) {
       console.log("\nNo model connections configured.");
-      console.log("Run 'clawflare providers add' to add a provider.\n");
+      console.log("Run 'clawflare providers add' to add a provider and model.\n");
       return;
     }
 

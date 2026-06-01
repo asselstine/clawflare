@@ -22,6 +22,10 @@ import type {
   UpdateModelConnectionRequest,
   CreateSessionRequest,
   CreateSessionResponse,
+  ProviderInfo,
+  ProviderListResponse,
+  ProviderModelInfo,
+  ProviderModelsResponse,
 } from "@clawflare/types";
 
 export type {
@@ -38,6 +42,10 @@ export type {
   UpdateModelConnectionRequest,
   CreateSessionRequest,
   CreateSessionResponse,
+  ProviderInfo,
+  ProviderListResponse,
+  ProviderModelInfo,
+  ProviderModelsResponse,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -68,9 +76,12 @@ export interface ToolInfo {
 }
 
 export interface ServerInfo {
-  provider: string;
-  model: string;
   contextWindow: number;
+  supportsWorkspaceModelConnections: boolean;
+  supportedProviders: string[];
+  workspace?: {
+    hasModelConnections: boolean;
+  };
 }
 
 export class AgentClient {
@@ -190,6 +201,16 @@ export class AgentClient {
     return this.requestJson<SessionResponse>(path);
   }
 
+  async renameSession(sessionId: string, name: string): Promise<{ ok: boolean; sessionId: string; name: string }> {
+    return this.requestJson<{ ok: boolean; sessionId: string; name: string }>(
+      `/v1/session/${sessionId}/name`,
+      {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }
+    );
+  }
+
   // Poll session until complete, yielding updates
   async *streamSession(
     sessionId: string,
@@ -279,6 +300,10 @@ export class AgentClient {
     return this.currentSessionId;
   }
 
+  setCurrentSessionId(sessionId: string): void {
+    this.currentSessionId = sessionId;
+  }
+
   getCurrentContextId(): string | null {
     return this.getCurrentSessionId();
   }
@@ -291,8 +316,20 @@ export class AgentClient {
     return this.token;
   }
 
-  async getServerInfo(): Promise<ServerInfo & { workspace?: { hasModelConnections: boolean } }> {
-    return this.requestJson<ServerInfo & { workspace?: { hasModelConnections: boolean } }>("/v1/info");
+  async getServerInfo(): Promise<ServerInfo> {
+    return this.requestJson<ServerInfo>("/v1/info");
+  }
+
+  async listProviders(): Promise<ProviderInfo[]> {
+    const data = await this.requestJson<ProviderListResponse>("/v1/providers");
+    return data.providers || [];
+  }
+
+  async listProviderModels(providerId: string): Promise<ProviderModelInfo[]> {
+    const data = await this.requestJson<ProviderModelsResponse>(
+      `/v1/providers/${encodeURIComponent(providerId)}/models`
+    );
+    return data.models || [];
   }
 
   // Debug endpoint - inspect DO storage

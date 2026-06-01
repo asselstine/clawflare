@@ -4,17 +4,15 @@
  */
 
 import type { Env } from "../../internal-types/index.js";
-import { JobSnapshotRepository } from "../../data/index.js";
 import {
   type AuthorizationContext,
   validateAuthContext,
-  validateJobSnapshot,
 } from "./secrets.types.js";
 
 export interface VerifiedAuth {
   userId: string;
   workspaceId: string;
-  isJobAuth: boolean;
+  isSessionAuth: boolean;
 }
 
 /**
@@ -97,41 +95,43 @@ export async function validateAuthorization(
     result: {
       userId: auth.userId,
       workspaceId: auth.workspaceId,
-      isJobAuth: false,
+      isSessionAuth: false,
     },
   };
 }
 
 /**
- * Validate job authorization snapshot.
- * Called by the Secret Broker for async operations (workflows).
+ * Validate session-scoped authorization.
+ * Called by the Secret Broker for workflow secret reads.
  */
-export async function validateJobAuthorization(
+export async function validateSessionAuthorization(
   env: Env,
-  jobId: string,
-  requiredOperation?: string
+  sessionId: string
 ): Promise<{ valid: true; result: VerifiedAuth } | { valid: false; error: string }> {
-  // Load snapshot via data layer
-  const jobSnapshots = new JobSnapshotRepository(env.DB);
-  const snapshot = await jobSnapshots.get(jobId);
+  const session = await env.DB.prepare(
+    `
+      SELECT id, workspace_id AS workspaceId, status
+      FROM sessions
+      WHERE id = ?
+    `
+  )
+    .bind(sessionId)
+    .first<{ id: string; workspaceId: string | null; status: string }>();
 
-  if (!snapshot) {
-    return { valid: false, error: "Job authorization not found" };
+  if (!session) {
+    return { valid: false, error: "Session not found" };
   }
 
-  // Validate snapshot format
-  const validation = validateJobSnapshot(snapshot);
-  if (!validation.valid) {
-    return { valid: false, error: validation.error };
+  if (!session.workspaceId) {
+    return { valid: false, error: "Session has no workspace" };
   }
 
-  // Check operation permission
-  if (requiredOperation && !snapshot.allowedOperations.includes(requiredOperation)) {
-    return { valid: false, error: `Operation not allowed: ${requiredOperation}` };
+  if (session.status === "closed" || session.status === "expired") {
+    return { valid: false, error: "Session is not active" };
   }
 
   // Verify workspace still exists
-  const workspaceExists = await verifyWorkspaceExists(env, snapshot.workspaceId);
+  const workspaceExists = await verifyWorkspaceExists(env, session.workspaceId);
   if (!workspaceExists) {
     return { valid: false, error: "Workspace no longer exists" };
   }
@@ -139,9 +139,9 @@ export async function validateJobAuthorization(
   return {
     valid: true,
     result: {
-      userId: snapshot.createdByUserId,
-      workspaceId: snapshot.workspaceId,
-      isJobAuth: true,
+      userId: "",
+      workspaceId: session.workspaceId,
+      isSessionAuth: true,
     },
   };
 }

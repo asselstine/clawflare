@@ -59,12 +59,23 @@ The server uses:
 - `LOADER` Worker Loader binding for Dynamic Worker execution
 - `AGENT_WORKFLOW` Workflow for durable agent execution
 - `HTTP_GATEWAY` Service binding for controlled outbound HTTP from Dynamic Workers
+- `SECRET_BROKER` Service binding for envelope-encrypted model provider secrets
+- `CLAWFLARE_KEK` secret binding containing a base64-encoded 32-byte key encryption key
 
 `wrangler.jsonc` configures these bindings directly.
 
 ## Model Connections
 
-AI providers are configured per-workspace via the API, not via Wrangler secrets. Users must:
+AI providers are configured per-workspace via the API, not via Wrangler secrets. Provider secrets are envelope-encrypted: each provider secret gets a data encryption key, and encrypted secret payloads plus encrypted DEKs are stored in D1. The Worker only needs one app-bound key encryption key, `CLAWFLARE_KEK`.
+
+Create the KEK once and keep it stable for the lifetime of stored model connection secrets:
+
+```bash
+openssl rand -base64 32
+pnpm --filter @clawflare/server exec wrangler secret put CLAWFLARE_KEK
+```
+
+Users must:
 
 1. Use `clawflare providers add` CLI command to add a provider
 2. Use `/models` in the TUI to select the default model

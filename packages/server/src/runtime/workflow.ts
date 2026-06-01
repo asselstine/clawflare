@@ -137,20 +137,11 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
   // Fetch workspace ID for session to scope tool operations
   const workspaceId = await getSessionWorkspaceId(env, sessionId);
   
-  // Load session to get workflow auth job ID
-  const sessions = new SessionRepository(env.DB);
-  const session = await sessions.findById(sessionId);
-  const workflowAuthJobId = session?.workflowAuthJobId;
-  
-  // Create async auth for the workflow
-  const auth = workflowAuthJobId 
-    ? { type: "async" as const, jobId: workflowAuthJobId }
-    : undefined;
-  
-  // Resolve model connection from session using async auth
-  const resolvedModel = auth 
-    ? await resolveModelConnectionForSession(env, sessionId, auth)
-    : await resolveModelConnectionForSession(env, sessionId, { type: "immediate", context: { userId: "", workspaceId, authTime: Date.now(), requestId: crypto.randomUUID(), version: 1 } });
+  // Resolve model connection from session using session-scoped secret auth.
+  const resolvedModel = await resolveModelConnectionForSession(env, sessionId, {
+    type: "session",
+    sessionId,
+  });
   
   // Build agent components - prefer session model, fallback to env
   const components = resolvedModel
@@ -185,24 +176,14 @@ async function loadAgentSession(
   env: Env,
   sessionId: string,
 ): Promise<AgentSessionState> {
-  const sessions = new SessionRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
   const loadStart = timingStart();
   
-  // Load session to get workflow auth job ID
-  const session = await sessions.findById(sessionId);
-  const workspaceId = session?.workspaceId ?? "default-workspace";
-  const workflowAuthJobId = session?.workflowAuthJobId;
-  
-  // Create async auth for the workflow
-  const auth = workflowAuthJobId 
-    ? { type: "async" as const, jobId: workflowAuthJobId }
-    : undefined;
-  
-  // Resolve model connection from session using async auth
-  const resolvedModel = auth
-    ? await resolveModelConnectionForSession(env, sessionId, auth)
-    : await resolveModelConnectionForSession(env, sessionId, { type: "immediate", context: { userId: "", workspaceId, authTime: Date.now(), requestId: crypto.randomUUID(), version: 1 } });
+  // Resolve model connection from session using session-scoped secret auth.
+  const resolvedModel = await resolveModelConnectionForSession(env, sessionId, {
+    type: "session",
+    sessionId,
+  });
   
   // Build agent components - prefer session model, fallback to env
   const components = resolvedModel

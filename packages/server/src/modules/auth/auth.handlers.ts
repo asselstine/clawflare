@@ -33,6 +33,7 @@ const GITHUB_API_URL = "https://api.github.com";
 
 const POLL_INTERVAL_SECONDS = 2;
 const GITHUB_SCOPES = "read:user user:email";
+const HTML_HEADERS = { "Content-Type": "text/html; charset=utf-8" };
 
 // Mock OAuth configuration (for E2E tests only)
 const MOCK_OAUTH_USER = {
@@ -165,7 +166,7 @@ h1 { color: #4CAF50; }
 </div>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" } }
+      { headers: HTML_HEADERS }
     );
   } catch (error) {
     logger.error("Mock OAuth auto-approve failed", error, {
@@ -520,7 +521,7 @@ export async function handleDeviceVerify(
 <p>Please provide a valid device code.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -535,7 +536,7 @@ export async function handleDeviceVerify(
 <p>This device code is invalid or has expired.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 404 }
+        { headers: HTML_HEADERS, status: 404 }
       );
     }
 
@@ -549,7 +550,7 @@ export async function handleDeviceVerify(
 <p>This device authorization has already been ${deviceAuth.status}.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" } }
+        { headers: HTML_HEADERS }
       );
     }
 
@@ -563,7 +564,7 @@ export async function handleDeviceVerify(
 <p>This device code has expired. Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 410 }
+        { headers: HTML_HEADERS, status: 410 }
       );
     }
 
@@ -598,7 +599,7 @@ button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; 
 </form>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" } }
+      { headers: HTML_HEADERS }
     );
   } catch (error) {
     logger.error("Device verify failed", error, {
@@ -643,7 +644,7 @@ export async function handleDeviceApprove(
 <p>Please <a href="/login">sign in</a> to authorize this device.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 401 }
+        { headers: HTML_HEADERS, status: 401 }
       );
     }
 
@@ -674,7 +675,7 @@ export async function handleDeviceApprove(
 <p>You have denied access to this device. You can close this window.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" } }
+        { headers: HTML_HEADERS }
       );
     }
 
@@ -690,7 +691,7 @@ export async function handleDeviceApprove(
 <p>Note: This endpoint should check the session cookie and approve on behalf of the logged-in user.</p>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" } }
+      { headers: HTML_HEADERS }
     );
   } catch (error) {
     logger.error("Device approval failed", error, {
@@ -808,7 +809,7 @@ export async function handleGithubCallback(
 <p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -822,7 +823,7 @@ export async function handleGithubCallback(
 <p>Missing authorization code or state parameter.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -840,7 +841,7 @@ export async function handleGithubCallback(
 <p>Please run <code>clawflare login</code> again in your terminal.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 410 }
+        { headers: HTML_HEADERS, status: 410 }
       );
     }
 
@@ -854,7 +855,7 @@ export async function handleGithubCallback(
 <p>This authentication request has already been ${deviceAuth.status}.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -872,7 +873,7 @@ export async function handleGithubCallback(
 <p>GitHub OAuth is not configured on this server.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 500 }
+        { headers: HTML_HEADERS, status: 500 }
       );
     }
 
@@ -914,7 +915,7 @@ export async function handleGithubCallback(
 <p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -941,7 +942,7 @@ export async function handleGithubCallback(
 <p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -974,7 +975,7 @@ export async function handleGithubCallback(
 <p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -1026,7 +1027,7 @@ export async function handleGithubCallback(
 <p>Please ensure your GitHub account has a verified email.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -1094,7 +1095,7 @@ export async function handleGithubCallback(
 <p>Please try again.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 500 }
+        { headers: HTML_HEADERS, status: 500 }
       );
     }
 
@@ -1123,7 +1124,7 @@ code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: m
 <p><small>Clawflare CLI authentication successful</small></p>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" } }
+      { headers: HTML_HEADERS }
     );
   } catch (error) {
     logger.error("GitHub callback failed", error, {
@@ -1140,7 +1141,7 @@ code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: m
 <p>Please try again.</p>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" }, status: 500 }
+      { headers: HTML_HEADERS, status: 500 }
     );
   }
 }
@@ -1291,7 +1292,7 @@ export async function handleVerifyEmail(
 <p>Invalid verification token.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -1306,7 +1307,7 @@ export async function handleVerifyEmail(
 <p>This verification link is invalid or has expired.</p>
 </body>
 </html>`,
-        { headers: { "Content-Type": "text/html" }, status: 400 }
+        { headers: HTML_HEADERS, status: 400 }
       );
     }
 
@@ -1320,7 +1321,7 @@ export async function handleVerifyEmail(
 <p>You can now close this window.</p>
 </body>
 </html>`,
-      { headers: { "Content-Type": "text/html" } }
+      { headers: HTML_HEADERS }
     );
   } catch (error) {
     logger.error("Email verify failed", error, {

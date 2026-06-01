@@ -1,4 +1,5 @@
 import * as z from "zod";
+import { getModel, getModels, getProviders } from "@earendil-works/pi-ai";
 
 export interface ProviderDefinition {
   provider: string;
@@ -8,55 +9,205 @@ export interface ProviderDefinition {
   defaultModel?: string;
 }
 
-const PROVIDER_DEFINITIONS = {
+const PROVIDER_SECRET_DEFINITIONS: Record<string, Pick<ProviderDefinition, "requiredSecrets" | "optionalSecrets" | "configSchema">> = {
   "amazon-bedrock": {
-    provider: "amazon-bedrock",
     requiredSecrets: ["AWS_BEARER_TOKEN_BEDROCK"],
     optionalSecrets: [],
     configSchema: {
       region: z.string().optional().default("us-east-1"),
     },
-    defaultModel: "minimax.minimax-m2.5",
   },
   anthropic: {
-    provider: "anthropic",
     requiredSecrets: ["ANTHROPIC_API_KEY"],
-    optionalSecrets: [],
+    optionalSecrets: ["ANTHROPIC_OAUTH_TOKEN"],
     configSchema: {},
-    defaultModel: "claude-3-opus-20240229",
   },
   openai: {
-    provider: "openai",
     requiredSecrets: ["OPENAI_API_KEY"],
     optionalSecrets: [],
     configSchema: {},
-    defaultModel: "gpt-4",
   },
   "cloudflare-workers-ai": {
-    provider: "cloudflare-workers-ai",
-    requiredSecrets: [],
+    requiredSecrets: ["CLOUDFLARE_API_KEY"],
     optionalSecrets: [],
     configSchema: {
       account_id: z.string().optional(),
     },
-    defaultModel: "@cf/meta/llama-2-7b-chat-int8",
   },
-} satisfies Record<string, ProviderDefinition>;
+  "azure-openai-responses": {
+    requiredSecrets: ["AZURE_OPENAI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  deepseek: {
+    requiredSecrets: ["DEEPSEEK_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  google: {
+    requiredSecrets: ["GEMINI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "google-vertex": {
+    requiredSecrets: ["GOOGLE_CLOUD_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  groq: {
+    requiredSecrets: ["GROQ_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  cerebras: {
+    requiredSecrets: ["CEREBRAS_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  xai: {
+    requiredSecrets: ["XAI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  openrouter: {
+    requiredSecrets: ["OPENROUTER_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "vercel-ai-gateway": {
+    requiredSecrets: ["AI_GATEWAY_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  zai: {
+    requiredSecrets: ["ZAI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  mistral: {
+    requiredSecrets: ["MISTRAL_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  minimax: {
+    requiredSecrets: ["MINIMAX_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "minimax-cn": {
+    requiredSecrets: ["MINIMAX_CN_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  moonshotai: {
+    requiredSecrets: ["MOONSHOT_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "moonshotai-cn": {
+    requiredSecrets: ["MOONSHOT_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  huggingface: {
+    requiredSecrets: ["HF_TOKEN"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  fireworks: {
+    requiredSecrets: ["FIREWORKS_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  together: {
+    requiredSecrets: ["TOGETHER_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  opencode: {
+    requiredSecrets: ["OPENCODE_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "opencode-go": {
+    requiredSecrets: ["OPENCODE_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "kimi-coding": {
+    requiredSecrets: ["KIMI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "cloudflare-ai-gateway": {
+    requiredSecrets: ["CLOUDFLARE_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  xiaomi: {
+    requiredSecrets: ["XIAOMI_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "xiaomi-token-plan-cn": {
+    requiredSecrets: ["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "xiaomi-token-plan-ams": {
+    requiredSecrets: ["XIAOMI_TOKEN_PLAN_AMS_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "xiaomi-token-plan-sgp": {
+    requiredSecrets: ["XIAOMI_TOKEN_PLAN_SGP_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "github-copilot": {
+    requiredSecrets: ["COPILOT_GITHUB_TOKEN"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+  "openai-codex": {
+    requiredSecrets: ["OPENAI_CODEX_API_KEY"],
+    optionalSecrets: [],
+    configSchema: {},
+  },
+};
 
-export type ModelProvider = keyof typeof PROVIDER_DEFINITIONS;
+export type ModelProvider = string;
+
+function getDefaultModel(provider: string): string | undefined {
+  return getModelsForProvider(provider)[0]?.id;
+}
 
 export function getProviderDefinition(
   provider: string
 ): ProviderDefinition | null {
-  return PROVIDER_DEFINITIONS[provider as ModelProvider] ?? null;
+  if (!isProviderSupported(provider)) {
+    return null;
+  }
+
+  const secrets = PROVIDER_SECRET_DEFINITIONS[provider] ?? {
+    requiredSecrets: [],
+    optionalSecrets: [],
+    configSchema: {},
+  };
+
+  return {
+    provider,
+    ...secrets,
+    defaultModel: getDefaultModel(provider),
+  };
 }
 
 export function getSupportedProviders(): string[] {
-  return Object.keys(PROVIDER_DEFINITIONS);
+  return getProviders();
 }
 
 export function isProviderSupported(provider: string): boolean {
-  return provider in PROVIDER_DEFINITIONS;
+  return getSupportedProviders().includes(provider);
 }
 
 export function requiredSecretsForProvider(provider: string): string[] {
@@ -72,4 +223,16 @@ export function optionalSecretsForProvider(provider: string): string[] {
 export function defaultModelForProvider(provider: string): string | undefined {
   const def = getProviderDefinition(provider);
   return def?.defaultModel;
+}
+
+export function isModelSupportedForProvider(provider: string, modelId: string): boolean {
+  return Boolean(getModel(provider as never, modelId as never));
+}
+
+export function getModelsForProvider(provider: string) {
+  if (!isProviderSupported(provider)) {
+    return [];
+  }
+
+  return getModels(provider as never);
 }

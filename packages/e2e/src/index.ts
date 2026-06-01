@@ -20,8 +20,8 @@ const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKE
 
 interface RemoteDeployment {
   workerName: string;
-  url: string;
-  configPath: string;
+  url?: string;
+  configPath?: string;
   d1Name: string;
 }
 
@@ -34,6 +34,9 @@ interface TestResult {
 
 // Track created containers for cleanup
 const createdContainers: string[] = [];
+let activeDeployment: RemoteDeployment | null = null;
+let activeKeepAlive = false;
+let cleanupStarted = false;
 
 class TestRunner {
   private results: TestResult[] = [];
@@ -292,6 +295,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
   const workflowName = `${runtimeNames.e2eWorkflowPrefix}-${runId}`;
   const d1Name = `${runtimeNames.e2eDatabasePrefix}-${runId}`;
   let configPath = "";
+  activeDeployment = { workerName, d1Name };
 
   console.log("🚀 Creating remote E2E deployment...");
   console.log(`   Worker: ${workerName}`);
@@ -302,6 +306,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
     const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
     const d1DatabaseId = extractD1DatabaseId(d1Output);
     configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+    activeDeployment.configPath = configPath;
     pendingConfigPath = configPath;
     await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);
 
@@ -319,6 +324,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
     );
     pendingConfigPath = null; // Deployment succeeded, config will be tracked in deployment object
     const url = extractWorkerUrl(deployOutput, workerName);
+    activeDeployment.url = url;
 
     console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
     return { workerName, url, configPath, d1Name };
@@ -975,25 +981,23 @@ async function cleanupOldContainerImages(currentWorkerName?: string): Promise<vo
 let pendingConfigPath: string | null = null;
 
 async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keepAlive: boolean, configPathOverride?: string | null): Promise<void> {
+  if (cleanupStarted) return;
+  cleanupStarted = true;
   const configPathToDelete = configPathOverride ?? deployment?.configPath;
-  
-  // Always clean up the config file if present and not keeping alive
-  if (!keepAlive && configPathToDelete) {
-    try {
-      await rm(configPathToDelete, { force: true });
+
+  if (!deployment) {
+    if (!keepAlive && configPathToDelete) {
+      await rm(configPathToDelete, { force: true }).catch(() => undefined);
       console.log("   ✓ Temp config removed");
-    } catch (error) {
-      // Config might already be deleted or never created
     }
+    return;
   }
-  
-  if (!deployment) return;
 
   if (keepAlive) {
     console.log("\n⏳ Keep-alive mode - remote test resources were not deleted");
     console.log(`   Worker: ${deployment.workerName}`);
-    console.log(`   URL: ${deployment.url}`);
-    console.log(`   Config: ${deployment.configPath}`);
+    if (deployment.url) console.log(`   URL: ${deployment.url}`);
+    if (deployment.configPath) console.log(`   Config: ${deployment.configPath}`);
     return;
   }
 
@@ -1024,10 +1028,12 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   }
 
   try {
-    await rm(deployment.configPath, { force: true });
+    if (configPathToDelete) {
+      await rm(configPathToDelete, { force: true });
+    }
     console.log("   ✓ Temp config removed");
   } catch (error) {
-    console.error(`   ✗ Failed to remove temp config ${pathResolve(HARNESS_DIR, deployment.configPath)}:`, error instanceof Error ? error.message : String(error));
+    console.error(`   ✗ Failed to remove temp config ${configPathToDelete ? pathResolve(HARNESS_DIR, configPathToDelete) : "(none)"}:`, error instanceof Error ? error.message : String(error));
   }
 
   // Clean up old container images from the registry
@@ -1035,6 +1041,21 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   
   // Clean up any other lingering E2E config files
   await cleanupOldE2EConfigs();
+}
+
+function installShutdownHandlers(): void {
+  const teardownAndExit = (signal: NodeJS.Signals) => {
+    console.log(`\n\n${signal} received. Cleaning up remote E2E resources...`);
+    void cleanupRemoteDeployment(activeDeployment, activeKeepAlive, pendingConfigPath)
+      .catch((error) => {
+        console.error("Cleanup failed:", error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      })
+      .finally(() => process.exit(process.exitCode || 130));
+  };
+
+  process.once("SIGINT", teardownAndExit);
+  process.once("SIGTERM", teardownAndExit);
 }
 
 async function cleanupOldE2EConfigs(): Promise<void> {
@@ -1062,6 +1083,8 @@ async function cleanupOldE2EConfigs(): Promise<void> {
 
 async function main(): Promise<void> {
   const { help, ui, keepAlive } = parseArgs();
+  activeKeepAlive = keepAlive;
+  installShutdownHandlers();
 
   if (help) {
     printHelp();
@@ -1075,6 +1098,7 @@ async function main(): Promise<void> {
 
   try {
     deployment = await deployRemote();
+    activeDeployment = deployment;
 
     if (ui) {
       // For manual testing, we still need to get a token

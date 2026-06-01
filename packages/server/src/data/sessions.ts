@@ -15,6 +15,7 @@ export interface SessionMetadataState {
   id: string;
   workspaceId: string;
   workflowId: string;
+  name?: string;
   status: SessionStatus;
   nextEventCursor: string;
   updatedAt: number;
@@ -24,13 +25,13 @@ export interface SessionMetadataState {
   modelConnectionId?: string;
   modelProvider?: ModelProvider;
   modelName?: string;
-  workflowAuthJobId?: string;
 }
 
 export interface SessionSummary {
   id: string;
   workspaceId: string;
   workflowId: string;
+  name?: string;
   status: SessionStatus;
   messageCount: number;
   updatedAt: number;
@@ -38,7 +39,6 @@ export interface SessionSummary {
   modelConnectionId?: string;
   modelProvider?: ModelProvider;
   modelName?: string;
-  workflowAuthJobId?: string;
 }
 
 export interface SessionListFilter {
@@ -100,6 +100,7 @@ function mapSession(row: typeof sessions.$inferSelect): SessionMetadataState {
     id: row.id,
     workspaceId: row.workspaceId ?? "",
     workflowId: row.workflowId,
+    name: row.name ?? undefined,
     status: row.status as SessionStatus,
     nextEventCursor: String(row.nextEventCursor),
     updatedAt: row.updatedAt,
@@ -109,7 +110,6 @@ function mapSession(row: typeof sessions.$inferSelect): SessionMetadataState {
     modelConnectionId: row.modelConnectionId ?? undefined,
     modelProvider: row.modelProvider as ModelProvider | undefined,
     modelName: row.modelName ?? undefined,
-    workflowAuthJobId: row.workflowAuthJobId ?? undefined,
   };
 }
 
@@ -117,6 +117,7 @@ function mapSessionSummary(row: {
   id: string;
   workspaceId: string | null;
   workflowId: string;
+  name: string | null;
   status: string;
   updatedAt: number;
   eventCount: number;
@@ -124,12 +125,12 @@ function mapSessionSummary(row: {
   modelConnectionId: string | null;
   modelProvider: string | null;
   modelName: string | null;
-  workflowAuthJobId: string | null;
 }): SessionSummary {
   return {
     id: row.id,
     workspaceId: row.workspaceId ?? "",
     workflowId: row.workflowId,
+    name: row.name ?? undefined,
     status: row.status as SessionStatus,
     messageCount: row.eventCount,
     updatedAt: row.updatedAt,
@@ -137,7 +138,6 @@ function mapSessionSummary(row: {
     modelConnectionId: row.modelConnectionId ?? undefined,
     modelProvider: row.modelProvider as ModelProvider | undefined,
     modelName: row.modelName ?? undefined,
-    workflowAuthJobId: row.workflowAuthJobId ?? undefined,
   };
 }
 
@@ -157,6 +157,7 @@ export class SessionRepository {
         id: session.id,
         workspaceId: session.workspaceId,
         workflowId: session.workflowId,
+        name: session.name ?? null,
         status: session.status,
         nextEventCursor: Number(session.nextEventCursor || 0),
         updatedAt: now,
@@ -166,13 +167,13 @@ export class SessionRepository {
         modelConnectionId: session.modelConnectionId ?? null,
         modelProvider: session.modelProvider ?? null,
         modelName: session.modelName ?? null,
-        workflowAuthJobId: session.workflowAuthJobId ?? null,
       })
       .onConflictDoUpdate({
         target: sessions.id,
         set: {
           workspaceId: session.workspaceId,
           workflowId: session.workflowId,
+          name: sql`coalesce(excluded.name, ${sessions.name})`,
           status: session.status,
           nextEventCursor: Number(session.nextEventCursor || 0),
           updatedAt: now,
@@ -182,7 +183,6 @@ export class SessionRepository {
           modelConnectionId: sql`coalesce(excluded.model_connection_id, ${sessions.modelConnectionId})`,
           modelProvider: sql`coalesce(excluded.model_provider, ${sessions.modelProvider})`,
           modelName: sql`coalesce(excluded.model_name, ${sessions.modelName})`,
-          workflowAuthJobId: sql`coalesce(excluded.workflow_auth_job_id, ${sessions.workflowAuthJobId})`,
         },
       });
 
@@ -248,6 +248,16 @@ export class SessionRepository {
       .where(eq(sessionRuntime.sessionId, sessionId));
   }
 
+  async rename(sessionId: string, workspaceId: string, name: string): Promise<boolean> {
+    const result = await this.db
+      .update(sessions)
+      .set({ name, updatedAt: Date.now() })
+      .where(and(eq(sessions.id, sessionId), eq(sessions.workspaceId, workspaceId)))
+      .returning({ id: sessions.id });
+
+    return result.length > 0;
+  }
+
   async list(filter: SessionListFilter): Promise<SessionSummary[]> {
     const limit = Math.min(filter.limit ?? 50, 100);
     const offset = filter.offset ?? 0;
@@ -261,6 +271,7 @@ export class SessionRepository {
         id: sessions.id,
         workspaceId: sessions.workspaceId,
         workflowId: sessions.workflowId,
+        name: sessions.name,
         status: sessions.status,
         updatedAt: sessions.updatedAt,
         eventCount: count(sessionEvents.sequence),
@@ -268,7 +279,6 @@ export class SessionRepository {
         modelConnectionId: sessions.modelConnectionId,
         modelProvider: sessions.modelProvider,
         modelName: sessions.modelName,
-        workflowAuthJobId: sessions.workflowAuthJobId,
       })
       .from(sessions)
       .leftJoin(sessionEvents, eq(sessionEvents.sessionId, sessions.id))

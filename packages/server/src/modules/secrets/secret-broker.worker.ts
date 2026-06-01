@@ -12,11 +12,10 @@
  *    b. User has workspace membership
  *    c. Workspace exists
  *
- * For Workflows (Async Operations):
- * 1. Job is created with Authorization Snapshot (expiring grant)
- * 2. Workflow references jobId when calling Secret Broker
- * 3. Broker validates job exists, not expired, and operation is allowed
- * 4. Broker checks workspace/user still valid
+ * For Workflows:
+ * 1. Workflow references its sessionId when reading model secrets
+ * 2. Broker validates the session exists and is still usable
+ * 3. Broker checks workspace still exists
  *
  * Encryption:
  * - Each secret: unique DEK, AES-256-GCM
@@ -31,10 +30,8 @@ import {
   envelopeDecrypt,
   importKEK,
   decodeBase64,
-  generateKEK,
-  encodeBase64,
 } from "./secrets.crypto.js";
-import { validateAuthorization, validateJobAuthorization } from "./secrets.auth.js";
+import { validateAuthorization, validateSessionAuthorization } from "./secrets.auth.js";
 import {
   type StoreSecretRequest,
   type GetSecretRequest,
@@ -51,45 +48,24 @@ import {
 const KEK_SECRET_NAME = "CLAWFLARE_KEK";
 
 /**
- * Load or generate the KEK from Cloudflare Secret Store.
+ * Load the KEK from a Worker secret or Secrets Store secret binding.
+ *
+ * Cloudflare binds individual secret values to Workers; it does not expose a
+ * mutable store object to Worker code. The KEK must be provisioned before the
+ * Worker starts, while per-user/provider secrets are envelope-encrypted into D1.
  */
 async function loadKEK(env: Env): Promise<CryptoKey> {
-  if (!env.MODEL_SECRET_STORE) {
-    throw new Error("Cloudflare Secret Store binding (MODEL_SECRET_STORE) not configured");
+  const binding = env.CLAWFLARE_KEK;
+  if (!binding) {
+    throw new Error("CLAWFLARE_KEK secret binding not configured");
   }
 
-  // Try to retrieve existing KEK
-  const store = env.MODEL_SECRET_STORE as {
-    get?: (name: string) => Promise<{ text(): Promise<string> } | null>
-  };
-  let kekBase64: string | null = null;
-
-  if (typeof store.get === "function") {
-    const secret = await store.get(KEK_SECRET_NAME);
-    if (secret) {
-      kekBase64 = await secret.text();
-    }
+  const kekBase64 = typeof binding === "string" ? binding : await binding.get();
+  if (!kekBase64) {
+    throw new Error(`${KEK_SECRET_NAME} secret binding is empty`);
   }
 
-  if (kekBase64) {
-    const kekBytes = decodeBase64(kekBase64);
-    return importKEK(kekBytes);
-  }
-
-  // Generate and store new KEK
-  const newKEKBytes = generateKEK();
-  const newKEKBase64 = encodeBase64(newKEKBytes);
-
-  const putStore = env.MODEL_SECRET_STORE as {
-    put?: (name: string, value: string) => Promise<void>
-  };
-  if (typeof putStore.put === "function") {
-    await putStore.put(KEK_SECRET_NAME, newKEKBase64);
-  } else {
-    throw new Error("Cloudflare Secret Store does not support put operation");
-  }
-
-  return importKEK(newKEKBytes);
+  return importKEK(decodeBase64(kekBase64));
 }
 
 // =============================================================================
@@ -98,16 +74,16 @@ async function loadKEK(env: Env): Promise<CryptoKey> {
 
 /**
  * Parse authorization from request.
- * Can be AuthorizationContext (sync) or job reference (async).
+ * Can be AuthorizationContext or session reference.
  */
-function parseAuth(auth: unknown): { type: "context"; context: AuthorizationContext } | { type: "job"; jobId: string } | null {
+function parseAuth(auth: unknown): { type: "context"; context: AuthorizationContext } | { type: "session"; sessionId: string } | null {
   if (!auth || typeof auth !== "object") return null;
 
   const a = auth as Record<string, unknown>;
 
-  // Job reference: { jobId: string }
-  if ("jobId" in a && typeof a.jobId === "string") {
-    return { type: "job", jobId: a.jobId };
+  // Session reference: { sessionId: string }
+  if ("sessionId" in a && typeof a.sessionId === "string") {
+    return { type: "session", sessionId: a.sessionId };
   }
 
   // Authorization context: { userId, workspaceId, authTime, requestId, version }
@@ -146,13 +122,11 @@ async function handleStore(
     return { ok: false, error: "Invalid authorization" };
   }
 
-  // Validate authorization
-  let authResult;
-  if (parsedAuth.type === "context") {
-    authResult = await validateAuthorization(env, parsedAuth.context);
-  } else {
-    authResult = await validateJobAuthorization(env, parsedAuth.jobId, "store");
+  if (parsedAuth.type !== "context") {
+    return { ok: false, error: "Session authorization cannot store secrets" };
   }
+
+  const authResult = await validateAuthorization(env, parsedAuth.context);
 
   if (!authResult.valid) {
     return { ok: false, error: authResult.error };
@@ -189,7 +163,7 @@ async function handleGet(
   if (parsedAuth.type === "context") {
     authResult = await validateAuthorization(env, parsedAuth.context);
   } else {
-    authResult = await validateJobAuthorization(env, parsedAuth.jobId, "get");
+    authResult = await validateSessionAuthorization(env, parsedAuth.sessionId);
   }
 
   if (!authResult.valid) {
@@ -234,13 +208,11 @@ async function handleDelete(
     return { ok: false, error: "Invalid authorization" };
   }
 
-  // Validate authorization
-  let authResult;
-  if (parsedAuth.type === "context") {
-    authResult = await validateAuthorization(env, parsedAuth.context);
-  } else {
-    authResult = await validateJobAuthorization(env, parsedAuth.jobId, "delete");
+  if (parsedAuth.type !== "context") {
+    return { ok: false, error: "Session authorization cannot delete secrets" };
   }
+
+  const authResult = await validateAuthorization(env, parsedAuth.context);
 
   if (!authResult.valid) {
     return { ok: false, error: authResult.error };

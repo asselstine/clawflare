@@ -37,6 +37,7 @@ export interface ChatSubmittedResponse {
 export interface SessionResponse {
   id: string;
   workspaceId: string;
+  name?: string;
   status: SessionStatus;
   messages: AgentMessage[];
   events: SessionEvent[];
@@ -47,6 +48,7 @@ export interface SessionResponse {
 export interface SessionSummary {
   id: string;
   workspaceId: string;
+  name?: string;
   workflowId: string;
   status: SessionStatus;
   messageCount: number;
@@ -72,7 +74,7 @@ export interface CreateSessionRequest {
 export interface CreateSessionResponse {
   id: string;
   workspaceId: string;
-  messages: AgentMessage[];
+  eventCursor: string;
   createdAt: number;
   modelConnection?: {
     id: string;
@@ -87,11 +89,34 @@ export interface ToolDefinition {
   parameters: Record<string, unknown>;
 }
 
-export type ModelProvider =
-  | "amazon-bedrock"
-  | "anthropic"
-  | "openai"
-  | "cloudflare-workers-ai";
+export type ModelProvider = string;
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  requiredSecrets: string[];
+  optionalSecrets: string[];
+}
+
+export interface ProviderModelInfo {
+  id: string;
+  name: string;
+  api: string;
+  provider: string;
+  input: string[];
+  contextWindow?: number;
+  maxTokens?: number;
+  reasoning?: boolean;
+}
+
+export interface ProviderListResponse {
+  providers: ProviderInfo[];
+}
+
+export interface ProviderModelsResponse {
+  provider: string;
+  models: ProviderModelInfo[];
+}
 
 export interface ModelConnection {
   id: string;
@@ -127,4 +152,13 @@ export interface UpdateModelConnectionRequest {
 
 export interface SetDefaultModelConnectionRequest {
   modelConnectionId: string | null;
+}
+
+export interface ServerInfo {
+  contextWindow: number;
+  supportsWorkspaceModelConnections: boolean;
+  supportedProviders: string[];
+  workspace?: {
+    hasModelConnections: boolean;
+  };
 }

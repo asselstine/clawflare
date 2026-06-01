@@ -17,7 +17,8 @@ describe("AgentClient", () => {
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse({
           id: "test-session-id",
-          messages: [],
+          workspaceId: "workspace-id",
+          eventCursor: "0",
           createdAt: Date.now(),
         })
       );
@@ -38,14 +39,16 @@ describe("AgentClient", () => {
         })
       );
       expect(result.id).toBe("test-session-id");
-      expect(result.messages).toEqual([]);
+      expect(result.workspaceId).toBe("workspace-id");
+      expect(result.eventCursor).toBe("0");
     });
 
     it("should set currentContextId after creating session", async () => {
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse({
           id: "new-session-id",
-          messages: [],
+          workspaceId: "workspace-id",
+          eventCursor: "0",
           createdAt: Date.now(),
         })
       );
@@ -76,7 +79,8 @@ describe("AgentClient", () => {
       const mockFetch = vi.fn().mockResolvedValue(
         createMockResponse({
           id: "warmup-session-id",
-          messages: [],
+          workspaceId: "workspace-id",
+          eventCursor: "0",
           createdAt: Date.now(),
         })
       );
@@ -96,7 +100,12 @@ describe("AgentClient", () => {
 
     it("should not throw on success", async () => {
       const mockFetch = vi.fn().mockResolvedValue(
-        createMockResponse({ id: "session-id" })
+        createMockResponse({
+          id: "session-id",
+          workspaceId: "workspace-id",
+          eventCursor: "0",
+          createdAt: Date.now(),
+        })
       );
 
       global.fetch = mockFetch;

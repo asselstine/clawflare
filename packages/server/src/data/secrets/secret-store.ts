@@ -8,15 +8,14 @@
 
 import type { Env } from "../../internal-types/index.js";
 import type { AuthorizationContext } from "../../modules/secrets/secrets.types.js";
-import { createJobSnapshot, JobSnapshotRepository } from "../index.js";
 import { createModelConnectionSecretRef, parseModelConnectionSecretRef } from "./secret-refs.js";
 
 /**
- * Auth Session - can be immediate (AuthorizationContext) or async (Job Snapshot)
+ * Auth Session - can be immediate (AuthorizationContext) or session-scoped.
  */
 export type AuthSession =
   | { type: "immediate"; context: AuthorizationContext }
-  | { type: "async"; jobId: string };
+  | { type: "session"; sessionId: string };
 
 /**
  * Secret Store Adapter interface
@@ -66,16 +65,6 @@ export interface SecretStore {
     refs: Record<string, string>
   ): Promise<Record<string, string>>;
 
-  /**
-   * Create a job authorization snapshot for async operations (workflows).
-   * Returns the jobId to pass to async operations.
-   */
-  createJobAuthorization(
-    userId: string,
-    workspaceId: string,
-    allowedOperations: string[],
-    expiryMs?: number
-  ): Promise<string>;
 }
 
 /**
@@ -83,6 +72,12 @@ export interface SecretStore {
  */
 class SecretBrokerClient implements SecretStore {
   constructor(private readonly env: Env) {}
+
+  private authParam(auth: AuthSession): AuthorizationContext | { sessionId: string } {
+    return auth.type === "immediate"
+      ? auth.context
+      : { sessionId: auth.sessionId };
+  }
 
   private async callBroker(
     endpoint: string,
@@ -113,12 +108,8 @@ class SecretBrokerClient implements SecretStore {
   ): Promise<string> {
     const secretKey = createModelConnectionSecretRef(args.workspaceId, args.connectionId, args.key);
 
-    const authParam = auth.type === "immediate"
-      ? auth.context
-      : { jobId: auth.jobId };
-
     const result = await this.callBroker("store", {
-      auth: authParam,
+      auth: this.authParam(auth),
       key: secretKey,
       value: args.value,
     });
@@ -139,12 +130,8 @@ class SecretBrokerClient implements SecretStore {
       throw new Error(`Invalid secret reference format: ${ref}`);
     }
 
-    const authParam = auth.type === "immediate"
-      ? auth.context
-      : { jobId: auth.jobId };
-
     const result = await this.callBroker("get", {
-      auth: authParam,
+      auth: this.authParam(auth),
       key: ref,
     });
 
@@ -164,12 +151,8 @@ class SecretBrokerClient implements SecretStore {
       throw new Error(`Invalid secret reference format: ${ref}`);
     }
 
-    const authParam = auth.type === "immediate"
-      ? auth.context
-      : { jobId: auth.jobId };
-
     const result = await this.callBroker("delete", {
-      auth: authParam,
+      auth: this.authParam(auth),
       key: ref,
     });
 
@@ -198,27 +181,6 @@ class SecretBrokerClient implements SecretStore {
     }
 
     return secrets;
-  }
-
-  async createJobAuthorization(
-    userId: string,
-    workspaceId: string,
-    allowedOperations: string[],
-    expiryMs?: number
-  ): Promise<string> {
-    const jobId = crypto.randomUUID();
-    const snapshot = createJobSnapshot(
-      jobId,
-      userId,
-      workspaceId,
-      allowedOperations,
-      expiryMs
-    );
-    
-    const jobSnapshots = new JobSnapshotRepository(this.env.DB);
-    await jobSnapshots.put(snapshot);
-    
-    return jobId;
   }
 }
 

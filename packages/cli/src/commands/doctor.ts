@@ -91,8 +91,12 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
   try {
     const client = new AgentClient(server, token, config.workspace);
     const serverInfo = await client.getServerInfo();
-    console.log(`   Server provider: ${serverInfo.provider}`);
-    console.log(`   Server model: ${serverInfo.model}`);
+    console.log(`   Context window: ${serverInfo.contextWindow}`);
+    console.log(`   Workspace model connections: ${serverInfo.supportsWorkspaceModelConnections ? "supported" : "not supported"}`);
+    console.log(`   Supported providers: ${serverInfo.supportedProviders.join(", ") || "none"}`);
+    if (serverInfo.workspace) {
+      console.log(`   Workspace has model connections: ${serverInfo.workspace.hasModelConnections ? "yes" : "no"}`);
+    }
     console.log("\n✓ AgentClient.getServerInfo() succeeded");
   } catch (error) {
     console.error(`\n✗ AgentClient failed: ${error instanceof Error ? error.message : String(error)}`);

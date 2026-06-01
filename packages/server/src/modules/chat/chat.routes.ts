@@ -12,7 +12,6 @@ import {
 import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
-import { getSecretStore } from "../../data/secrets/index.js";
 import { logger } from "../../lib/logger.js";
 
 export const chatRoutes = new Hono<AppBindings>();
@@ -179,7 +178,6 @@ async function handleNewSession(
   const sessions = new SessionRepository(env.DB);
   const inputQueue = new InputQueueRepository(env.DB);
   const events = new SessionEventRepository(env.DB);
-  const secretStore = getSecretStore(env);
 
   // Create authorization context for this request
   const auth = createAuthSession(requestContext);
@@ -212,15 +210,6 @@ async function handleNewSession(
   const initialEventCursor = await events.latestCursor(sessionId);
   const workflowId = crypto.randomUUID();
 
-  // Create job authorization snapshot for the workflow
-  // This allows the workflow to access secrets without storing the user's token
-  const workflowAuthJobId = await secretStore.createJobAuthorization(
-    requestContext.user.id,
-    workspaceId,
-    ["get"], // Only allow reading secrets
-    60 * 60 * 1000 // 1 hour expiry
-  );
-
   // Initialize session state with workspace and model info
   const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
@@ -234,7 +223,6 @@ async function handleNewSession(
     modelConnectionId: resolvedModel?.id,
     modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
     modelName: resolvedModel?.modelName,
-    workflowAuthJobId,
   };
   await sessions.save(initialState);
 

@@ -11,6 +11,7 @@ import { getSecretStore, type AuthSession } from "../../data/secrets/index.js";
 import {
   requiredSecretsForProvider,
   defaultModelForProvider,
+  isModelSupportedForProvider,
 } from "../providers/providers.catalog.js";
 import {
   validateModelConnectionInput,
@@ -182,6 +183,11 @@ export async function updateModelConnection(
     }
   }
 
+  const provider = input.provider ?? existing.provider;
+  if (!isModelSupportedForProvider(provider, modelName)) {
+    throw new Error(`Unknown model "${modelName}" for provider "${provider}"`);
+  }
+
   // Update connection in D1
   return await modelConnections.update(workspaceId, id, {
     displayName: input.displayName,
@@ -267,12 +273,20 @@ export async function resolveModelConnection(
 
   for (const key of requiredSecrets) {
     const ref = connection.secretRefs[key];
-    if (ref) {
-      const value = await secretStore.getModelConnectionSecret(auth, ref);
-      if (value) {
-        secrets[key] = value;
-      }
+    if (!ref) {
+      throw new Error(
+        `Model connection "${connection.id}" is missing required secret reference "${key}"`
+      );
     }
+
+    const value = await secretStore.getModelConnectionSecret(auth, ref);
+    if (!value) {
+      throw new Error(
+        `Model connection "${connection.id}" is missing required secret "${key}"`
+      );
+    }
+
+    secrets[key] = value;
   }
 
   return {

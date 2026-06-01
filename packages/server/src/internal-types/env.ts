@@ -67,9 +67,9 @@ export interface Env {
   // AWS region setting (optional, for Bedrock)
   AWS_REGION?: string;
 
-  // Cloudflare Secret Store for model connection secrets
-  // Using unknown as placeholder until exact binding type is confirmed
-  MODEL_SECRET_STORE?: unknown;
+  // Key encryption key for envelope-encrypted model connection secrets.
+  // This may be a Workers secret string or an account-level Secrets Store secret binding.
+  CLAWFLARE_KEK?: string | { get(): Promise<string | null> };
 
   // Test mode flag - enables mock AI responses when no model connection is configured
   MOCK_AI?: string;

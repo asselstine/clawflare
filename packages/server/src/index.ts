@@ -187,12 +187,6 @@ export {
   type AuthorizationContext,
 } from "./data/secrets/index.js";
 
-// Export Secret Broker types for workflow integration
-export type { JobAuthorizationSnapshot } from "./modules/secrets/secrets.types.js";
-export {
-  createJobSnapshot,
-} from "./data/index.js";
-
 // Main Cloudflare Worker export
 export default {
   async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {

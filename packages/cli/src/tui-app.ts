@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent } from "./client.js";
+import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -79,6 +79,8 @@ const markdownTheme: MarkdownTheme = {
 const slashCommands = [
   { name: "new", description: "Start a new chat context" },
   { name: "fork", description: "Fork the current context" },
+  { name: "sessions", description: "Show recent sessions" },
+  { name: "open", description: "Open an existing session" },
   { name: "name", description: "Name the current session" },
   { name: "tools", description: "List available tools" },
   { name: "models", description: "Select workspace default model" },
@@ -378,6 +380,40 @@ function collapsedCode(code: string): string {
   return `${byLine.slice(0, 4_000)}\n...`;
 }
 
+const sessionStatusFilters = new Set(["all", "idle", "processing", "awaiting_input", "error", "closed", "expired"]);
+
+function formatSessionUpdatedAt(updatedAt: number): string {
+  return new Date(updatedAt).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatSessionSummary(session: SessionSummary, currentSessionId: string): string {
+  const current = session.id === currentSessionId ? " [current]" : "";
+  const active = session.isActive ? " active" : "";
+  const name = session.name ? ` ${session.name}` : "";
+  const model = session.modelProvider && session.modelName
+    ? ` ${session.modelProvider}/${session.modelName}`
+    : "";
+  const countLabel = session.messageCount === 1 ? "event" : "events";
+
+  return `- ${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}${model}`;
+}
+
+function formatSessionList(sessions: SessionSummary[], total: number, currentSessionId: string, filter: string): string {
+  const heading = filter === "all" ? "Recent sessions" : `Recent ${filter} sessions`;
+  if (sessions.length === 0) {
+    return `${heading}:\nNo sessions found.`;
+  }
+
+  const rows = sessions.map((session) => formatSessionSummary(session, currentSessionId));
+  const suffix = total > sessions.length ? `\n\nShowing ${sessions.length} of ${total}.` : "";
+  return `${heading}:\n${rows.join("\n")}${suffix}`;
+}
+
 type DisplayMessage = {
   role: DisplayMessageRole;
   content: string;
@@ -416,7 +452,12 @@ export class ClawflareTUIApp {
   private sessionName: string = "new";
   private isLoading = false;
   private error: string | null = null;
-  private serverInfo: { url: string; provider?: string; model?: string; contextTotal?: number } = { url: "" };
+  private serverInfo: {
+    url: string;
+    contextTotal?: number;
+    supportedProviders?: string[];
+    supportsWorkspaceModelConnections?: boolean;
+  } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
   private agentEvents: SessionEvent[] = [];
@@ -576,9 +617,9 @@ export class ClawflareTUIApp {
       this.skillsPrompt = formatSkillsForPrompt(this.skills);
 
       const serverInfo = await this.client.getServerInfo();
-      this.serverInfo.provider = serverInfo.provider;
-      this.serverInfo.model = serverInfo.model;
       this.serverInfo.contextTotal = serverInfo.contextWindow;
+      this.serverInfo.supportedProviders = serverInfo.supportedProviders;
+      this.serverInfo.supportsWorkspaceModelConnections = serverInfo.supportsWorkspaceModelConnections;
 
       // Check if workspace has model connections configured
       const hasModelConnections = serverInfo.workspace?.hasModelConnections ?? true;
@@ -598,6 +639,7 @@ export class ClawflareTUIApp {
       // Create session and start background warmup
       const ctx = await this.client.createSession();
       this.sessionId = ctx.id;
+      this.sessionName = "new";
       this.messages = [];
       this.updateHeader();
       this.renderMessages();
@@ -675,17 +717,22 @@ export class ClawflareTUIApp {
     return "error";
   }
 
+  private getMessageContent(message: AgentMessage): string | Array<any> | undefined {
+    return "content" in message ? message.content : undefined;
+  }
+
   private formatMessageForDisplay(message: AgentMessage): DisplayMessage {
     const role = this.toDisplayRole(message.role);
+    const messageContent = this.getMessageContent(message);
 
     if (role === "assistant") {
-      const textContent = this.getTextContent(message.content);
+      const textContent = messageContent ? this.getTextContent(messageContent) : "";
       const displayText = this.stripSkillsPrefix(textContent);
 
       // Extract tool calls if present
       let toolCalls: ToolCallInfo[] | undefined;
-      if (this.hasToolCalls(message.content)) {
-        toolCalls = this.extractToolCalls(message.content);
+      if (messageContent && this.hasToolCalls(messageContent)) {
+        toolCalls = this.extractToolCalls(messageContent);
       }
 
       return {
@@ -695,7 +742,7 @@ export class ClawflareTUIApp {
       };
     }
 
-    const rawContent = this.extractContent(message.content);
+    const rawContent = messageContent ? this.extractContent(messageContent) : "";
     const content = this.stripSkillsPrefix(rawContent);
 
     if (role !== "toolResult") {
@@ -849,6 +896,7 @@ export class ClawflareTUIApp {
     }
 
     this.messageContainer.invalidate();
+    this.tui.requestRender();
   }
 
   private renderThinkingIndicator(indent: string): void {
@@ -955,10 +1003,6 @@ export class ClawflareTUIApp {
     const { contextWindow, percent } = this.getContextUsage();
     const contextDisplay = `${percent.toFixed(1)}%/${Math.round(contextWindow / 1000)}k`;
     
-    const providerModel = this.serverInfo.provider && this.serverInfo.model 
-      ? `${this.serverInfo.provider} ● ${this.serverInfo.model}` 
-      : "";
-    
     const width = this.terminal.columns;
     const bigDot = "●";
     
@@ -966,7 +1010,7 @@ export class ClawflareTUIApp {
     // Line 2: status ● context%
     
     const left1 = chalk.gray(`${this.sessionName} ${bigDot} ${this.serverInfo.url || "unknown"}`);
-    const right1 = providerModel ? chalk.gray(providerModel) : "";
+    const right1 = "";
     const line1 = this.formatStatusLine(left1, right1, width);
     
     const left2 = `${colorFn(statusText)} ${chalk.gray(bigDot)} ${chalk.gray(contextDisplay)}`;
@@ -1178,6 +1222,45 @@ export class ClawflareTUIApp {
     return `${this.skillsPrompt}\n\n${prompt}`;
   }
 
+  private async resolveSessionIdForOpen(input: string): Promise<string> {
+    const sessionId = input.trim();
+    if (!sessionId) {
+      throw new Error("Usage: /open <session-id>");
+    }
+
+    if (sessionId.length >= 32) {
+      return sessionId;
+    }
+
+    const response = await this.client.listSessions({ status: "all" });
+    const matches = response.sessions.filter((session) => session.id.startsWith(sessionId));
+    if (matches.length === 1) {
+      return matches[0]!.id;
+    }
+    if (matches.length > 1) {
+      throw new Error(`Session id prefix "${sessionId}" is ambiguous. Use a longer id.`);
+    }
+    throw new Error(`No recent session matches "${sessionId}". Use /sessions to view sessions.`);
+  }
+
+  private async openSession(sessionIdInput: string): Promise<void> {
+    if (this.isLoading) {
+      throw new Error("Cannot open a session while an operation is running. Press Esc to abort first.");
+    }
+
+    const sessionId = await this.resolveSessionIdForOpen(sessionIdInput);
+    const session = await this.client.getSession(sessionId);
+    this.sessionId = session.id;
+    this.client.setCurrentSessionId(session.id);
+    this.sessionName = session.name || "new";
+    this.messages = session.messages.map((message) => this.formatMessageForDisplay(message));
+    this.agentEvents = session.events;
+    this.pendingUserMessage = null;
+    this.lastUsage = null;
+    this.error = null;
+    this.updateHeader();
+  }
+
   private abortCurrentOperation(): void {
     if (this.abortController && this.isLoading) {
       this.abortController.abort();
@@ -1241,6 +1324,7 @@ export class ClawflareTUIApp {
           try {
             const session = await this.client.createSession();
             this.sessionId = session.id;
+            this.sessionName = "new";
             this.messages = [];
             this.updateHeader();
             this.renderMessages();
@@ -1260,6 +1344,7 @@ export class ClawflareTUIApp {
               parentMessageId: "",
             });
             this.sessionId = session.id;
+            this.sessionName = "new";
             this.messages = [];
             this.updateHeader();
             this.renderMessages();
@@ -1271,19 +1356,67 @@ export class ClawflareTUIApp {
           }
           break;
 
+        case "sessions": {
+          const status = args.trim() || "all";
+          if (!sessionStatusFilters.has(status)) {
+            this.error = `Usage: /sessions [all|idle|processing|awaiting_input|error|closed|expired]`;
+            this.renderMessages();
+            this.setStatus("Error", "red");
+            break;
+          }
+
+          this.setStatus("Loading sessions...", "yellow");
+          try {
+            const response = await this.client.listSessions({ status });
+            this.messages.push({
+              role: "assistant",
+              content: formatSessionList(response.sessions, response.total, this.sessionId, status),
+            });
+            this.renderMessages();
+            this.setStatus("Ready", "green");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Failed to load sessions";
+            this.renderMessages();
+            this.setStatus(`Error: ${this.error}`, "red");
+          }
+          break;
+        }
+
+        case "open":
+          this.setStatus("Opening session...", "yellow");
+          try {
+            await this.openSession(args);
+            this.renderMessages();
+            this.setStatus(`Opened session ${this.sessionId.slice(0, 8)}`, "green");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Failed to open session";
+            this.renderMessages();
+            this.setStatus(`Error: ${this.error}`, "red");
+          }
+          break;
+
         case "name":
           if (!args) {
             this.error = "Usage: /name <session-name>";
             this.renderMessages();
             this.setStatus("Error", "red");
           } else {
-            this.sessionName = args.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 20);
-            this.messages.push({
-              role: "assistant",
-              content: `Session renamed to: ${this.sessionName}`,
-            });
-            this.renderMessages();
-            this.setStatus("Ready", "green");
+            this.setStatus("Renaming session...", "yellow");
+            try {
+              const renamed = await this.client.renameSession(this.sessionId, args);
+              this.sessionName = renamed.name;
+              this.updateHeader();
+              this.messages.push({
+                role: "assistant",
+                content: `Session renamed to: ${this.sessionName}`,
+              });
+              this.renderMessages();
+              this.setStatus("Ready", "green");
+            } catch (e) {
+              this.error = e instanceof Error ? e.message : "Failed to rename session";
+              this.renderMessages();
+              this.setStatus(`Error: ${this.error}`, "red");
+            }
           }
           break;
 
@@ -1329,7 +1462,7 @@ export class ClawflareTUIApp {
 
             this.messages.push({
               role: "assistant",
-              content: `Available model connections:\n${modelList}\n\nTo set a default, use the CLI: clawflare providers list`,
+              content: `Available model connections:\n${modelList}\n\nTo inspect configured models, use the CLI: clawflare models list`,
             });
             this.renderMessages();
             this.setStatus("Ready", "green");
@@ -1352,6 +1485,8 @@ export class ClawflareTUIApp {
             content: `Commands:
 /new - Start a new chat context
 /fork - Fork the current context
+/sessions [status] - Show recent sessions
+/open <session-id> - Open an existing session
 /name <name> - Name the current session
 /tools - List available tools
 /models - Show available model connections

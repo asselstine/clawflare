@@ -19,6 +19,11 @@
 			"binding": "HTTP_GATEWAY",
 			"service": "clawflare-runtime",
 			"entrypoint": "HttpGateway"
+		},
+		{
+			"binding": "SECRET_BROKER",
+			"service": "clawflare-runtime",
+			"entrypoint": "SecretBroker"
 		}
 	],
 	"worker_loaders": [
@@ -38,8 +43,8 @@
 		{
 			"binding": "DB",
 			"database_name": "clawflare",
-			"database_id": "cf8dc5b0-975e-4fea-b6bb-601c37fb168f",
-			"preview_database_id": "cf8dc5b0-975e-4fea-b6bb-601c37fb168f",
+			"database_id": "a1561801-7369-4995-8f2c-9bb0bdc76618",
+			"preview_database_id": "a1561801-7369-4995-8f2c-9bb0bdc76618",
 			"migrations_dir": "migrations"
 		}
 	],

@@ -43,8 +43,7 @@ function allMigrationStatements(): string[] {
   const files = [
     "0001_initial_schema.sql",
     "007_encrypted_secrets.sql",
-    "008_job_authorization_snapshots.sql",
-    "009_add_workflow_auth_job_id.sql",
+    "008_session_name.sql",
   ];
   return files.flatMap((file) => migrationStatements(file));
 }

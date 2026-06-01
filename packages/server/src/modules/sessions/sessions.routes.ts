@@ -15,7 +15,6 @@ import type { ModelProvider } from "../../types.js";
 import { badRequest, json, notFound, serverError } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
-import { getSecretStore } from "../../data/secrets/index.js";
 import { logger } from "../../lib/logger.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 
@@ -28,6 +27,9 @@ sessionRoutes.post("/", (c) =>
 );
 sessionRoutes.get("/:id", (c) =>
   handleGetSession(c.req.param("id"), new URL(c.req.url), c.env, c.get("requestContext")!)
+);
+sessionRoutes.post("/:id/name", (c) =>
+  handleRenameSession(c.req.param("id"), c.req.raw, c.env, c.get("requestContext")!)
 );
 sessionRoutes.post("/:id/close", (c) =>
   handleCloseSession(c.req.param("id"), c.env, c.get("requestContext")!)
@@ -79,7 +81,6 @@ export async function handleCreateSession(
 
     const sessions = new SessionRepository(env.DB);
     const events = new SessionEventRepository(env.DB);
-    const secretStore = getSecretStore(env);
 
     // Create authorization context for this request
     const auth = createAuthSession(requestContext);
@@ -99,15 +100,6 @@ export async function handleCreateSession(
       );
     }
 
-    // Create job authorization snapshot for the workflow
-    // This allows the workflow to access secrets without storing the user's token
-    const workflowAuthJobId = await secretStore.createJobAuthorization(
-      requestContext.user.id,
-      workspaceId,
-      ["get"], // Only allow reading secrets
-      60 * 60 * 1000 // 1 hour expiry
-    );
-
     // Initialize session state with workspace and model info
     const initialState: SessionMetadataState = {
       id: sessionId,
@@ -121,7 +113,6 @@ export async function handleCreateSession(
       modelConnectionId: resolvedModel?.id,
       modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
       modelName: resolvedModel?.modelName,
-      workflowAuthJobId,
     };
     await sessions.save(initialState);
 
@@ -209,6 +200,7 @@ export async function handleGetSession(
 
     const response: SessionResponse = {
       id: sessionState.id,
+      name: sessionState.name,
       status: sessionState.status,
       messages: workflowSession?.messages ?? [],
       events,
@@ -222,6 +214,46 @@ export async function handleGetSession(
     logger.error("Session poll failed", error, {
       handler: "handleGetSession",
       route: "GET /v1/session/:id",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
+ * Rename a session.
+ */
+export async function handleRenameSession(
+  sessionId: string,
+  request: Request,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const sessions = new SessionRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  try {
+    const body = (await request.json().catch(() => ({}))) as { name?: unknown };
+    if (typeof body.name !== "string") {
+      return badRequest("Invalid request. name is required");
+    }
+
+    const name = body.name.trim().replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 20);
+    if (!name) {
+      return badRequest("Invalid request. name must contain at least one valid character");
+    }
+
+    const renamed = await sessions.rename(sessionId, effectiveWorkspaceId, name);
+    if (!renamed) {
+      return notFound("Session");
+    }
+
+    return json({ ok: true, sessionId, workspaceId: effectiveWorkspaceId, name });
+  } catch (error) {
+    logger.error("Session rename failed", error, {
+      handler: "handleRenameSession",
+      route: "POST /v1/session/:id/name",
       sessionId,
       workspaceId: effectiveWorkspaceId,
     });
@@ -320,6 +352,7 @@ export async function handleListSessions(
           id: state.id,
           workspaceId: state.workspaceId,
           workflowId: state.workflowId,
+          name: state.name,
           status: state.status,
           messageCount,
           updatedAt: state.updatedAt,

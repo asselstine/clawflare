@@ -3,6 +3,7 @@ import type { ModelConnection } from "../../data/index.js";
 import {
   getProviderDefinition,
   getSupportedProviders,
+  isModelSupportedForProvider,
 } from "../providers/providers.catalog.js";
 
 export interface ModelConnectionInput {
@@ -56,6 +57,13 @@ export function validateModelConnectionInput(
     return {
       ok: false,
       error: `Unknown provider "${data.provider}". Supported providers: ${supported}`,
+    };
+  }
+
+  if (!isModelSupportedForProvider(data.provider, data.modelName)) {
+    return {
+      ok: false,
+      error: `Unknown model "${data.modelName}" for provider "${data.provider}"`,
     };
   }
 

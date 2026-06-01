@@ -11,6 +11,7 @@ import { openCommand } from "./commands/open.js";
 import { doctorCommand } from "./commands/doctor.js";
 import {
   providersAddCommand,
+  modelsListCommand,
   providersRemoveCommand,
   providersListCommand,
 } from "./commands/providers.js";
@@ -115,8 +116,23 @@ program
       .description("List configured model providers")
       .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
       .option("-t, --token <token>", "API token for authentication")
-      .action(async (options: { server?: string; token?: string }) => {
+      .option("--available", "List available providers from the server catalog")
+      .action(async (options: { server?: string; token?: string; available?: boolean }) => {
         await providersListCommand(options);
+      })
+  );
+
+// models command
+program
+  .command("models")
+  .description("Manage configured model connections")
+  .addCommand(
+    new Command("list")
+      .description("List configured model connections")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (options: { server?: string; token?: string }) => {
+        await modelsListCommand(options);
       })
   );
 

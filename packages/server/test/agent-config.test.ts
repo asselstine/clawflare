@@ -48,4 +48,49 @@ describe("buildAgentComponents", () => {
 
     spy.mockRestore();
   });
+
+  it("normalizes Bearer-prefixed Bedrock tokens before streaming", async () => {
+    const stream = createAssistantMessageEventStream();
+    const message: AssistantMessage = {
+      role: "assistant",
+      content: [{ type: "text", text: "ok" }],
+      api: "bedrock-converse-stream",
+      provider: "amazon-bedrock",
+      model: "minimax.minimax-m2.5",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    };
+    stream.push({ type: "done", reason: "stop", message });
+
+    const spy = vi.spyOn(bedrockProviderModule, "streamBedrock").mockReturnValue(stream);
+
+    const components = await buildAgentComponentsFromResolved({
+      id: "test-connection",
+      provider: "amazon-bedrock",
+      modelName: "minimax.minimax-m2.5",
+      secrets: {
+        AWS_BEARER_TOKEN_BEDROCK: "Bearer test-token",
+      },
+      config: {},
+    });
+
+    expect(await components.getApiKey()).toBe("test-token");
+    components.streamFn(components.model, { messages: [] } as Context, {} as any);
+
+    expect(spy).toHaveBeenCalledWith(
+      components.model,
+      { messages: [] },
+      expect.objectContaining({ bearerToken: "test-token" }),
+    );
+
+    spy.mockRestore();
+  });
 });

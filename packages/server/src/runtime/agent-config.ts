@@ -70,7 +70,7 @@ export async function buildAgentComponentsFromResolved(
     // Map provider to the appropriate secret key
     const secretKey = getProviderSecretKey(provider);
     if (secretKey && secretKey in resolved.secrets) {
-      return resolved.secrets[secretKey];
+      return normalizeProviderSecret(provider, resolved.secrets[secretKey]);
     }
     
     return undefined;
@@ -84,7 +84,12 @@ export async function buildAgentComponentsFromResolved(
 
   const streamFn = ((requestModel: Model<any>, context: any, options?: any) => {
     if (provider === "amazon-bedrock") {
-      const bearerToken = options?.bearerToken || options?.apiKey || getApiKeySync(resolved) || undefined;
+      const bearerToken = normalizeBedrockBearerToken(
+        options?.bearerToken || options?.apiKey || getApiKeySync(resolved) || undefined
+      );
+      if (!bearerToken) {
+        throw new Error("Missing required secret AWS_BEARER_TOKEN_BEDROCK for amazon-bedrock model connection");
+      }
       return bedrockProviderModule.streamBedrock(requestModel as Model<"bedrock-converse-stream">, context, {
         ...options,
         bearerToken,
@@ -109,7 +114,7 @@ export async function buildAgentComponentsFromResolved(
  */
 function getApiKeySync(resolved: ResolvedModelConnection): string | undefined {
   if (resolved.provider === "amazon-bedrock") {
-    return resolved.secrets["AWS_BEARER_TOKEN_BEDROCK"] || undefined;
+    return normalizeBedrockBearerToken(resolved.secrets["AWS_BEARER_TOKEN_BEDROCK"]);
   }
   if (resolved.provider === "anthropic") {
     return resolved.secrets["ANTHROPIC_API_KEY"] || undefined;
@@ -118,6 +123,13 @@ function getApiKeySync(resolved: ResolvedModelConnection): string | undefined {
     return resolved.secrets["OPENAI_API_KEY"] || undefined;
   }
   return undefined;
+}
+
+function normalizeProviderSecret(provider: string, value: string | undefined): string | undefined {
+  if (provider === "amazon-bedrock") {
+    return normalizeBedrockBearerToken(value);
+  }
+  return value?.trim() || undefined;
 }
 
 /**

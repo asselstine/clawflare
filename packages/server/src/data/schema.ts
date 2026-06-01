@@ -116,6 +116,7 @@ export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
   workflowId: text("workflow_id").notNull(),
   workspaceId: text("workspace_id"),
+  name: text("name"),
   status: text("status", {
     enum: ["idle", "processing", "awaiting_input", "error", "closed", "expired"],
   }).notNull(),
@@ -127,7 +128,6 @@ export const sessions = sqliteTable("sessions", {
   modelConnectionId: text("model_connection_id"),
   modelProvider: text("model_provider"),
   modelName: text("model_name"),
-  workflowAuthJobId: text("workflow_auth_job_id"),
 });
 
 export const sessionEvents = sqliteTable(
@@ -231,13 +231,3 @@ export const encryptedSecrets = sqliteTable(
     pk: primaryKey({ columns: [table.workspaceId, table.key] }),
   })
 );
-
-export const jobAuthorizationSnapshots = sqliteTable("job_authorization_snapshots", {
-  jobId: text("job_id").primaryKey(),
-  createdByUserId: text("created_by_user_id").notNull(),
-  workspaceId: text("workspace_id").notNull().references(() => workspaces.id),
-  allowedOperations: text("allowed_operations").notNull(),
-  createdAt: integer("created_at").notNull(),
-  expiresAt: integer("expires_at").notNull(),
-  authorizationVersion: integer("authorization_version").notNull(),
-});
