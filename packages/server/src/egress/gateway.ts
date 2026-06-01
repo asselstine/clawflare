@@ -1,6 +1,6 @@
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "../internal-types/index.js";
-import { getDataLayer } from "../data/index.js";
+import { EgressHandlerRepository } from "../data/index.js";
 import { createEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
 
@@ -16,9 +16,9 @@ export async function routeOutboundRequest(
   // Config-driven handlers removed in Phase 4
   const registry = createEgressRegistry<Env>();
 
-  const data = getDataLayer(env);
+  const egressHandlers = new EgressHandlerRepository(env.DB);
   // Phase 6: workspace-scoped egress handlers
-  const metadata = await data.egressHandlers.list(DEFAULT_WORKSPACE_ID, true);
+  const metadata = await egressHandlers.list(DEFAULT_WORKSPACE_ID, true);
 
   // Build a set of handler names that have D1 metadata
   const metadataNames = new Set(metadata.map((m) => m.name));

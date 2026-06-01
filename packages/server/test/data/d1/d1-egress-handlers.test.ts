@@ -1,14 +1,14 @@
 // D1 Egress Handlers Repository Tests
 
 import { describe, it, expect } from "vitest";
-import { D1EgressHandlerRepository } from "../../../src/data/d1/d1-egress-handlers.js";
-import type { UpsertEgressHandlerParams, EgressHandlerMetadata } from "../../../src/data/interfaces.js";
+import { EgressHandlerRepository } from "../../../src/data/egress-handlers.js";
+import type { UpsertEgressHandlerParams, EgressHandlerMetadata } from "../../../src/data/index.js";
 
 const DEFAULT_WORKSPACE_ID = "test-workspace";
 
 describe("D1 Egress Handler Repository", () => {
-  it("D1EgressHandlerRepository is defined", () => {
-    expect(D1EgressHandlerRepository).toBeDefined();
+  it("EgressHandlerRepository is defined", () => {
+    expect(EgressHandlerRepository).toBeDefined();
   });
 
   it("UpsertEgressHandlerParams type is valid (workspace-scoped)", () => {
@@ -44,7 +44,7 @@ describe("D1 Egress Handler Repository", () => {
   });
 
   it("Egress handler search should include domains", () => {
-    // The search query in D1EgressHandlerRepository should search domains_json
+    // The search query in EgressHandlerRepository should search domains_json
     // This is a contract test - the actual search logic is in the repository
     expect(
       "Search query should include: WHERE name LIKE ? OR description LIKE ? OR domains_json LIKE ?"

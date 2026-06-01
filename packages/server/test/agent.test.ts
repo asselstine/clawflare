@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import { Agent, createEmptyAgentSession } from "../src/agent.js";
+import { Agent, createEmptyAgentSession } from "../src/runtime/agent.js";
 
 describe("Agent", () => {
   const model = {

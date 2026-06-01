@@ -2,11 +2,16 @@
 // Provides multi-tenant authentication support for the Clawflare API
 
 import type { Env } from "../internal-types/index.js";
-import { getDataLayer } from "../data/index.js";
-import type { User, Workspace, WorkspaceRole } from "../data/index.js";
-import { verifyAccessToken } from "../auth/access-tokens.js";
-import { verifyWebSession, extractSessionToken } from "../auth/sessions.js";
-import { logger } from "../logger.js";
+import {
+  UserRepository,
+  WorkspaceRepository,
+  type User,
+  type Workspace,
+  type WorkspaceRole,
+} from "../data/index.js";
+import { verifyAccessToken } from "../modules/auth/access-tokens.js";
+import { verifyWebSession, extractSessionToken } from "../modules/auth/sessions.js";
+import { logger } from "../lib/logger.js";
 
 /**
  * Request context containing authenticated user and workspace information
@@ -53,8 +58,8 @@ async function getDefaultWorkspace(
   env: Env
 ): Promise<Workspace | null> {
   try {
-    const data = getDataLayer(env);
-    const workspaces = await data.workspaces.listForUser(userId);
+    const workspacesRepo = new WorkspaceRepository(env.DB);
+    const workspaces = await workspacesRepo.listForUser(userId);
 
     if (workspaces.length > 0) {
       return workspaces[0]!;
@@ -65,7 +70,7 @@ async function getDefaultWorkspace(
     const now = Date.now();
     const slug = `personal-${now.toString(36).slice(-6)}`;
 
-    const workspace = await data.workspaces.create({
+    const workspace = await workspacesRepo.create({
       id: workspaceId,
       slug,
       name: "Personal Workspace",
@@ -73,7 +78,7 @@ async function getDefaultWorkspace(
     });
 
     // Add user as owner
-    await data.workspaces.addMembership({
+    await workspacesRepo.addMembership({
       workspaceId,
       userId,
       role: "owner",
@@ -97,8 +102,8 @@ async function loadUser(
   env: Env
 ): Promise<User | null> {
   try {
-    const data = getDataLayer(env);
-    return await data.users.getById(userId);
+    const users = new UserRepository(env.DB);
+    return await users.getById(userId);
   } catch (error) {
     logger.error("Load user failed", error, {
       function: "loadUser",
@@ -124,8 +129,8 @@ async function resolveBearerTokenContext(
   const workspace = await getDefaultWorkspace(user.id, env);
   if (!workspace) return null;
 
-  const data = getDataLayer(env);
-  const role = await data.workspaces.getUserRole(workspace.id, user.id);
+  const workspaces = new WorkspaceRepository(env.DB);
+  const role = await workspaces.getUserRole(workspace.id, user.id);
   if (!role) return null;
 
   return {
@@ -161,8 +166,8 @@ export async function resolveRequestContext(
       if (user) {
         const workspace = await getDefaultWorkspace(user.id, env);
         if (workspace) {
-          const data = getDataLayer(env);
-          const role = await data.workspaces.getUserRole(workspace.id, user.id);
+          const workspaces = new WorkspaceRepository(env.DB);
+          const role = await workspaces.getUserRole(workspace.id, user.id);
           if (role) {
             return {
               user,

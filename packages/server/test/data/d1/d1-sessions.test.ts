@@ -1,8 +1,8 @@
 // D1 Session Repository Tests
 
 import { describe, it, expect } from "vitest";
-import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
-import type { SessionMetadataState } from "../../../src/data/interfaces.js";
+import { SessionRepository } from "../../../src/data/sessions.js";
+import type { SessionMetadataState } from "../../../src/data/index.js";
 
 // Default workspace for testing - Phase 6 adds workspace scoping
 const DEFAULT_WORKSPACE_ID = "test-workspace";
@@ -69,7 +69,7 @@ class MockD1PreparedStatement {
 describe("D1 Session Repository", () => {
   it("SessionRepository interface is defined", () => {
     // Verify we can import and use the repository
-    expect(D1SessionRepository).toBeDefined();
+    expect(SessionRepository).toBeDefined();
   });
 
   it("SessionMetadataState type is valid (workspace-scoped)", () => {

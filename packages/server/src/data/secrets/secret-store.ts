@@ -7,8 +7,8 @@
  */
 
 import type { Env } from "../../internal-types/index.js";
-import type { AuthorizationContext } from "../../secret-broker/types.js";
-import { getDataLayer, createJobSnapshot } from "../index.js";
+import type { AuthorizationContext } from "../../modules/secrets/secrets.types.js";
+import { createJobSnapshot, JobSnapshotRepository } from "../index.js";
 import { createModelConnectionSecretRef, parseModelConnectionSecretRef } from "./secret-refs.js";
 
 /**
@@ -215,8 +215,8 @@ class SecretBrokerClient implements SecretStore {
       expiryMs
     );
     
-    const data = getDataLayer(this.env);
-    await data.jobSnapshots.put(snapshot);
+    const jobSnapshots = new JobSnapshotRepository(this.env.DB);
+    await jobSnapshots.put(snapshot);
     
     return jobId;
   }
@@ -247,4 +247,4 @@ export function getSecretStore(env: Env): SecretStore {
 }
 
 // Re-export AuthorizationContext for convenience
-export { type AuthorizationContext } from "../../secret-broker/types.js";
+export { type AuthorizationContext } from "../../modules/secrets/secrets.types.js";

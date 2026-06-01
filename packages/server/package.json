@@ -14,6 +14,7 @@
     "build": "tsc --build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrations:create": "wrangler d1 migrations create clawflare",
     "db:migrations:list": "wrangler d1 migrations list clawflare",
     "db:migrations:apply:local": "wrangler d1 migrations apply clawflare --local",
@@ -27,10 +28,13 @@
     "@cloudflare/containers": "latest",
     "@earendil-works/pi-agent-core": "^0.74.0",
     "@earendil-works/pi-ai": "^0.74.0",
+    "drizzle-orm": "^0.44.7",
+    "hono": "^4.10.7",
     "zod": "^3.23.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241127.0",
+    "drizzle-kit": "^0.31.7",
     "miniflare": "^4.20260508.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

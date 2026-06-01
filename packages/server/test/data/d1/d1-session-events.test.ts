@@ -5,8 +5,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
-import { D1SessionEventRepository } from "../../../src/data/d1/d1-session-events.js";
-import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
+import { SessionEventRepository } from "../../../src/data/sessions.js";
+import { SessionRepository } from "../../../src/data/sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
@@ -62,7 +62,7 @@ async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void
 }
 
 async function createSession(db: D1Database, sessionId = "session-1"): Promise<void> {
-  await new D1SessionRepository(db).save({
+  await new SessionRepository(db).save({
     id: sessionId,
     workspaceId: DEFAULT_WORKSPACE_ID, // Phase 6: workspace scoping
     workflowId: "workflow-1",
@@ -78,7 +78,7 @@ describe("D1 Session Event Repository", () => {
     const { db, dispose } = await createDb();
     try {
       await createSession(db);
-      const repo = new D1SessionEventRepository(db);
+      const repo = new SessionEventRepository(db);
 
       expect(await repo.latestCursor("session-1")).toBe("0");
       expect(await repo.count("session-1")).toBe(0);
@@ -108,7 +108,7 @@ describe("D1 Session Event Repository", () => {
     const { db, dispose } = await createDb();
     try {
       await createSession(db);
-      const repo = new D1SessionEventRepository(db);
+      const repo = new SessionEventRepository(db);
 
       await Promise.all(
         Array.from({ length: 25 }, (_, i) =>

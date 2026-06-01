@@ -2,10 +2,10 @@
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
 import { HttpGateway } from "./egress/gateway.js";
-import { PersistentSessionWorkflow } from "./workflow.js";
-import { ClawflareWebSocketSession } from "./ws-session.js";
-import { CodingContainer, ContainerProxy } from "./container/coding-container.js";
-import { handleHttpRequest } from "./http/router.js";
+import { PersistentSessionWorkflow } from "./runtime/workflow.js";
+import { ClawflareWebSocketSession } from "./runtime/ws-session.js";
+import { CodingContainer, ContainerProxy } from "./modules/tools/container/coding-container.js";
+import app from "./http/app.js";
 
 // Export types for clients (public types only)
 export type {
@@ -33,21 +33,10 @@ export type {
   UpsertStoredCodeParams,
   EgressHandlerMetadata,
   UpsertEgressHandlerParams,
-  SearchResults,
-  SessionRepository,
-  SessionEventRepository,
-  InputQueueRepository,
-  SessionRuntimeRepository,
-  StoredCodeRepository,
-  EgressHandlerRepository,
-  SnapshotRepository,
-  DataLayer,
-  Datastore,
   // Model connection types
   ModelProvider,
   CreateModelConnectionParams,
   UpdateModelConnectionParams,
-  ModelConnectionRepository,
 } from "./data/index.js";
 
 // Export data layer errors
@@ -69,14 +58,7 @@ export {
 };
 
 // Export Secret Broker as separate entrypoint
-export { default as SecretBroker } from "./secret-broker/index.js";
-
-// Export HTTP utilities
-export {
-  handleHttpRequest,
-  normalizePath,
-  isRoute,
-} from "./http/router.js";
+export { default as SecretBroker } from "./modules/secrets/secret-broker.worker.js";
 
 export {
   json,
@@ -100,17 +82,11 @@ export {
   hasPermission,
 } from "./http/request-context.js";
 
-// Export canonical data layer accessor
-export { getDataLayer } from "./data/index.js";
-
 // Export agent config utilities
-export { normalizeBedrockBearerToken } from "./agent-config.js";
-
-// Export diagnostics
-export { logTiming, timingStart } from "./diagnostics.js";
+export { normalizeBedrockBearerToken } from "./runtime/agent-config.js";
 
 // Export logger
-export { logger, log } from "./logger.js";
+export { logger, log } from "./lib/logger.js";
 
 // Export auth utilities
 export {
@@ -137,23 +113,16 @@ export {
   verifyEmailToken,
   createPasswordResetToken,
   verifyPasswordResetToken,
-} from "./auth/index.js";
+} from "./modules/auth/index.js";
 
 // Export core tools (config-driven tools removed in Phase 4)
 export {
   createTools,
-} from "./tools/index.js";
+  invokeTool,
+} from "./modules/tools/tools.service.js";
 
 // Export tool context type
-export type { ToolContext } from "./tools/index.js";
-
-// Export simplified server config (internal constants only)
-export {
-  DEFAULT_AI_PROVIDER,
-  DEFAULT_AI_MODEL,
-  getAiProvider,
-  getAiModel,
-} from "./config-api.js";
+export type { ToolContext } from "./modules/tools/tools.service.js";
 
 // Re-export egress core types for user convenience
 export type {
@@ -186,21 +155,28 @@ export {
   resolveModelConnectionForNewSession,
   type ResolvedModelConnection,
   type CreateModelConnectionResult,
-} from "./services/model-connections.js";
+} from "./modules/model-connections/model-connections.service.js";
 
-// Export model provider utilities
+// Export provider catalog utilities
 export {
   getProviderDefinition,
   getSupportedProviders,
   isProviderSupported,
-  validateModelConnectionInput,
   requiredSecretsForProvider,
   optionalSecretsForProvider,
   defaultModelForProvider,
+  type ProviderDefinition,
+} from "./modules/providers/providers.catalog.js";
+
+// Export model connection validation and response helpers
+export {
+  validateModelConnectionInput,
   redactModelConnection,
   redactModelConnections,
+  type ModelConnectionInput,
+  type ParsedModelConnection,
   type PublicModelConnection,
-} from "./model-providers.js";
+} from "./modules/model-connections/model-connections.validation.js";
 
 // Export secret store adapter and authorization types
 export {
@@ -212,15 +188,14 @@ export {
 } from "./data/secrets/index.js";
 
 // Export Secret Broker types for workflow integration
-export type { JobAuthorizationSnapshot } from "./secret-broker/types.js";
+export type { JobAuthorizationSnapshot } from "./modules/secrets/secrets.types.js";
 export {
   createJobSnapshot,
-  type JobSnapshotRepository,
 } from "./data/index.js";
 
 // Main Cloudflare Worker export
 export default {
   async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
-    return handleHttpRequest(request, env as import("./internal-types/index.js").Env, ctx);
+    return app.fetch(request, env as import("./internal-types/index.js").Env, ctx);
   },
 };

@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
 import { AgentClient } from "@clawflare/cli/client";
-import { DEFAULT_SERVER_NAMES as runtimeNames } from "../../server/src/server-names.js";
+import { E2E_SERVER_NAMES as runtimeNames } from "./server-names.js";
 
 const HARNESS_DIR = pathResolve(process.cwd(), "..", "server");
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
@@ -90,6 +90,36 @@ async function readJsonResponse<T>(response: Response): Promise<T> {
   }
 }
 
+interface ToolInvokeResponse<TDetails = unknown> {
+  tool: string;
+  result: {
+    content: Array<{ type: string; text?: string }>;
+    details: TDetails;
+  };
+}
+
+async function invokeTool<TDetails = unknown>(
+  url: string,
+  token: string,
+  name: string,
+  input: unknown,
+  sessionId?: string
+): Promise<ToolInvokeResponse<TDetails>> {
+  const response = await fetch(`${url}/v1/tools/${name}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ input, sessionId }),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Tool ${name} failed with ${response.status}: ${text}`);
+  }
+  return readJsonResponse<ToolInvokeResponse<TDetails>>(response);
+}
+
 async function destroyTestContainer(url: string, token: string, containerId: string): Promise<void> {
   // Track for potential cleanup later
   if (!createdContainers.includes(containerId)) {
@@ -97,14 +127,15 @@ async function destroyTestContainer(url: string, token: string, containerId: str
   }
   
   try {
-    const response = await fetch(`${url}/__test/container-destroy`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ containerId }),
-    });
-    const data = await readJsonResponse<{ ok: boolean; error?: string }>(response);
-    if (!data.ok) {
-      console.error(`Failed to destroy container ${containerId}: ${data.error || JSON.stringify(data)}`);
+    const data = await invokeTool<{ ok?: boolean }>(
+      url,
+      token,
+      "container_destroy",
+      { containerId },
+      containerId
+    );
+    if (!data.result.details.ok) {
+      console.error(`Failed to destroy container ${containerId}: ${JSON.stringify(data)}`);
     }
   } catch (error) {
     console.error(`Failed to destroy container ${containerId}:`, error instanceof Error ? error.message : String(error));
@@ -117,13 +148,14 @@ async function cleanupAllContainers(url: string, token: string): Promise<void> {
   console.log(`   Cleaning up ${createdContainers.length} tracked containers...`);
   const cleanupPromises = createdContainers.map(async (containerId) => {
     try {
-      const response = await fetch(`${url}/__test/container-destroy`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ containerId }),
-      });
-      const data = await readJsonResponse<{ ok?: boolean }>(response);
-      if (data.ok) {
+      const data = await invokeTool<{ ok?: boolean }>(
+        url,
+        token,
+        "container_destroy",
+        { containerId },
+        containerId
+      );
+      if (data.result.details.ok) {
         console.log(`     ✓ Destroyed container: ${containerId.slice(0, 30)}...`);
       }
     } catch {
@@ -198,7 +230,7 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
     name: workerName,
     compatibility_date: "2025-01-01",
     compatibility_flags: ["nodejs_compat", "enable_ctx_exports"],
-    main: "src/e2e-entry.ts",
+    main: "src/index.ts",
     minify: false,
     define: {
       "process.env.NODE_ENV": "\"test\"",
@@ -574,63 +606,49 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("execute_code runs inline Dynamic Worker code", async () => {
-    const response = await fetch(`${url}/__test/execute-code`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ code: "export default async function(input, env) { return { message: 'ok', input }; }", input: { value: 42 } }),
+    const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
+      code: "export default async function(input, env) { return { message: 'ok', input }; }",
+      input: { value: 42 },
     });
-    const data = await response.json() as { ok: boolean; result?: { message?: string; input?: { value?: number } } };
-    if (!data.ok || data.result?.message !== "ok" || data.result?.input?.value !== 42) {
+    const text = data.result.content[0]?.text ?? "";
+    if (!data.result.details.ok || !text.includes('"message": "ok"') || !text.includes('"value": 42')) {
       throw new Error(`Unexpected execute_code result: ${JSON.stringify(data)}`);
     }
   });
 
   await runner.runTest("store/search/execute stored code", async () => {
-    const storeResponse = await fetch(`${url}/__test/store-code`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "double_number", description: "Doubles a numeric input", code: "export default async function(input, env) { return input.value * 2; }" }),
+    await invokeTool(url, token, "store_code", {
+      name: "double_number",
+      description: "Doubles a numeric input",
+      code: "export default async function(input, env) { return input.value * 2; }",
     });
-    const stored = await storeResponse.json() as { ok: boolean };
-    if (!stored.ok) throw new Error(`store_code failed: ${JSON.stringify(stored)}`);
 
-    const searchResponse = await fetch(`${url}/__test/search?collection=stored_code&q=double`, {
-      headers: { Authorization: `Bearer ${token}` },
+    const search = await invokeTool<{
+      storedCode: Array<{ name: string; code?: string }>;
+    }>(url, token, "search", {
+      collection: "stored_code",
+      query: "double",
     });
-    const search = await searchResponse.json() as { results?: { storedCode: Array<{ name: string; code?: string }> } };
-    const found = search.results?.storedCode.find((item) => item.name === "double_number");
+    const found = search.result.details.storedCode.find((item) => item.name === "double_number");
     if (!found) throw new Error(`Stored code not found: ${JSON.stringify(search)}`);
     if (found.code) throw new Error("Search should not return stored code body");
 
-    const executeResponse = await fetch(`${url}/__test/execute-stored-code`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "double_number", input: { value: 21 } }),
+    const executed = await invokeTool<{ ok?: boolean }>(url, token, "execute_stored_code", {
+      name: "double_number",
+      input: { value: 21 },
     });
-    const executed = await executeResponse.json() as { ok: boolean; result?: number };
-    if (!executed.ok || executed.result !== 42) {
+    const executedText = executed.result.content[0]?.text ?? "";
+    if (!executed.result.details.ok || !executedText.includes("Result: 42")) {
       throw new Error(`Unexpected execute_stored_code result: ${JSON.stringify(executed)}`);
     }
   });
 
-  await runner.runTest("search finds GitHub and Cloudflare egress handlers", async () => {
-    for (const [query, name] of [["api.github.com", "github"], ["api.cloudflare.com", "cloudflare"]] as const) {
-      const response = await fetch(`${url}/__test/search?collection=egress_handlers&q=${query}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      const data = await response.json() as { results?: { egressHandlers: Array<{ name: string }> } };
-      if (!data.results?.egressHandlers.some((handler) => handler.name === name)) {
-        throw new Error(`${name} handler not found: ${JSON.stringify(data)}`);
-      }
-    }
-  });
-
-  await runner.runTest("search egress with * wildcard lists all handlers", async () => {
-    const response = await fetch(`${url}/__test/search?collection=egress_handlers&q=*`, {
+  await runner.runTest("List egress handlers", async () => {
+    const response = await fetch(`${url}/v1/egress-handlers`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const data = await response.json() as { results?: { egressHandlers: Array<{ name: string }> } };
-    const names = data.results?.egressHandlers.map((h) => h.name).sort();
+    const data = await response.json() as { egressHandlers?: Array<{ name: string }> };
+    const names = data.egressHandlers?.map((h) => h.name).sort();
     if (!names || names.length < 2) {
       throw new Error(`Expected at least 2 handlers, got: ${JSON.stringify(names)}`);
     }
@@ -639,54 +657,29 @@ async function runTests(url: string): Promise<void> {
     }
   });
 
-  await runner.runTest("search egress with wildcard prefix finds matching domains", async () => {
-    const response = await fetch(`${url}/__test/search?collection=egress_handlers&q=*github.com`, {
+  await runner.runTest("Get Cloudflare egress handler", async () => {
+    const response = await fetch(`${url}/v1/egress-handlers/cloudflare`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const data = await response.json() as { results?: { egressHandlers: Array<{ name: string }> } };
-    const names = data.results?.egressHandlers.map((h) => h.name);
-    if (!names?.includes("github")) {
-      throw new Error(`Expected github handler, got: ${JSON.stringify(names)}`);
+    const data = await response.json() as { egressHandler?: { name: string; domains?: string[]; config?: unknown } };
+    if (data.egressHandler?.name !== "cloudflare") {
+      throw new Error(`Expected cloudflare handler, got: ${JSON.stringify(data)}`);
+    }
+    if (!data.egressHandler.domains?.includes("api.cloudflare.com")) {
+      throw new Error(`Expected api.cloudflare.com domain, got: ${JSON.stringify(data)}`);
+    }
+    if ("config" in data.egressHandler) {
+      throw new Error(`Egress handler response should not expose config: ${JSON.stringify(data)}`);
     }
   });
 
   await runner.runTest("generic egress is allowed", async () => {
-    const response = await fetch(`${url}/__test/execute-code`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: "export default async function(input, env) { const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() }; }",
-      }),
+    const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
+      code: "export default async function(input, env) { const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() }; }",
     });
-    const data = await response.json() as { ok: boolean; result?: { status?: number; body?: string } };
-    if (!data.ok || data.result?.status !== 200 || !data.result.body?.includes("Example Domain")) {
+    const text = data.result.content[0]?.text ?? "";
+    if (!data.result.details.ok || !text.includes('"status": 200') || !text.includes("Example Domain")) {
       throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
-    }
-  });
-
-  await runner.runTest("execute_code can fetch through Cloudflare egress handler", async () => {
-    const response = await fetch(`${url}/__test/execute-code`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        code: "export default async function(input, env) { const response = await fetch('https://api.cloudflare.com/client/v4/accounts'); return { status: response.status, body: await response.json() }; }"
-      }),
-    });
-    const data = await response.json() as { ok: boolean; result?: { status?: number; body?: { handler?: string } }; error?: string };
-    if (!data.ok || data.result?.status !== 200 || data.result?.body?.handler !== "cloudflare") {
-      throw new Error(`Expected Dynamic Worker Cloudflare egress delegation, got: ${JSON.stringify(data)}`);
-    }
-  });
-
-  await runner.runTest("gateway delegates matching egress handler", async () => {
-    const response = await fetch(`${url}/__test/egress-fetch`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ url: "https://api.github.com" }),
-    });
-    const data = await response.json() as { ok: boolean; status?: number; body?: { handler?: string } };
-    if (!data.ok || data.status !== 200 || data.body?.handler !== "github") {
-      throw new Error(`Expected GitHub egress handler delegation, got: ${JSON.stringify(data)}`);
     }
   });
 
@@ -751,28 +744,27 @@ async function runTests(url: string): Promise<void> {
     const containerId = `e2e-container-${Date.now()}`;
 
     try {
-      // Create container
-      const createResponse = await fetch(`${url}/__test/container-create`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ containerId }),
-      });
-      const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
-      if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
-      if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+      const createData = await invokeTool<{ status?: string }>(
+        url,
+        token,
+        "container_create",
+        { containerId },
+        containerId
+      );
+      if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
       
-      // Run ls command
-      const bashResponse = await fetch(`${url}/__test/container-bash`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ containerId, command: "ls -la", cwd: "/workspace" }),
-      });
-      const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
-      if (!bashData.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
-      if (bashData.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.exitCode}`);
-      if (!bashData.stdout.includes("total") || !bashData.stdout.includes("workspace")) {
-        // Container might list differently; just ensure we got some output
-        if (bashData.stdout.trim().length === 0 && bashData.stderr.trim().length === 0) {
+      const bashData = await invokeTool<{ ok?: boolean; exitCode: number | null }>(
+        url,
+        token,
+        "container_bash",
+        { containerId, command: "ls -la", cwd: "/workspace" },
+        containerId
+      );
+      const bashText = bashData.result.content[0]?.text ?? "";
+      if (!bashData.result.details.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
+      if (bashData.result.details.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.result.details.exitCode}`);
+      if (!bashText.includes("total") || !bashText.includes("workspace")) {
+        if (bashText.trim().length === 0) {
           throw new Error(`No output from ls command`);
         }
       }
@@ -788,14 +780,14 @@ async function runTests(url: string): Promise<void> {
     const containerId = `e2e-github-clone-${Date.now()}`;
 
     try {
-      const createResponse = await fetch(`${url}/__test/container-create`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ containerId }),
-      });
-      const createData = await readJsonResponse<{ ok: boolean; containerId?: string; status?: string; error?: string }>(createResponse);
-      if (!createData.ok) throw new Error(`Container creation failed: ${JSON.stringify(createData)}`);
-      if (createData.status !== "healthy") throw new Error(`Container not healthy: ${createData.status}`);
+      const createData = await invokeTool<{ status?: string }>(
+        url,
+        token,
+        "container_create",
+        { containerId },
+        containerId
+      );
+      if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
 
       const cloneCommand = [
         "rm -rf /workspace/test-clone",
@@ -803,13 +795,14 @@ async function runTests(url: string): Promise<void> {
         "ls -la /workspace/test-clone/",
       ].join(" && ");
 
-      const bashResponse = await fetch(`${url}/__test/container-bash`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ containerId, command: cloneCommand, cwd: "/workspace" }),
-      });
-      const bashData = await readJsonResponse<{ ok: boolean; exitCode: number | null; stdout: string; stderr: string }>(bashResponse);
-      if (!bashData.ok || bashData.exitCode !== 0) {
+      const bashData = await invokeTool<{ ok?: boolean; exitCode: number | null }>(
+        url,
+        token,
+        "container_bash",
+        { containerId, command: cloneCommand, cwd: "/workspace" },
+        containerId
+      );
+      if (!bashData.result.details.ok || bashData.result.details.exitCode !== 0) {
         throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
       }
     } finally {

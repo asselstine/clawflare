@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { handleCreateSession } from "../../../src/http/routes/session-create.js";
+import { handleCreateSession } from "../../../src/modules/sessions/sessions.routes.js";
 import type { Env } from "../../../src/internal-types/index.js";
 import type { RequestContext } from "../../../src/http/request-context.js";
-import type { Workspace } from "../../../src/data/interfaces.js";
+import type { Workspace } from "../../../src/data/index.js";
 
 // Mock environment and dependencies
 function createMockEnv(): Env {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createContainerToolsIfAvailable, createTools } from "../src/tools/index.js";
+import { createContainerToolsIfAvailable, createTools } from "../src/modules/tools/tools.service.js";
 import type { Env } from "../src/internal-types/index.js";
 
 describe("tools", () => {
@@ -29,9 +29,10 @@ describe("tools", () => {
       expect(toolNames).toContain("container_create");
       expect(toolNames).toContain("container_bash");
       expect(toolNames).toContain("container_read");
+      expect(toolNames).toContain("container_destroy");
       
-      // Core (4) + Container (8) = 12
-      expect(tools.length).toBe(12);
+      // Core (4) + Container (9) = 13
+      expect(tools.length).toBe(13);
     });
 
     it("excludes container tools when no sessionId is provided", () => {
@@ -59,7 +60,7 @@ describe("tools", () => {
       const mockEnv = {} as Env;
       const toolCtx = { sessionId: "test-session" };
       const tools = createContainerToolsIfAvailable(mockEnv, toolCtx);
-      expect(tools.length).toBe(8);
+      expect(tools.length).toBe(9);
     });
   });
 });

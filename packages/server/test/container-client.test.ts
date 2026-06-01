@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildContainerRuntimeFailureMessage } from "../src/container/client.js";
+import { buildContainerRuntimeFailureMessage } from "../src/modules/tools/container/client.js";
 
 describe("container runtime failure formatting", () => {
   it("includes command stdout and stderr for runtime ok=false responses", () => {

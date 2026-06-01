@@ -4,9 +4,7 @@
  * Domain types for stored code management.
  */
 
-/**
- * Stored code entry - workspace scoped
- */
+
 export interface StoredCodeEntry {
   workspaceId: string;
   name: string;
@@ -17,9 +15,6 @@ export interface StoredCodeEntry {
   updatedAt: number;
 }
 
-/**
- * Parameters for upserting stored code
- */
 export interface UpsertStoredCodeParams {
   workspaceId: string;
   name: string;
@@ -28,19 +23,91 @@ export interface UpsertStoredCodeParams {
   tags?: string[];
 }
 
-/**
- * Stored code repository - manages reusable code, workspace scoped
- */
-export interface StoredCodeRepository {
-  /** Upsert a code entry in a workspace */
-  upsert(params: UpsertStoredCodeParams): Promise<void>;
+// Stored Code Repository Implementation
+// Workspace-scoped for multi-tenant data access
 
-  /** Get code by name within a workspace */
-  get(workspaceId: string, name: string): Promise<StoredCodeEntry | null>;
+import { createDb, type Db } from "./db.js";
+import { storedCode } from "./schema.js";
+import { and, desc, eq, like, or } from "drizzle-orm";
 
-  /** List stored code entries in a workspace */
-  list(workspaceId: string, limit?: number): Promise<StoredCodeEntry[]>;
+function mapStoredCode(row: typeof storedCode.$inferSelect): StoredCodeEntry {
+  return {
+    workspaceId: row.workspaceId,
+    name: row.name,
+    code: row.code,
+    description: row.description ?? undefined,
+    tags: JSON.parse(row.tagsJson) as string[],
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
-  /** Search stored code within a workspace */
-  search(workspaceId: string, query: string, limit: number): Promise<StoredCodeEntry[]>;
+export class StoredCodeRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async upsert(params: UpsertStoredCodeParams): Promise<void> {
+    const now = Date.now();
+
+    await this.db
+      .insert(storedCode)
+      .values({
+        workspaceId: params.workspaceId,
+        name: params.name,
+        code: params.code,
+        description: params.description ?? "",
+        tagsJson: JSON.stringify(params.tags ?? []),
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [storedCode.workspaceId, storedCode.name],
+        set: {
+          code: params.code,
+          description: params.description ?? "",
+          tagsJson: JSON.stringify(params.tags ?? []),
+          updatedAt: now,
+        },
+      });
+  }
+
+  async get(workspaceId: string, name: string): Promise<StoredCodeEntry | null> {
+    const row = await this.db.query.storedCode.findFirst({
+      where: and(eq(storedCode.workspaceId, workspaceId), eq(storedCode.name, name)),
+    });
+
+    return row ? mapStoredCode(row) : null;
+  }
+
+  async list(workspaceId: string, limit = 100): Promise<StoredCodeEntry[]> {
+    const rows = await this.db.query.storedCode.findMany({
+      where: eq(storedCode.workspaceId, workspaceId),
+      orderBy: [desc(storedCode.updatedAt)],
+      limit,
+    });
+
+    return rows.map(mapStoredCode);
+  }
+
+  async search(workspaceId: string, query: string, limit = 20): Promise<StoredCodeEntry[]> {
+    const q = query === "*" ? "%" : `%${query}%`;
+
+    const rows = await this.db.query.storedCode.findMany({
+      where: and(
+        eq(storedCode.workspaceId, workspaceId),
+        or(
+          like(storedCode.name, q),
+          like(storedCode.description, q),
+          like(storedCode.code, q)
+        )
+      ),
+      orderBy: [desc(storedCode.updatedAt)],
+      limit,
+    });
+
+    return rows.map(mapStoredCode);
+  }
 }

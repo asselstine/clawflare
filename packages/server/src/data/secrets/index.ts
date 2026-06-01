@@ -15,5 +15,5 @@ export {
   parseModelConnectionSecretRef,
 } from "./secret-refs.js";
 
-// Re-export types from secret-broker for convenience
-export type { AuthorizationContext } from "../../secret-broker/types.js";
+// Re-export types from the secrets module for convenience
+export type { AuthorizationContext } from "../../modules/secrets/secrets.types.js";

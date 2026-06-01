@@ -1,14 +1,14 @@
 // D1 Stored Code Repository Tests
 
 import { describe, it, expect } from "vitest";
-import { D1StoredCodeRepository } from "../../../src/data/d1/d1-stored-code.js";
-import type { UpsertStoredCodeParams, StoredCodeEntry } from "../../../src/data/interfaces.js";
+import { StoredCodeRepository } from "../../../src/data/stored-code.js";
+import type { UpsertStoredCodeParams, StoredCodeEntry } from "../../../src/data/index.js";
 
 const DEFAULT_WORKSPACE_ID = "test-workspace";
 
 describe("D1 Stored Code Repository", () => {
-  it("D1StoredCodeRepository is defined", () => {
-    expect(D1StoredCodeRepository).toBeDefined();
+  it("StoredCodeRepository is defined", () => {
+    expect(StoredCodeRepository).toBeDefined();
   });
 
   it("UpsertStoredCodeParams type is valid (workspace-scoped)", () => {

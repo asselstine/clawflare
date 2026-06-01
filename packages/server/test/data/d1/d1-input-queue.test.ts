@@ -5,9 +5,9 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
-import { D1InputQueueRepository } from "../../../src/data/d1/d1-input-queue.js";
-import { D1SessionRepository } from "../../../src/data/d1/d1-sessions.js";
-import type { SessionInputEvent } from "../../../src/data/interfaces.js";
+import { InputQueueRepository } from "../../../src/data/sessions.js";
+import { SessionRepository } from "../../../src/data/sessions.js";
+import type { SessionInputEvent } from "../../../src/data/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = join(__dirname, "../../../migrations");
@@ -63,7 +63,7 @@ async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void
 }
 
 async function createSession(db: D1Database, sessionId = "session-1"): Promise<void> {
-  await new D1SessionRepository(db).save({
+  await new SessionRepository(db).save({
     id: sessionId,
     workspaceId: DEFAULT_WORKSPACE_ID, // Phase 6: workspace scoping
     workflowId: "workflow-1",
@@ -79,7 +79,7 @@ describe("D1 Input Queue Repository", () => {
     const { db, dispose } = await createDb();
     try {
       await createSession(db);
-      const repo = new D1InputQueueRepository(db);
+      const repo = new InputQueueRepository(db);
 
       await repo.enqueue("session-1", { type: "prompt", content: "one" });
       await repo.enqueue("session-1", { type: "prompt", content: "two" });
@@ -106,7 +106,7 @@ describe("D1 Input Queue Repository", () => {
     const { db, dispose } = await createDb();
     try {
       await createSession(db);
-      const repo = new D1InputQueueRepository(db);
+      const repo = new InputQueueRepository(db);
 
       const events: SessionInputEvent[] = Array.from({ length: 50 }, (_, i) => ({
         type: "prompt",
@@ -134,7 +134,7 @@ describe("D1 Input Queue Repository", () => {
     const { db, dispose } = await createDb();
     try {
       await createSession(db);
-      const repo = new D1InputQueueRepository(db);
+      const repo = new InputQueueRepository(db);
 
       for (let i = 0; i < 50; i++) {
         await repo.enqueue("session-1", { type: "prompt", content: `prompt-${i}` });

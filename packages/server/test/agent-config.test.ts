@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context } from "@earendil-works/pi-ai";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
-import { buildAgentComponentsFromResolved } from "../src/agent-config.js";
+import { buildAgentComponentsFromResolved } from "../src/runtime/agent-config.js";
 
 describe("buildAgentComponents", () => {
   it("passes AWS_BEARER_TOKEN_BEDROCK to Bedrock as bearerToken from resolved model connection", async () => {

@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   createMockStream,
   shouldUseMockAI,
-} from "../src/mock-ai.js";
+} from "../src/runtime/mock-ai.js";
 import type { Model, Context, AssistantMessage } from "@earendil-works/pi-ai";
 
 describe("mock-ai", () => {

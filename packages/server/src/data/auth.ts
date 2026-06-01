@@ -108,7 +108,7 @@ export interface DeviceAuthorization {
   accessTokenId: string | null;
   accessTokenPlaintext: string | null;
   tokenRetrievedAt: number | null;
-  oauthStateHash: string;
+  oauthStateHash: string | null;
   expiresAt: number;
   createdAt: number;
   approvedAt: number | null;
@@ -138,47 +138,321 @@ export interface ApproveDeviceAuthorizationResult {
   accessToken: string;
 }
 
-// =============================================================================
-// Repository Interfaces
-// =============================================================================
+/**
+ * Drizzle-backed authentication repositories.
+ */
 
-export interface AccessTokenRepository {
-  create(id: string, tokenHash: string, params: CreateAccessTokenParams): Promise<void>;
-  findByTokenHash(tokenHash: string): Promise<AccessToken | null>;
-  updateLastUsedAt(tokenId: string): Promise<void>;
-  revoke(tokenId: string): Promise<void>;
-  listForUser(userId: string): Promise<AccessTokenListItem[]>;
+import { and, count, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { createDb, type Db } from "./db.js";
+import {
+  accessTokens,
+  deviceAuthorizations,
+  emailVerificationTokens,
+  passwordResetTokens,
+  webSessions,
+} from "./schema.js";
+
+export class AccessTokenRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async create(
+    id: string,
+    tokenHash: string,
+    params: CreateAccessTokenParams
+  ): Promise<void> {
+    await this.db.insert(accessTokens).values({
+      id,
+      userId: params.userId,
+      tokenHash,
+      name: params.name,
+      clientName: params.clientName ?? null,
+      createdAt: Date.now(),
+      expiresAt: params.expiresAt ?? null,
+    });
+  }
+
+  async findByTokenHash(tokenHash: string): Promise<AccessToken | null> {
+    const row = await this.db.query.accessTokens.findFirst({
+      where: eq(accessTokens.tokenHash, tokenHash),
+    });
+    return row ?? null;
+  }
+
+  async updateLastUsedAt(tokenId: string): Promise<void> {
+    await this.db
+      .update(accessTokens)
+      .set({ lastUsedAt: Date.now() })
+      .where(eq(accessTokens.id, tokenId));
+  }
+
+  async revoke(tokenId: string): Promise<void> {
+    await this.db
+      .update(accessTokens)
+      .set({ revokedAt: Date.now() })
+      .where(eq(accessTokens.id, tokenId));
+  }
+
+  async listForUser(userId: string): Promise<AccessTokenListItem[]> {
+    const rows = await this.db.query.accessTokens.findMany({
+      where: and(eq(accessTokens.userId, userId), isNull(accessTokens.revokedAt)),
+      orderBy: [desc(accessTokens.createdAt)],
+    });
+
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      clientName: row.clientName,
+      createdAt: row.createdAt,
+      lastUsedAt: row.lastUsedAt,
+    }));
+  }
 }
 
-export interface WebSessionRepository {
-  create(session: Omit<WebSession, "lastSeenAt">): Promise<void>;
-  findByTokenHash(sessionTokenHash: string): Promise<WebSession | null>;
-  updateLastSeenAt(sessionId: string): Promise<void>;
-  delete(sessionId: string): Promise<void>;
-  deleteAllForUser(userId: string): Promise<void>;
+export class WebSessionRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async create(session: Omit<WebSession, "lastSeenAt">): Promise<void> {
+    await this.db.insert(webSessions).values({
+      id: session.id,
+      userId: session.userId,
+      sessionTokenHash: session.sessionTokenHash,
+      csrfTokenHash: session.csrfTokenHash,
+      expiresAt: session.expiresAt,
+      createdAt: session.createdAt,
+    });
+  }
+
+  async findByTokenHash(sessionTokenHash: string): Promise<WebSession | null> {
+    const row = await this.db.query.webSessions.findFirst({
+      where: eq(webSessions.sessionTokenHash, sessionTokenHash),
+    });
+    return row ?? null;
+  }
+
+  async updateLastSeenAt(sessionId: string): Promise<void> {
+    await this.db
+      .update(webSessions)
+      .set({ lastSeenAt: Date.now() })
+      .where(eq(webSessions.id, sessionId));
+  }
+
+  async delete(sessionId: string): Promise<void> {
+    await this.db.delete(webSessions).where(eq(webSessions.id, sessionId));
+  }
+
+  async deleteAllForUser(userId: string): Promise<void> {
+    await this.db.delete(webSessions).where(eq(webSessions.userId, userId));
+  }
 }
 
-export interface EmailVerificationTokenRepository {
-  create(id: string, tokenHash: string, userId: string, expiresAt: number): Promise<void>;
-  findByTokenHash(tokenHash: string): Promise<EmailVerificationToken | null>;
-  consume(tokenId: string): Promise<void>;
-  invalidateAllForUser(userId: string): Promise<void>;
+export class EmailVerificationTokenRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async create(
+    id: string,
+    tokenHash: string,
+    userId: string,
+    expiresAt: number
+  ): Promise<void> {
+    await this.db.insert(emailVerificationTokens).values({
+      id,
+      userId,
+      tokenHash,
+      expiresAt,
+      createdAt: Date.now(),
+    });
+  }
+
+  async findByTokenHash(tokenHash: string): Promise<EmailVerificationToken | null> {
+    const row = await this.db.query.emailVerificationTokens.findFirst({
+      where: eq(emailVerificationTokens.tokenHash, tokenHash),
+    });
+    return row ?? null;
+  }
+
+  async consume(tokenId: string): Promise<void> {
+    await this.db
+      .update(emailVerificationTokens)
+      .set({ consumedAt: Date.now() })
+      .where(eq(emailVerificationTokens.id, tokenId));
+  }
+
+  async invalidateAllForUser(userId: string): Promise<void> {
+    await this.db
+      .update(emailVerificationTokens)
+      .set({ consumedAt: Date.now() })
+      .where(
+        and(
+          eq(emailVerificationTokens.userId, userId),
+          isNull(emailVerificationTokens.consumedAt)
+        )
+      );
+  }
 }
 
-export interface PasswordResetTokenRepository {
-  create(id: string, tokenHash: string, userId: string, expiresAt: number): Promise<void>;
-  findByTokenHash(tokenHash: string): Promise<PasswordResetToken | null>;
-  consume(tokenId: string): Promise<void>;
-  invalidateAllForUser(userId: string): Promise<void>;
+export class PasswordResetTokenRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async create(
+    id: string,
+    tokenHash: string,
+    userId: string,
+    expiresAt: number
+  ): Promise<void> {
+    await this.db.insert(passwordResetTokens).values({
+      id,
+      userId,
+      tokenHash,
+      expiresAt,
+      createdAt: Date.now(),
+    });
+  }
+
+  async findByTokenHash(tokenHash: string): Promise<PasswordResetToken | null> {
+    const row = await this.db.query.passwordResetTokens.findFirst({
+      where: eq(passwordResetTokens.tokenHash, tokenHash),
+    });
+    return row ?? null;
+  }
+
+  async consume(tokenId: string): Promise<void> {
+    await this.db
+      .update(passwordResetTokens)
+      .set({ consumedAt: Date.now() })
+      .where(eq(passwordResetTokens.id, tokenId));
+  }
+
+  async invalidateAllForUser(userId: string): Promise<void> {
+    await this.db
+      .update(passwordResetTokens)
+      .set({ consumedAt: Date.now() })
+      .where(
+        and(
+          eq(passwordResetTokens.userId, userId),
+          isNull(passwordResetTokens.consumedAt)
+        )
+      );
+  }
 }
 
-export interface DeviceAuthorizationRepository {
-  create(deviceCode: string, userCode: string, clientName: string, oauthStateHash: string, expiresAt: number): Promise<void>;
-  findByOAuthStateHash(oauthStateHash: string): Promise<DeviceAuthorization | null>;
-  findByUserCode(userCode: string): Promise<DeviceAuthorization | null>;
-  findByDeviceCode(deviceCode: string): Promise<DeviceAuthorization | null>;
-  updateStatus(deviceCode: string, status: DeviceAuthorizationStatus): Promise<void>;
-  approve(deviceCode: string, userId: string, accessTokenId: string, accessTokenPlaintext: string): Promise<void>;
-  markTokenRetrieved(deviceCode: string): Promise<void>;
-  cleanupExpired(beforeTimestamp: number): Promise<number>;
+export class DeviceAuthorizationRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async create(
+    deviceCode: string,
+    userCode: string,
+    clientName: string,
+    oauthStateHash: string,
+    expiresAt: number
+  ): Promise<void> {
+    await this.db.insert(deviceAuthorizations).values({
+      deviceCode,
+      userCode,
+      clientName,
+      status: "pending",
+      expiresAt,
+      createdAt: Date.now(),
+      oauthStateHash,
+    });
+  }
+
+  async findByOAuthStateHash(oauthStateHash: string): Promise<DeviceAuthorization | null> {
+    const row = await this.db.query.deviceAuthorizations.findFirst({
+      where: eq(deviceAuthorizations.oauthStateHash, oauthStateHash),
+    });
+    return row ?? null;
+  }
+
+  async findByUserCode(userCode: string): Promise<DeviceAuthorization | null> {
+    const row = await this.db.query.deviceAuthorizations.findFirst({
+      where: eq(deviceAuthorizations.userCode, userCode),
+    });
+    return row ?? null;
+  }
+
+  async findByDeviceCode(deviceCode: string): Promise<DeviceAuthorization | null> {
+    const row = await this.db.query.deviceAuthorizations.findFirst({
+      where: eq(deviceAuthorizations.deviceCode, deviceCode),
+    });
+    return row ?? null;
+  }
+
+  async updateStatus(deviceCode: string, status: DeviceAuthorizationStatus): Promise<void> {
+    await this.db
+      .update(deviceAuthorizations)
+      .set({ status })
+      .where(eq(deviceAuthorizations.deviceCode, deviceCode));
+  }
+
+  async approve(
+    deviceCode: string,
+    userId: string,
+    accessTokenId: string,
+    accessTokenPlaintext: string
+  ): Promise<void> {
+    await this.db
+      .update(deviceAuthorizations)
+      .set({
+        userId,
+        accessTokenId,
+        accessTokenPlaintext,
+        status: "approved",
+        approvedAt: Date.now(),
+      })
+      .where(eq(deviceAuthorizations.deviceCode, deviceCode));
+  }
+
+  async markTokenRetrieved(deviceCode: string): Promise<void> {
+    await this.db
+      .update(deviceAuthorizations)
+      .set({
+        accessTokenPlaintext: null,
+        tokenRetrievedAt: Date.now(),
+      })
+      .where(eq(deviceAuthorizations.deviceCode, deviceCode));
+  }
+
+  async cleanupExpired(beforeTimestamp: number): Promise<number> {
+    const rows = await this.db
+      .select({ value: count() })
+      .from(deviceAuthorizations)
+      .where(
+        and(
+          lt(deviceAuthorizations.expiresAt, beforeTimestamp),
+          inArray(deviceAuthorizations.status, ["pending", "expired"])
+        )
+      );
+    const deleted = rows[0]?.value ?? 0;
+
+    await this.db
+      .delete(deviceAuthorizations)
+      .where(
+        and(
+          lt(deviceAuthorizations.expiresAt, beforeTimestamp),
+          inArray(deviceAuthorizations.status, ["pending", "expired"])
+        )
+      );
+
+    return deleted;
+  }
 }
