@@ -4,6 +4,36 @@ import readline from "node:readline";
 
 const keyGaps = [
   {
+    label: "Chat route to workflow wake",
+    from: "chat.route.start",
+    to: "chat.workflow.woke",
+    note: "Large gap suggests request parse, session lookup, enqueue, workflow create, or wake overhead before async execution begins.",
+  },
+  {
+    label: "New session model resolve",
+    from: "chat.auth.context_created",
+    to: "chat.model.resolved",
+    note: "Large gap suggests model connection lookup or Secret Broker/provider credential resolution overhead.",
+  },
+  {
+    label: "Session poll event query",
+    from: "session.poll.start",
+    to: "session.poll.events_loaded",
+    note: "Large gap suggests session lookup or event cursor query overhead on polling.",
+  },
+  {
+    label: "Session poll message snapshot",
+    from: "session.poll.messages_decided",
+    to: "session.poll.messages_loaded",
+    note: "Large gap suggests full workflow snapshot load overhead during polling.",
+  },
+  {
+    label: "Session poll response",
+    from: "session.poll.start",
+    to: "session.poll.response",
+    note: "Large gap suggests poll response assembly or serialization overhead.",
+  },
+  {
     label: "Workflow startup",
     from: "workflow.run.start",
     to: "workflow.mark_active.done",

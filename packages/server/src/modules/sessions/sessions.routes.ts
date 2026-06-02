@@ -18,6 +18,7 @@ import { badRequest, json, notFound, serverError } from "../../http/responses.js
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
+import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
 
@@ -166,6 +167,7 @@ export async function handleGetSession(
   env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
+  const routeStart = timingStart();
   const sessions = new SessionRepository(env.DB);
   const eventsRepo = new SessionEventRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
@@ -173,8 +175,20 @@ export async function handleGetSession(
   const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
+    logTiming(env, sessionId, "session.poll.start", undefined, {
+      workspaceId: effectiveWorkspaceId,
+      since: url.searchParams.get("since") ?? undefined,
+      includeMessages: url.searchParams.get("includeMessages") ?? undefined,
+    });
+
     // Find session scoped to workspace
+    const lookupStart = timingStart();
     let sessionState = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+    logTiming(env, sessionId, "session.poll.lookup", lookupStart, {
+      workspaceId: effectiveWorkspaceId,
+      found: Boolean(sessionState),
+      status: sessionState?.status,
+    });
 
     if (!sessionState) {
       return notFound("Session");
@@ -190,26 +204,40 @@ export async function handleGetSession(
         errorMessage: "Session timed out - processing took too long. Try closing this session and starting a new one.",
         updatedAt: Date.now(),
       };
+      const recoveryStart = timingStart();
       await sessions.save(updatedSession);
+      logTiming(env, sessionId, "session.poll.timeout_recovered", recoveryStart, {
+        workspaceId: effectiveWorkspaceId,
+      });
       sessionState = updatedSession;
     }
 
     const sinceCursor = url.searchParams.get("since");
+    const eventsStart = timingStart();
     const { events, nextCursor } = await eventsRepo.listSince(
       sessionId,
       sinceCursor || undefined,
       100
     );
+    logTiming(env, sessionId, "session.poll.events_loaded", eventsStart, {
+      workspaceId: effectiveWorkspaceId,
+      since: sinceCursor || undefined,
+      eventCount: events.length,
+      nextCursor,
+    });
 
     const includeMessages = url.searchParams.get("includeMessages");
     const shouldIncludeMessages = includeMessages === "auto"
       ? events.some((event) => event.type === "message_end") || sessionState.status === "idle" || sessionState.status === "error"
       : includeMessages !== "0" && includeMessages !== "false";
+    logTiming(env, sessionId, "session.poll.messages_decided", undefined, {
+      workspaceId: effectiveWorkspaceId,
+      includeMessages: includeMessages ?? undefined,
+      shouldIncludeMessages,
+    });
 
     const workflowSession = shouldIncludeMessages
-      ? await runtime.getWorkflowSession(sessionId) as
-        | { messages?: import("../../types.js").AgentMessage[] }
-        | null
+      ? await loadWorkflowSessionForPoll(env, sessionId, runtime)
       : null;
 
     const response: SessionResponse = {
@@ -226,6 +254,20 @@ export async function handleGetSession(
       response.messages = workflowSession?.messages ?? [];
     }
 
+    logSessionPollResponseSize(env, sessionId, response, {
+      workspaceId: effectiveWorkspaceId,
+      shouldIncludeMessages,
+      eventCount: events.length,
+      messageCount: response.messages?.length,
+      status: sessionState.status,
+    });
+    logTiming(env, sessionId, "session.poll.response", routeStart, {
+      workspaceId: effectiveWorkspaceId,
+      status: 200,
+      shouldIncludeMessages,
+      eventCount: events.length,
+      messageCount: response.messages?.length,
+    });
     return json(response);
   } catch (error) {
     logger.error("Session poll failed", error, {
@@ -236,6 +278,35 @@ export async function handleGetSession(
     });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }
+}
+
+async function loadWorkflowSessionForPoll(
+  env: Env,
+  sessionId: string,
+  runtime: SessionRuntimeRepository,
+): Promise<{ messages?: import("../../types.js").AgentMessage[] } | null> {
+  const messagesStart = timingStart();
+  const workflowSession = await runtime.getWorkflowSession(sessionId) as
+    | { messages?: import("../../types.js").AgentMessage[] }
+    | null;
+  logTiming(env, sessionId, "session.poll.messages_loaded", messagesStart, {
+    messageCount: workflowSession?.messages?.length ?? 0,
+  });
+  return workflowSession;
+}
+
+function logSessionPollResponseSize(
+  env: Env,
+  sessionId: string,
+  response: SessionResponse,
+  details: Record<string, unknown>,
+): void {
+  if (!isTimingEnabled(env)) return;
+
+  logTiming(env, sessionId, "session.poll.response_serialized", undefined, {
+    ...details,
+    responseBytes: JSON.stringify(response).length,
+  });
 }
 
 /**
