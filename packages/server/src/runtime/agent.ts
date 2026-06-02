@@ -227,6 +227,170 @@ export class Agent {
     this.convertToLlm = config.convertToLlm ?? defaultConvertToLlm;
   }
 
+  static completeTurn(session: AgentSessionState): CompleteTurnResult {
+    const turn = latestTurn(session);
+    if (!turn) throw new Error("Cannot complete turn without active turn");
+
+    const remainingToolCalls = unsatisfiedToolCalls(session);
+    if (remainingToolCalls.length > 0) {
+      return {
+        session,
+        events: [],
+        completedTurnIndex: turn.index,
+        shouldContinue: false,
+        shouldStop: false,
+      };
+    }
+
+    const toolResults = session.messages.filter(
+      (message): message is ToolResultMessage =>
+        message.role === "toolResult" && turn.toolCallIds.includes(message.toolCallId),
+    );
+
+    const events: AgentEvent[] = [
+      {
+        type: "turn_end",
+        message: turn.assistantMessage ?? session.messages.at(-1)!,
+        toolResults,
+      },
+    ];
+
+    let nextSession: AgentSessionState = {
+      ...session,
+      updatedAt: now(),
+      turns: session.turns.map((candidate) =>
+        candidate.id === turn.id
+          ? { ...turn, status: turn.status === "error" ? "error" : "complete" }
+          : candidate,
+      ),
+    };
+
+    if (turn.status === "error" || nextSession.status === "error") {
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: false,
+        shouldStop: true,
+      };
+    }
+
+    if (toolResults.length > 0) {
+      nextSession = {
+        ...nextSession,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    const steering = drainQueue(nextSession.steeringQueue, nextSession.steeringMode);
+    if (steering.drained.length > 0) {
+      nextSession = {
+        ...nextSession,
+        messages: [...nextSession.messages, ...steering.drained],
+        steeringQueue: steering.remaining,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    const followUp = drainQueue(nextSession.followUpQueue, nextSession.followUpMode);
+    if (followUp.drained.length > 0) {
+      nextSession = {
+        ...nextSession,
+        messages: [...nextSession.messages, ...followUp.drained],
+        followUpQueue: followUp.remaining,
+        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
+      };
+      return {
+        session: nextSession,
+        events,
+        completedTurnIndex: turn.index,
+        shouldContinue: true,
+        shouldStop: false,
+      };
+    }
+
+    events.push({ type: "agent_end", messages: [] });
+    nextSession = { ...nextSession, status: "idle" };
+
+    return {
+      session: nextSession,
+      events,
+      completedTurnIndex: turn.index,
+      shouldContinue: false,
+      shouldStop: true,
+    };
+  }
+
+  static determineNextStep(session: AgentSessionState): NextStepInfo | undefined {
+    // Only actively running sessions have workflow work to do.
+    if (session.status !== "running") {
+      return undefined;
+    }
+
+    // Check for pending tool calls first
+    const pending = unsatisfiedToolCalls(session);
+    if (pending.length > 0) {
+      const toolCall = pending[0]!;
+      return {
+        type: "tool",
+        stepId: `tool-${toolCall.id}`,
+        displayName: `Running ${toolCall.name}`,
+        toolCallId: toolCall.id,
+      };
+    }
+
+    const turn = latestTurn(session);
+    if (!turn) {
+      // No turn yet - need assistant step
+      return {
+        type: "assistant",
+        stepId: "assistant",
+        displayName: "Assistant response",
+      };
+    }
+
+    // Handle turn states
+    if (turn.status === "awaiting_assistant") {
+      return {
+        type: "assistant",
+        stepId: `turn-${turn.index}-assistant`,
+        displayName: `Turn ${turn.index}: Assistant`,
+      };
+    }
+
+    if (turn.status === "awaiting_tools") {
+      return {
+        type: "complete",
+        stepId: `turn-${turn.index}-complete`,
+        displayName: `Turn ${turn.index}: Complete`,
+      };
+    }
+
+    if (turn.status === "complete") {
+      return {
+        type: "complete",
+        stepId: `turn-${turn.index}-complete`,
+        displayName: `Turn ${turn.index}: Complete`,
+      };
+    }
+
+    return undefined;
+  }
+
   enqueuePrompt(session: AgentSessionState, prompt: string | AgentMessage): AgentStepResult {
     const message = typeof prompt === "string" ? textMessage(prompt) : prompt;
     const turn = createEmptyTurn(nextTurnIndex(session));
@@ -538,111 +702,7 @@ export class Agent {
   }
 
   completeTurn(session: AgentSessionState): CompleteTurnResult {
-    const turn = latestTurn(session);
-    if (!turn) throw new Error("Cannot complete turn without active turn");
-
-    const remainingToolCalls = unsatisfiedToolCalls(session);
-    if (remainingToolCalls.length > 0) {
-      return {
-        session,
-        events: [],
-        completedTurnIndex: turn.index,
-        shouldContinue: false,
-        shouldStop: false,
-      };
-    }
-
-    const toolResults = session.messages.filter(
-      (message): message is ToolResultMessage =>
-        message.role === "toolResult" && turn.toolCallIds.includes(message.toolCallId),
-    );
-
-    const events: AgentEvent[] = [
-      {
-        type: "turn_end",
-        message: turn.assistantMessage ?? session.messages.at(-1)!,
-        toolResults,
-      },
-    ];
-
-    let nextSession: AgentSessionState = {
-      ...session,
-      updatedAt: now(),
-      turns: session.turns.map((candidate) =>
-        candidate.id === turn.id
-          ? { ...turn, status: turn.status === "error" ? "error" : "complete" }
-          : candidate,
-      ),
-    };
-
-    if (turn.status === "error" || nextSession.status === "error") {
-      return {
-        session: nextSession,
-        events,
-        completedTurnIndex: turn.index,
-        shouldContinue: false,
-        shouldStop: true,
-      };
-    }
-
-    if (toolResults.length > 0) {
-      nextSession = {
-        ...nextSession,
-        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
-      };
-      return {
-        session: nextSession,
-        events,
-        completedTurnIndex: turn.index,
-        shouldContinue: true,
-        shouldStop: false,
-      };
-    }
-
-    const steering = drainQueue(nextSession.steeringQueue, nextSession.steeringMode);
-    if (steering.drained.length > 0) {
-      nextSession = {
-        ...nextSession,
-        messages: [...nextSession.messages, ...steering.drained],
-        steeringQueue: steering.remaining,
-        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
-      };
-      return {
-        session: nextSession,
-        events,
-        completedTurnIndex: turn.index,
-        shouldContinue: true,
-        shouldStop: false,
-      };
-    }
-
-    const followUp = drainQueue(nextSession.followUpQueue, nextSession.followUpMode);
-    if (followUp.drained.length > 0) {
-      nextSession = {
-        ...nextSession,
-        messages: [...nextSession.messages, ...followUp.drained],
-        followUpQueue: followUp.remaining,
-        turns: [...nextSession.turns, createEmptyTurn(turn.index + 1)],
-      };
-      return {
-        session: nextSession,
-        events,
-        completedTurnIndex: turn.index,
-        shouldContinue: true,
-        shouldStop: false,
-      };
-    }
-
-    events.push({ type: "agent_end", messages: [] });
-    nextSession = { ...nextSession, status: "idle" };
-
-    return {
-      session: nextSession,
-      events,
-      completedTurnIndex: turn.index,
-      shouldContinue: false,
-      shouldStop: true,
-    };
+    return Agent.completeTurn(session);
   }
 
   pendingToolCalls(session: AgentSessionState): AgentToolCallState[] {
@@ -654,59 +714,7 @@ export class Agent {
    * Returns undefined if the agent is done (idle or error state).
    */
   determineNextStep(session: AgentSessionState): NextStepInfo | undefined {
-    // Only actively running sessions have workflow work to do.
-    if (session.status !== "running") {
-      return undefined;
-    }
-
-    // Check for pending tool calls first
-    const pending = unsatisfiedToolCalls(session);
-    if (pending.length > 0) {
-      const toolCall = pending[0]!;
-      return {
-        type: "tool",
-        stepId: `tool-${toolCall.id}`,
-        displayName: `Running ${toolCall.name}`,
-        toolCallId: toolCall.id,
-      };
-    }
-
-    const turn = latestTurn(session);
-    if (!turn) {
-      // No turn yet - need assistant step
-      return {
-        type: "assistant",
-        stepId: "assistant",
-        displayName: "Assistant response",
-      };
-    }
-
-    // Handle turn states
-    if (turn.status === "awaiting_assistant") {
-      return {
-        type: "assistant",
-        stepId: `turn-${turn.index}-assistant`,
-        displayName: `Turn ${turn.index}: Assistant`,
-      };
-    }
-
-    if (turn.status === "awaiting_tools") {
-      return {
-        type: "complete",
-        stepId: `turn-${turn.index}-complete`,
-        displayName: `Turn ${turn.index}: Complete`,
-      };
-    }
-
-    if (turn.status === "complete") {
-      return {
-        type: "complete",
-        stepId: `turn-${turn.index}-complete`,
-        displayName: `Turn ${turn.index}: Complete`,
-      };
-    }
-
-    return undefined;
+    return Agent.determineNextStep(session);
   }
 
   /**

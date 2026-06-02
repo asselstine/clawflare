@@ -1289,7 +1289,7 @@ export class ClawflareTUIApp {
       // Only treat idle as complete if we've seen evidence of processing
       // (new events, message count increased, or status was processing)
       const hasNewEvents = update.newEvents.length > 0;
-      const hasMoreMessages = update.session.messages.length > this.pendingMessageCount;
+      const hasMoreMessages = (update.session.messages?.length ?? this.messages.length) > this.pendingMessageCount;
       const safeToComplete = this.sawProcessingStatus || hasNewEvents || hasMoreMessages;
       
       // Defensive: don't accept idle until we've seen evidence this submit was processed
@@ -1297,17 +1297,19 @@ export class ClawflareTUIApp {
       
       // Update messages (conversation history)
       // If we have a pending optimistic message, check if server caught up
-      const serverMessages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
-      
-      if (this.pendingUserMessage && !this.messagesHaveUserMessage(serverMessages, this.pendingUserMessage)) {
-        // Server hasn't caught up yet - show server messages + our pending message
-        this.messages = [...serverMessages, this.pendingUserMessage];
-      } else {
-        // Server is caught up or no pending message - use server messages directly
-        if (this.pendingUserMessage) {
-          this.pendingUserMessage = null; // Successfully reconciled
+      if (update.session.messages) {
+        const serverMessages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
+
+        if (this.pendingUserMessage && !this.messagesHaveUserMessage(serverMessages, this.pendingUserMessage)) {
+          // Server hasn't caught up yet - show server messages + our pending message
+          this.messages = [...serverMessages, this.pendingUserMessage];
+        } else {
+          // Server is caught up or no pending message - use server messages directly
+          if (this.pendingUserMessage) {
+            this.pendingUserMessage = null; // Successfully reconciled
+          }
+          this.messages = serverMessages;
         }
-        this.messages = serverMessages;
       }
       
       // Update events for progress display
@@ -1414,7 +1416,7 @@ export class ClawflareTUIApp {
     this.sessionId = session.id;
     this.client.setCurrentSessionId(session.id);
     this.sessionName = session.name || "new";
-    this.messages = session.messages.map((message) => this.formatMessageForDisplay(message));
+    this.messages = (session.messages ?? []).map((message) => this.formatMessageForDisplay(message));
     this.agentEvents = session.events;
     this.pendingUserMessage = null;
     this.lastUsage = null;

@@ -219,9 +219,23 @@ export class AgentClient {
   }
 
   // Get current session state (poll for updates)
-  async getSession(sessionId: string, eventCursor?: string): Promise<SessionResponse> {
+  async getSession(
+    sessionId: string,
+    eventCursor?: string,
+    options: { includeMessages?: boolean | "auto" } = {},
+  ): Promise<SessionResponse> {
     const query = new URLSearchParams();
     if (eventCursor) query.set("since", eventCursor);
+    if (options.includeMessages !== undefined) {
+      query.set(
+        "includeMessages",
+        options.includeMessages === "auto"
+          ? "auto"
+          : options.includeMessages
+            ? "1"
+            : "0",
+      );
+    }
 
     const path = `/v1/session/${sessionId}${query.toString() ? `?${query.toString()}` : ""}`;
     return this.requestJson<SessionResponse>(path);
@@ -250,7 +264,7 @@ export class AgentClient {
     for (let poll = 0; poll < maxPolls; poll++) {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
-      const session = await this.getSession(sessionId, cursor);
+      const session = await this.getSession(sessionId, cursor, { includeMessages: "auto" });
       
       const newEvents = session.events;
       const sessionComplete = session.status === "idle" || session.status === "error";

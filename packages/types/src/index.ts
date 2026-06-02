@@ -39,7 +39,7 @@ export interface SessionResponse {
   workspaceId: string;
   name?: string;
   status: SessionStatus;
-  messages: AgentMessage[];
+  messages?: AgentMessage[];
   events: SessionEvent[];
   nextEventCursor: string;
   errorMessage?: string;

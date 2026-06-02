@@ -54,12 +54,12 @@ describe("AgentClient", () => {
       expect(updates.map((update) => (update as { complete: boolean }).complete)).toEqual([false, true]);
       expect(mockFetch).toHaveBeenNthCalledWith(
         1,
-        "https://localhost/v1/session/session-id?since=0",
+        "https://localhost/v1/session/session-id?since=0&includeMessages=auto",
         expect.any(Object)
       );
       expect(mockFetch).toHaveBeenNthCalledWith(
         2,
-        "https://localhost/v1/session/session-id?since=100",
+        "https://localhost/v1/session/session-id?since=100&includeMessages=auto",
         expect.any(Object)
       );
     });

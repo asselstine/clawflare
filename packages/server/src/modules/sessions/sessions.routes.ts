@@ -201,20 +201,30 @@ export async function handleGetSession(
       100
     );
 
-    const workflowSession = await runtime.getWorkflowSession(sessionId) as
-      | { messages?: import("../../types.js").AgentMessage[] }
-      | null;
+    const includeMessages = url.searchParams.get("includeMessages");
+    const shouldIncludeMessages = includeMessages === "auto"
+      ? events.some((event) => event.type === "message_end") || sessionState.status === "idle" || sessionState.status === "error"
+      : includeMessages !== "0" && includeMessages !== "false";
+
+    const workflowSession = shouldIncludeMessages
+      ? await runtime.getWorkflowSession(sessionId) as
+        | { messages?: import("../../types.js").AgentMessage[] }
+        | null
+      : null;
 
     const response: SessionResponse = {
       id: sessionState.id,
       name: sessionState.name,
       status: sessionState.status,
-      messages: workflowSession?.messages ?? [],
       events,
       nextEventCursor: nextCursor,
       errorMessage: sessionState.errorMessage,
       workspaceId: sessionState.workspaceId,
     };
+
+    if (shouldIncludeMessages) {
+      response.messages = workflowSession?.messages ?? [];
+    }
 
     return json(response);
   } catch (error) {

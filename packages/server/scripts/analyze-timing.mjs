@@ -4,7 +4,58 @@ import readline from "node:readline";
 
 const keyGaps = [
   {
-    label: "Workflow scheduling/start",
+    label: "Workflow startup",
+    from: "workflow.run.start",
+    to: "workflow.mark_active.done",
+    note: "Large gap suggests workflow initialization or D1 runtime activation delay.",
+  },
+  {
+    label: "Input dequeue",
+    from: "workflow.mark_active.done",
+    to: "workflow.input.dequeued",
+    note: "Large gap suggests queue access or workflow wake delay before input is visible.",
+  },
+  {
+    label: "Prompt enqueue",
+    from: "workflow.prompt.start",
+    to: "workflow.prompt.enqueued",
+    note: "Large gap suggests session load, agent context setup, or prompt enqueue overhead.",
+  },
+  {
+    label: "Agent step setup",
+    from: "workflow.agent_step.start",
+    to: "workflow.agent.created",
+    note: "Large gap suggests model/secret/tool setup before the step can run.",
+  },
+  {
+    label: "Provider stream creation",
+    from: "agent.assistant.stream.create.start",
+    to: "agent.assistant.stream.created",
+    note: "Large gap suggests provider request setup latency.",
+  },
+  {
+    label: "Provider first event",
+    from: "agent.assistant.stream.created",
+    to: "agent.assistant.stream.first_event",
+    note: "Large gap suggests provider/model first-token latency.",
+  },
+  {
+    label: "Session save",
+    from: "workflow.agent_step.ran",
+    to: "workflow.session.saved",
+    note: "Large gap suggests full snapshot serialization or D1 write overhead.",
+  },
+  {
+    label: "Prompt finalize",
+    from: "workflow.prompt.finalizing",
+    to: "workflow.prompt.finalized",
+    note: "Large gap suggests final metadata/cursor persistence overhead.",
+  },
+];
+
+const legacyKeyGaps = [
+  {
+    label: "Legacy workflow scheduling/start",
     from: "chat.workflow.create.returned",
     to: "workflow.run.start",
     note: "Large gap suggests delay before Workflow.run begins.",
@@ -115,6 +166,26 @@ function printSession(sessionId, events) {
     console.log(`  - ${gapDef.label}: ${formatMs(gap.durationMs)}${marker}`);
     if (gap.durationMs >= 3_000) {
       console.log(`    ${gapDef.note}`);
+    }
+  }
+
+  const hasLegacyEvents = legacyKeyGaps.some((gapDef) =>
+    sorted.some((event) => event.phase === gapDef.from || event.phase === gapDef.to)
+  );
+  if (hasLegacyEvents) {
+    console.log("\nLegacy key gaps:");
+    for (const gapDef of legacyKeyGaps) {
+      const gap = findGap(sorted, gapDef.from, gapDef.to);
+      if (!gap) {
+        console.log(`  - ${gapDef.label}: missing ${gapDef.from} -> ${gapDef.to}`);
+        continue;
+      }
+
+      const marker = gap.durationMs >= 10_000 ? " ⚠" : gap.durationMs >= 3_000 ? " ◔" : "";
+      console.log(`  - ${gapDef.label}: ${formatMs(gap.durationMs)}${marker}`);
+      if (gap.durationMs >= 3_000) {
+        console.log(`    ${gapDef.note}`);
+      }
     }
   }
 

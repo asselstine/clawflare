@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleGetSession } from "../../../src/modules/sessions/sessions.routes.js";
 import type { RequestContext } from "../../../src/http/request-context.js";
 import type { Env } from "../../../src/internal-types/index.js";
@@ -45,6 +45,10 @@ function createRequestContext(): RequestContext {
 }
 
 describe("handleGetSession timeout recovery", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("returns the recovered error status in the same poll response", async () => {
     mocks.findByIdInWorkspace.mockResolvedValue({
       id: "session-1",
@@ -72,5 +76,35 @@ describe("handleGetSession timeout recovery", () => {
     expect(data.status).toBe("error");
     expect(data.errorMessage).toContain("Session timed out");
     expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ status: "error" }));
+  });
+
+  it("can skip loading full messages for incremental polls without message events", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "workflow-1",
+      status: "processing",
+      nextEventCursor: "1",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.listSince.mockResolvedValue({
+      events: [{ type: "tool_execution_update", timestamp: Date.now(), sequence: 2 }],
+      nextCursor: "2",
+    });
+
+    const response = await handleGetSession(
+      "session-1",
+      new URL("https://example.com/v1/session/session-1?since=1&includeMessages=auto"),
+      {} as Env,
+      createRequestContext(),
+    );
+
+    const data = (await response.json()) as { messages?: unknown[]; events: unknown[] };
+
+    expect(response.status).toBe(200);
+    expect(data.messages).toBeUndefined();
+    expect(data.events).toHaveLength(1);
+    expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
   });
 });
