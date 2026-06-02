@@ -416,6 +416,7 @@ export class Agent {
     }
 
     const events: AgentEvent[] = [];
+    const pendingEventAppends: Promise<void>[] = [];
     const tool = this.toolsByName.get(toolCall.name);
     const toolStepStart = now();
     this.config.debugTiming?.("tool.start", undefined, {
@@ -429,6 +430,7 @@ export class Agent {
       toolName: toolCall.name,
       args: toolCall.args,
     });
+    await this.config.onEvent?.(events[events.length - 1]!);
 
     let result: AgentToolResult<unknown>;
     let isError = false;
@@ -453,13 +455,16 @@ export class Agent {
 
         const executeStart = now();
         result = await tool.execute(toolCall.id, validatedArgs as never, signal, (partialResult) => {
-          events.push({
+          const event: AgentEvent = {
             type: "tool_execution_update",
             toolCallId: toolCall.id,
             toolName: toolCall.name,
             args: toolCall.args,
             partialResult,
-          });
+          };
+          events.push(event);
+          const append = this.config.onEvent?.(event);
+          if (append) pendingEventAppends.push(Promise.resolve(append));
         });
         isError = isErroredToolResult(result);
         this.config.debugTiming?.("tool.execute.done", executeStart, {
@@ -483,6 +488,9 @@ export class Agent {
       toolName: toolCall.name,
       isError,
     });
+    if (pendingEventAppends.length > 0) {
+      await Promise.all(pendingEventAppends);
+    }
 
     events.push({
       type: "tool_execution_end",
@@ -491,10 +499,15 @@ export class Agent {
       result,
       isError,
     });
+    await this.config.onEvent?.(events[events.length - 1]!);
 
     const toolResultMessage = createToolResultMessage(toolCall, result, isError);
-    events.push({ type: "message_start", message: toolResultMessage });
-    events.push({ type: "message_end", message: toolResultMessage });
+    const messageStartEvent: AgentEvent = { type: "message_start", message: toolResultMessage };
+    events.push(messageStartEvent);
+    await this.config.onEvent?.(messageStartEvent);
+    const messageEndEvent: AgentEvent = { type: "message_end", message: toolResultMessage };
+    events.push(messageEndEvent);
+    await this.config.onEvent?.(messageEndEvent);
 
     const turn = latestTurn(session);
     const nextTurn = turn

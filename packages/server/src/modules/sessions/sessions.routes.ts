@@ -3,6 +3,7 @@ import type { AppBindings } from "../../http/app-bindings.js";
 import { requireAuth } from "../../middleware/auth.js";
 import type { Env } from "../../internal-types/index.js";
 import {
+  ContainerContextRepository,
   InputQueueRepository,
   SessionEventRepository,
   SessionRepository,
@@ -11,6 +12,7 @@ import {
   type SessionListFilter,
   type SessionMetadataState,
 } from "../../data/index.js";
+import { destroyContainer } from "../tools/container/client.js";
 import type { ModelProvider } from "../../types.js";
 import { badRequest, json, notFound, serverError } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
@@ -33,6 +35,9 @@ sessionRoutes.post("/:id/name", (c) =>
 );
 sessionRoutes.post("/:id/close", (c) =>
   handleCloseSession(c.req.param("id"), c.env, c.get("requestContext")!)
+);
+sessionRoutes.post("/:id/kill", (c) =>
+  handleKillSession(c.req.param("id"), c.env, c.get("requestContext")!)
 );
 
 sessionsRoutes.use("*", requireAuth);
@@ -168,7 +173,7 @@ export async function handleGetSession(
 
   try {
     // Find session scoped to workspace
-    const sessionState = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+    let sessionState = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
 
     if (!sessionState) {
       return notFound("Session");
@@ -185,6 +190,7 @@ export async function handleGetSession(
         updatedAt: Date.now(),
       };
       await sessions.save(updatedSession);
+      sessionState = updatedSession;
     }
 
     const sinceCursor = url.searchParams.get("since");
@@ -310,6 +316,103 @@ export async function handleCloseSession(
     logger.error("Session close failed", error, {
       handler: "handleCloseSession",
       route: "POST /v1/session/:id/close",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+type WorkflowTerminalStatus = "errored" | "terminated" | "complete";
+
+function isTerminalWorkflowStatus(status: string): status is WorkflowTerminalStatus {
+  return status === "errored" || status === "terminated" || status === "complete";
+}
+
+/**
+ * Force-kill a session by terminating its workflow and destroying owned containers.
+ */
+export async function handleKillSession(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const sessions = new SessionRepository(env.DB);
+  const runtime = new SessionRuntimeRepository(env.DB);
+  const events = new SessionEventRepository(env.DB);
+  const containerContexts = new ContainerContextRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  try {
+    const session = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+
+    if (!session) {
+      return notFound("Session");
+    }
+
+    const errors: string[] = [];
+    let workflowStatusBefore: string | undefined;
+    let workflowTerminated = false;
+
+    if (session.workflowId) {
+      try {
+        const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
+        const status = await workflowInstance.status();
+        workflowStatusBefore = status.status;
+        if (!isTerminalWorkflowStatus(status.status)) {
+          await workflowInstance.terminate();
+          workflowTerminated = true;
+        }
+      } catch (error) {
+        errors.push(`Workflow: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const ownedContainers = await containerContexts.listForSession(effectiveWorkspaceId, sessionId);
+    const destroyedContainers: string[] = [];
+
+    for (const container of ownedContainers) {
+      try {
+        await destroyContainer(env, container.containerId);
+        destroyedContainers.push(container.containerId);
+      } catch (error) {
+        errors.push(
+          `Container ${container.containerId}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        await containerContexts.deleteForSession(
+          effectiveWorkspaceId,
+          sessionId,
+          container.containerId
+        );
+      }
+    }
+
+    await events.append(sessionId, [
+      {
+        type: "error",
+        timestamp: Date.now(),
+        errorMessage: "Session killed by user.",
+      },
+    ]);
+    await sessions.markClosed(sessionId, "user");
+    await runtime.setActive(sessionId, false);
+
+    return json({
+      ok: errors.length === 0,
+      sessionId,
+      status: "closed",
+      workspaceId: effectiveWorkspaceId,
+      workflowId: session.workflowId,
+      workflowStatusBefore,
+      workflowTerminated,
+      destroyedContainers,
+      errors,
+    });
+  } catch (error) {
+    logger.error("Session kill failed", error, {
+      handler: "handleKillSession",
+      route: "POST /v1/session/:id/kill",
       sessionId,
       workspaceId: effectiveWorkspaceId,
     });

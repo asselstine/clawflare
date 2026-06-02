@@ -12,6 +12,67 @@ describe("Agent", () => {
     maxTokens: 4096,
   } as Model<any>;
 
+  it("emits tool start through onEvent before the tool finishes", async () => {
+    let finishTool!: () => void;
+    const toolFinished = new Promise<void>((resolve) => {
+      finishTool = resolve;
+    });
+
+    const emitted: string[] = [];
+    const tool = {
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async () => {
+        await toolFinished;
+        return {
+          content: [{ type: "text", text: "ok" }],
+          details: { ok: true },
+        };
+      },
+    } satisfies AgentTool;
+
+    const agent = new Agent({
+      model,
+      systemPrompt: "",
+      tools: [tool],
+      onEvent: (event) => {
+        emitted.push(event.type);
+      },
+    });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const running = agent.runToolStep(session, "tool-1");
+    await Promise.resolve();
+
+    expect(emitted).toEqual(["tool_execution_start"]);
+
+    finishTool();
+    await running;
+
+    expect(emitted).toContain("tool_execution_end");
+  });
+
   it("persists tool results with details.ok false as errors", async () => {
     const tool = {
       name: "execute_code",

@@ -83,6 +83,18 @@ export interface CreateSessionResponse {
   };
 }
 
+export interface KillSessionResponse {
+  ok: boolean;
+  sessionId: string;
+  workspaceId: string;
+  status: "closed";
+  workflowId?: string;
+  workflowStatusBefore?: string;
+  workflowTerminated: boolean;
+  destroyedContainers: string[];
+  errors: string[];
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;

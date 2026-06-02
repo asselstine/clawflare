@@ -134,7 +134,8 @@ async function getSessionWorkspaceId(env: Env, sessionId: string): Promise<strin
 async function createWorkflowAgent(
   env: Env,
   ctx: ExecutionContext | undefined,
-  sessionId: string
+  sessionId: string,
+  onEvent?: (event: AgentEvent) => void | Promise<void>,
 ): Promise<Agent> {
   const componentsStart = timingStart();
   
@@ -173,6 +174,7 @@ async function createWorkflowAgent(
     streamFn,
     getApiKey: () => components.getApiKey(),
     debugTiming: (phase, startedAt, details) => logTiming(env, sessionId, `agent.${phase}`, startedAt, details),
+    onEvent,
   });
 }
 
@@ -441,7 +443,11 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
             });
             const runtime = new SessionRuntimeRepository(this.env.DB);
             const events = new SessionEventRepository(this.env.DB);
-            const agent = await createWorkflowAgent(this.env, this.ctx, sessionId);
+            const livePersistedEvents = new Set<AgentEvent>();
+            const agent = await createWorkflowAgent(this.env, this.ctx, sessionId, async (event) => {
+              livePersistedEvents.add(event);
+              await appendAgentEvents(this.env, events, sessionId, [event]);
+            });
             const result = await agent.runSingleStep(agentSession, currentStep);
             logTiming(this.env, sessionId, "workflow.agent_step.ran", stepStart, {
               stepType: currentStep.type,
@@ -459,7 +465,8 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
               messageCount: result.session.messages.length,
               turnCount: result.session.turns.length,
             });
-            await appendAgentEvents(this.env, events, sessionId, result.events);
+            const unpersistedEvents = result.events.filter((event) => !livePersistedEvents.has(event));
+            await appendAgentEvents(this.env, events, sessionId, unpersistedEvents);
 
             return {
               session: serializeForWorkflow(result.session),

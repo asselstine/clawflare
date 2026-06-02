@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { getPersistedToolResultIsError, getToolCallVisualState } from "../src/tui-app.js";
+import { describe, expect, it, vi } from "vitest";
+import { ClawflareTUIApp, getPersistedToolResultIsError, getToolCallVisualState } from "../src/tui-app.js";
 
 describe("getPersistedToolResultIsError", () => {
   it("treats persisted execution details with ok false as an error", () => {
@@ -27,5 +27,40 @@ describe("getToolCallVisualState", () => {
       hasError: true,
       isComplete: false,
     });
+  });
+});
+
+describe("ClawflareTUIApp", () => {
+  it("keeps prompt text visible instead of submitting while already polling", () => {
+    const client = {
+      getUrl: () => "https://example.com",
+      getServerInfo: vi.fn().mockResolvedValue({
+        contextWindow: 128000,
+        supportedProviders: [],
+        supportsWorkspaceModelConnections: true,
+        workspace: { hasModelConnections: true },
+      }),
+      createSession: vi.fn().mockResolvedValue({
+        id: "session-1",
+        workspaceId: "workspace-1",
+        eventCursor: "0",
+        createdAt: Date.now(),
+      }),
+      submitChat: vi.fn(),
+    };
+
+    const app = new ClawflareTUIApp(client as never);
+    const appInternals = app as unknown as {
+      isLoading: boolean;
+      editor: { setText(text: string): void };
+      sendPrompt(displayContent: string, actualContent: string): void;
+    };
+    const setText = vi.spyOn(appInternals.editor, "setText");
+    appInternals.isLoading = true;
+
+    appInternals.sendPrompt("next prompt", "next prompt");
+
+    expect(client.submitChat).not.toHaveBeenCalled();
+    expect(setText).toHaveBeenCalledWith("next prompt");
   });
 });

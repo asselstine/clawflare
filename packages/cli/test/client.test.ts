@@ -12,6 +12,59 @@ describe("AgentClient", () => {
     } as Response;
   }
 
+  describe("streamSession", () => {
+    it("keeps polling a completed session when the event page is full", async () => {
+      const fullPageEvents = Array.from({ length: 100 }, (_, index) => ({
+        type: "message",
+        timestamp: Date.now(),
+        sequence: index + 1,
+      }));
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({
+          id: "session-id",
+          workspaceId: "workspace-id",
+          status: "idle",
+          messages: [],
+          events: fullPageEvents,
+          nextEventCursor: "100",
+        }))
+        .mockResolvedValueOnce(createMockResponse({
+          id: "session-id",
+          workspaceId: "workspace-id",
+          status: "idle",
+          messages: [],
+          events: [{
+            type: "message",
+            timestamp: Date.now(),
+            sequence: 101,
+          }],
+          nextEventCursor: "101",
+        }));
+
+      global.fetch = mockFetch;
+
+      const client = new AgentClient("https://localhost", "test-token");
+      const updates: unknown[] = [];
+
+      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0" })) {
+        updates.push(update);
+      }
+
+      expect(updates).toHaveLength(2);
+      expect(updates.map((update) => (update as { complete: boolean }).complete)).toEqual([false, true]);
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        "https://localhost/v1/session/session-id?since=0",
+        expect.any(Object)
+      );
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
+        "https://localhost/v1/session/session-id?since=100",
+        expect.any(Object)
+      );
+    });
+  });
+
   describe("createSession", () => {
     it("should create a new session via POST /v1/session", async () => {
       const mockFetch = vi.fn().mockResolvedValue(
@@ -113,6 +166,42 @@ describe("AgentClient", () => {
       const client = new AgentClient("https://localhost", "test-token");
       
       await expect(client.warmupSession()).resolves.toBeUndefined();
+    });
+  });
+
+  describe("killSession", () => {
+    it("should kill a session via POST /v1/session/:id/kill", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        createMockResponse({
+          ok: true,
+          sessionId: "session-id",
+          workspaceId: "workspace-id",
+          status: "closed",
+          workflowId: "workflow-id",
+          workflowStatusBefore: "running",
+          workflowTerminated: true,
+          destroyedContainers: ["container-id"],
+          errors: [],
+        })
+      );
+
+      global.fetch = mockFetch;
+
+      const client = new AgentClient("https://localhost", "test-token");
+      const result = await client.killSession("session-id");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://localhost/v1/session/session-id/kill",
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+            "Content-Type": "application/json",
+          }),
+        })
+      );
+      expect(result.workflowTerminated).toBe(true);
+      expect(result.destroyedContainers).toEqual(["container-id"]);
     });
   });
 });

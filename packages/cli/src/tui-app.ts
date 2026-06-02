@@ -81,6 +81,7 @@ const slashCommands = [
   { name: "fork", description: "Fork the current context" },
   { name: "sessions", description: "Show recent sessions" },
   { name: "open", description: "Open an existing session" },
+  { name: "kill", description: "Terminate a session workflow and containers" },
   { name: "name", description: "Name the current session" },
   { name: "tools", description: "List available tools" },
   { name: "models", description: "Select workspace default model" },
@@ -1102,7 +1103,11 @@ export class ClawflareTUIApp {
 
   private sendPrompt(displayContent: string, actualContent: string): void {
     // Don't allow new messages while loading
-    if (this.isLoading) return;
+    if (this.isLoading) {
+      this.editor.setText(displayContent);
+      this.setStatus("Still processing previous prompt (Esc to abort)", "yellow");
+      return;
+    }
 
     // Clear editor
     this.editor.setText("");
@@ -1395,6 +1400,50 @@ export class ClawflareTUIApp {
           }
           break;
 
+        case "kill": {
+          this.setStatus("Killing session...", "yellow");
+          try {
+            const targetSessionId = args.trim()
+              ? await this.resolveSessionIdForOpen(args)
+              : this.sessionId;
+            if (!targetSessionId) {
+              throw new Error("Usage: /kill [session-id]");
+            }
+
+            const killed = await this.client.killSession(targetSessionId);
+            const killedCurrentSession = targetSessionId === this.sessionId;
+            if (killedCurrentSession && this.abortController) {
+              this.abortController.abort();
+              this.abortController = null;
+              this.isLoading = false;
+              this.pendingUserMessage = null;
+              this.pendingMessageCount = 0;
+              this.sawProcessingStatus = false;
+              this.agentEvents = [];
+            }
+
+            const details = [
+              `Session ${killed.sessionId.slice(0, 8)} killed.`,
+              killed.workflowTerminated ? "Workflow terminated." : "Workflow was not running.",
+              killed.destroyedContainers.length > 0
+                ? `Destroyed containers: ${killed.destroyedContainers.join(", ")}`
+                : "No containers to destroy.",
+              ...killed.errors.map((error) => `Error: ${error}`),
+            ];
+            this.messages.push({
+              role: killed.ok ? "assistant" : "error",
+              content: details.join("\n"),
+            });
+            this.renderMessages();
+            this.setStatus(killed.ok ? "Session killed" : "Session killed with errors", killed.ok ? "green" : "red");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Failed to kill session";
+            this.renderMessages();
+            this.setStatus(`Error: ${this.error}`, "red");
+          }
+          break;
+        }
+
         case "name":
           if (!args) {
             this.error = "Usage: /name <session-name>";
@@ -1487,6 +1536,7 @@ export class ClawflareTUIApp {
 /fork - Fork the current context
 /sessions [status] - Show recent sessions
 /open <session-id> - Open an existing session
+/kill [session-id] - Terminate a session workflow and containers
 /name <name> - Name the current session
 /tools - List available tools
 /models - Show available model connections

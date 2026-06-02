@@ -14,6 +14,7 @@ export type {
   SessionListResponse,
   CreateSessionRequest,
   CreateSessionResponse,
+  KillSessionResponse,
   ToolDefinition,
   ModelProvider,
   ModelConnection,

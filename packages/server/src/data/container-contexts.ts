@@ -88,6 +88,16 @@ export class ContainerContextRepository {
     return row ? mapContainerContext(row) : null;
   }
 
+  async listForSession(workspaceId: string, sessionId: string): Promise<ContainerContext[]> {
+    const rows = await this.db.query.containerContexts.findMany({
+      where: and(
+        eq(containerContexts.workspaceId, workspaceId),
+        eq(containerContexts.sessionId, sessionId)
+      ),
+    });
+    return rows.map(mapContainerContext);
+  }
+
   async deleteForSession(workspaceId: string, sessionId: string, containerId: string): Promise<void> {
     await this.db
       .delete(containerContexts)

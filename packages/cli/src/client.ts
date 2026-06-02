@@ -22,6 +22,7 @@ import type {
   UpdateModelConnectionRequest,
   CreateSessionRequest,
   CreateSessionResponse,
+  KillSessionResponse,
   ProviderInfo,
   ProviderListResponse,
   ProviderModelInfo,
@@ -46,6 +47,7 @@ export type {
   UpdateModelConnectionRequest,
   CreateSessionRequest,
   CreateSessionResponse,
+  KillSessionResponse,
   ProviderInfo,
   ProviderListResponse,
   ProviderModelInfo,
@@ -91,6 +93,8 @@ export interface ServerInfo {
     hasModelConnections: boolean;
   };
 }
+
+const SESSION_EVENT_PAGE_SIZE = 100;
 
 export class AgentClient {
   private url: string;
@@ -190,6 +194,13 @@ export class AgentClient {
     );
   }
 
+  async killSession(sessionId: string): Promise<KillSessionResponse> {
+    return this.requestJson<KillSessionResponse>(
+      `/v1/session/${sessionId}/kill`,
+      { method: "POST" }
+    );
+  }
+
   // List sessions - optional status filter ("active", "idle", "closed", "expired", "error")
   async listSessions(options?: { status?: string; sessionId?: string }): Promise<SessionListResponse> {
     const query = new URLSearchParams();
@@ -235,7 +246,9 @@ export class AgentClient {
       const session = await this.getSession(sessionId, cursor);
       
       const newEvents = session.events;
-      const complete = session.status === "idle" || session.status === "error";
+      const sessionComplete = session.status === "idle" || session.status === "error";
+      const mayHaveMoreEvents = sessionComplete && newEvents.length >= SESSION_EVENT_PAGE_SIZE;
+      const complete = sessionComplete && !mayHaveMoreEvents;
       
       if (options.debug) {
         console.log(`[streamSession] poll=${poll} status=${session.status} events=${newEvents.length} complete=${complete} cursor=${cursor ?? "0"}`);
@@ -243,6 +256,8 @@ export class AgentClient {
       
       yield { session, newEvents, complete };
       
+      cursor = session.nextEventCursor;
+
       if (complete) {
         if (options.debug) {
           console.log(`[streamSession] polling complete - status=${session.status}`);
@@ -250,7 +265,6 @@ export class AgentClient {
         return;
       }
       
-      cursor = session.nextEventCursor;
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
