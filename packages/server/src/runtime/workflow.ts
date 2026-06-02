@@ -11,6 +11,7 @@ import {
 } from "../data/index.js";
 import { Agent, createEmptyAgentSession, type AgentSessionState, type NextStepInfo } from "./agent.js";
 import { buildAgentComponents, buildAgentComponentsFromResolved, type BuildAgentComponentsResult } from "./agent-config.js";
+import { LiveAgentEventPersister } from "./live-event-persister.js";
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
 import { createTools } from "../modules/tools/tools.service.js";
 import { logTiming, timingStart } from "../lib/timing.js";
@@ -471,7 +472,9 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
             });
             const runtime = new SessionRuntimeRepository(this.env.DB);
             const events = new SessionEventRepository(this.env.DB);
-            const livePersistedEvents = new Set<AgentEvent>();
+            const liveEvents = new LiveAgentEventPersister((agentEvents) =>
+              appendAgentEvents(this.env, events, sessionId, agentEvents)
+            );
             const result = currentStep.type === "complete"
               ? (() => {
                   const completeResult = Agent.completeTurn(agentSession);
@@ -486,10 +489,13 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
                 })()
               : await (async () => {
                   const agentContext = await createWorkflowAgentContext(this.env, sessionId);
-                  const agent = await createWorkflowAgent(this.env, this.ctx, sessionId, async (event) => {
-                    livePersistedEvents.add(event);
-                    await appendAgentEvents(this.env, events, sessionId, [event]);
-                  }, agentContext);
+                  const agent = await createWorkflowAgent(
+                    this.env,
+                    this.ctx,
+                    sessionId,
+                    (event) => liveEvents.onEvent(event),
+                    agentContext,
+                  );
                   return agent.runSingleStep(agentSession, currentStep);
                 })();
             logTiming(this.env, sessionId, "workflow.agent_step.ran", stepStart, {
@@ -508,7 +514,8 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
               messageCount: result.session.messages.length,
               turnCount: result.session.turns.length,
             });
-            const unpersistedEvents = result.events.filter((event) => !livePersistedEvents.has(event));
+            await liveEvents.flushUpdates();
+            const unpersistedEvents = result.events.filter((event) => !liveEvents.hasHandled(event));
             await appendAgentEvents(this.env, events, sessionId, unpersistedEvents);
 
             return {
