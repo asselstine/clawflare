@@ -13,6 +13,7 @@ import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } f
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
+import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
 
 export const chatRoutes = new Hono<AppBindings>();
@@ -51,9 +52,23 @@ export async function handleChat(
   requestContext: RequestContext
 ): Promise<Response> {
   let sessionIdVar: string | undefined;
+  const routeStart = timingStart();
+  const workspaceId = requestContext.workspace.id;
+
+  logTiming(env, undefined, "chat.route.start", undefined, {
+    workspaceId,
+    hasAuthContext: Boolean(requestContext.user.id),
+  });
 
   try {
+    const parseStart = timingStart();
     const body = (await request.json()) as ChatRequest;
+    logTiming(env, body.sessionId, "chat.request.parsed", parseStart, {
+      workspaceId,
+      hasSessionId: Boolean(body.sessionId),
+      hasModelConnectionId: body.modelConnectionId !== undefined,
+      contentLength: typeof body.content === "string" ? body.content.length : undefined,
+    });
 
     const content = body.content;
     if (!content) {
@@ -63,13 +78,19 @@ export async function handleChat(
     const maxTurns = body.maxTurns;
     const sessionId = body.sessionId ?? crypto.randomUUID();
     sessionIdVar = sessionId;
-    const workspaceId = requestContext.workspace.id;
 
     const sessions = new SessionRepository(env.DB);
+    const lookupStart = timingStart();
     const existingSession = body.sessionId
       ? await sessions.findByIdInWorkspace(workspaceId, body.sessionId)
       : null;
+    logTiming(env, sessionId, "chat.session.lookup", lookupStart, {
+      workspaceId,
+      requestedExistingSession: Boolean(body.sessionId),
+      found: Boolean(existingSession),
+    });
 
+    let response: Response;
     if (existingSession) {
       // Check if trying to change model on existing session
       if (body.modelConnectionId !== undefined) {
@@ -79,9 +100,9 @@ export async function handleChat(
           );
         }
       }
-      return handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession);
+      response = await handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession);
     } else {
-      return handleNewSession(
+      response = await handleNewSession(
         env,
         sessionId,
         workspaceId,
@@ -91,6 +112,13 @@ export async function handleChat(
         requestContext
       );
     }
+
+    logTiming(env, sessionId, "chat.route.response", routeStart, {
+      workspaceId,
+      status: response.status,
+      responseBytes: response.headers.get("content-length") ?? undefined,
+    });
+    return response;
   } catch (error) {
     logger.error("Chat request failed", error, {
       handler: "handleChat",
@@ -129,14 +157,22 @@ async function handleExistingSession(
   // Mark session as processing BEFORE returning
   existingSession.status = "processing";
   existingSession.updatedAt = Date.now();
+  const processingStart = timingStart();
   await sessions.save(existingSession);
+  logTiming(env, sessionId, "chat.session.processing_saved", processingStart, { workspaceId });
 
   // Queue the event first (for ordering guarantees)
+  const enqueueStart = timingStart();
   const enqueueResult = await inputQueue.enqueue(sessionId, {
     type: "prompt",
     content,
     maxTurns,
   } as SessionInputEvent);
+  logTiming(env, sessionId, "chat.input.enqueued", enqueueStart, {
+    workspaceId,
+    ok: enqueueResult.ok,
+    queued: enqueueResult.queued,
+  });
 
   if (!enqueueResult.ok) {
     return tooManyRequests(enqueueResult.error || "Queue full", {
@@ -145,15 +181,19 @@ async function handleExistingSession(
   }
 
   // Send a wake event to trigger the workflow to consume the durable queue
+  const wakeStart = timingStart();
   await withWorkflowInstance(env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
     return workflowInstance.sendEvent({
       type: "session-input",
       payload: { type: "wake" },
     });
   });
+  logTiming(env, sessionId, "chat.workflow.woke", wakeStart, { workspaceId, workflowId });
 
   // Get fresh event cursor
+  const cursorStart = timingStart();
   const freshEventCursor = await events.latestCursor(sessionId);
+  logTiming(env, sessionId, "chat.event_cursor.loaded", cursorStart, { workspaceId });
 
   const response = {
     sessionId,
@@ -162,6 +202,7 @@ async function handleExistingSession(
     isNewSession: false,
   };
 
+  logChatResponseSize(env, sessionId, response, { workspaceId, isNewSession: false });
   return json(response);
 }
 
@@ -183,14 +224,23 @@ async function handleNewSession(
 
   // Create authorization context for this request
   const auth = createAuthSession(requestContext);
+  logTiming(env, sessionId, "chat.auth.context_created", undefined, { workspaceId });
 
   // Resolve model connection for the new session
+  const modelStart = timingStart();
   const resolvedModel = await resolveModelConnectionForNewSession(
     env,
     workspaceId,
     modelConnectionId,
     auth
   );
+  logTiming(env, sessionId, "chat.model.resolved", modelStart, {
+    workspaceId,
+    requestedModelConnectionId: modelConnectionId,
+    found: Boolean(resolvedModel),
+    provider: resolvedModel?.provider,
+    modelName: resolvedModel?.modelName,
+  });
 
   // If no model connection is configured, return 422 error immediately
   if (!resolvedModel) {
@@ -226,28 +276,40 @@ async function handleNewSession(
     modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
     modelName: resolvedModel?.modelName,
   };
+  const saveStart = timingStart();
   await sessions.save(initialState);
+  logTiming(env, sessionId, "chat.session.created", saveStart, { workspaceId, workflowId });
 
   // Queue the event before creating/waking the workflow
-  await inputQueue.enqueue(sessionId, {
+  const enqueueStart = timingStart();
+  const enqueueResult = await inputQueue.enqueue(sessionId, {
     type: "prompt",
     content,
     maxTurns,
   } as SessionInputEvent);
+  logTiming(env, sessionId, "chat.input.enqueued", enqueueStart, {
+    workspaceId,
+    ok: enqueueResult.ok,
+    queued: enqueueResult.queued,
+  });
 
   // Create persistent workflow after the initial input is queued
+  const createStart = timingStart();
   await createWorkflowInstance(env.AGENT_WORKFLOW, {
     id: workflowId,
     params: { sessionId },
   });
+  logTiming(env, sessionId, "chat.workflow.created", createStart, { workspaceId, workflowId });
 
   // Get workflow instance and wake it to consume the queued prompt
+  const wakeStart = timingStart();
   await withWorkflowInstance(env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
     return workflowInstance.sendEvent({
       type: "session-input",
       payload: { type: "wake" },
     });
   });
+  logTiming(env, sessionId, "chat.workflow.woke", wakeStart, { workspaceId, workflowId });
 
   const response: {
     sessionId: string;
@@ -271,5 +333,20 @@ async function handleNewSession(
     };
   }
 
+  logChatResponseSize(env, sessionId, response, { workspaceId, isNewSession: true });
   return json(response);
+}
+
+function logChatResponseSize(
+  env: Env,
+  sessionId: string,
+  response: unknown,
+  details: Record<string, unknown>,
+): void {
+  if (!isTimingEnabled(env)) return;
+
+  logTiming(env, sessionId, "chat.response.serialized", undefined, {
+    ...details,
+    responseBytes: JSON.stringify(response).length,
+  });
 }

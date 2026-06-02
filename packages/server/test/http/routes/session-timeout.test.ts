@@ -44,6 +44,12 @@ function createRequestContext(): RequestContext {
   };
 }
 
+function timingLogs(consoleSpy: ReturnType<typeof vi.spyOn>) {
+  return consoleSpy.mock.calls
+    .map((call) => JSON.parse(call[0] as string))
+    .filter((entry) => entry.source === "clawflare-timing");
+}
+
 describe("handleGetSession timeout recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -106,5 +112,57 @@ describe("handleGetSession timeout recovery", () => {
     expect(data.messages).toBeUndefined();
     expect(data.events).toHaveLength(1);
     expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
+  });
+
+  it("logs poll timings and response size without loading skipped messages", async () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      mocks.findByIdInWorkspace.mockResolvedValue({
+        id: "session-1",
+        workspaceId: "workspace-1",
+        workflowId: "workflow-1",
+        status: "processing",
+        nextEventCursor: "1",
+        updatedAt: Date.now(),
+        maxQueueSize: 100,
+      });
+      mocks.listSince.mockResolvedValue({
+        events: [{ type: "tool_execution_update", timestamp: Date.now(), sequence: 2 }],
+        nextCursor: "2",
+      });
+
+      const response = await handleGetSession(
+        "session-1",
+        new URL("https://example.com/v1/session/session-1?since=1&includeMessages=auto"),
+        { CLAWFLARE_DEBUG_TIMING: "true" } as Env,
+        createRequestContext(),
+      );
+
+      expect(response.status).toBe(200);
+      const logs = timingLogs(consoleSpy);
+      const phases = logs.map((entry) => entry.phase);
+
+      expect(phases).toEqual(expect.arrayContaining([
+        "session.poll.start",
+        "session.poll.lookup",
+        "session.poll.events_loaded",
+        "session.poll.messages_decided",
+        "session.poll.response_serialized",
+        "session.poll.response",
+      ]));
+      expect(phases).not.toContain("session.poll.messages_loaded");
+      expect(logs.find((entry) => entry.phase === "session.poll.events_loaded")).toMatchObject({
+        sessionId: "session-1",
+        workspaceId: "workspace-1",
+        eventCount: 1,
+        nextCursor: "2",
+      });
+      expect(logs.find((entry) => entry.phase === "session.poll.response_serialized")?.responseBytes).toEqual(
+        expect.any(Number),
+      );
+      expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
+    } finally {
+      consoleSpy.mockRestore();
+    }
   });
 });
