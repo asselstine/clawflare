@@ -1,5 +1,7 @@
 # Clawflare
 
+<!-- Edited by agent -->
+
 [![npm version](https://img.shields.io/npm/v/clawflare.svg)](https://www.npmjs.com/package/clawflare)
 
 An agent harness that runs on Cloudflare infrastructure.
