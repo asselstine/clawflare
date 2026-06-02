@@ -84,6 +84,10 @@ function serializeForWorkflow(value: unknown): JsonValue {
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
+function deserializeForWorkflow(serializedJson: string): JsonValue {
+  return JSON.parse(serializedJson) as JsonValue;
+}
+
 async function runWorkflowStep<T>(
   step: WorkflowStep,
   name: string,
@@ -439,16 +443,19 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         });
 
         const saveStart = timingStart();
-        await runtime.saveWorkflowSession(sessionId, result.session);
+        const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);
         logTiming(this.env, sessionId, "workflow.session.saved", saveStart, {
           status: result.session.status,
           messageCount: result.session.messages.length,
           turnCount: result.session.turns.length,
+          serializedBytes: savedSession.serializedBytes,
+          written: savedSession.written,
+          skippedUnchanged: savedSession.skippedUnchanged,
         });
         await appendAgentEvents(this.env, events, sessionId, result.events);
 
         return {
-          session: serializeForWorkflow(result.session),
+          session: deserializeForWorkflow(savedSession.serializedJson),
           nextStep: serializeForWorkflow(nextStep),
         };
       });
@@ -502,17 +509,20 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
             });
 
             const saveStart = timingStart();
-            await runtime.saveWorkflowSession(sessionId, result.session);
+            const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);
             logTiming(this.env, sessionId, "workflow.session.saved", saveStart, {
               status: result.session.status,
               messageCount: result.session.messages.length,
               turnCount: result.session.turns.length,
+              serializedBytes: savedSession.serializedBytes,
+              written: savedSession.written,
+              skippedUnchanged: savedSession.skippedUnchanged,
             });
             const unpersistedEvents = result.events.filter((event) => !livePersistedEvents.has(event));
             await appendAgentEvents(this.env, events, sessionId, unpersistedEvents);
 
             return {
-              session: serializeForWorkflow(result.session),
+              session: deserializeForWorkflow(savedSession.serializedJson),
               nextStep: serializeForWorkflow(result.nextStep ?? null),
             };
           },
@@ -538,10 +548,15 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
               errorMessage: message,
             };
 
-            await runtime.saveWorkflowSession(sessionId, erroredSession);
+            const savedSession = await runtime.saveWorkflowSession(sessionId, erroredSession);
             await appendErrorEvent(events, sessionId, message);
-            logTiming(this.env, sessionId, "workflow.max_turns_saved", limitStart, { maxTurns });
-            return serializeForWorkflow(erroredSession);
+            logTiming(this.env, sessionId, "workflow.max_turns_saved", limitStart, {
+              maxTurns,
+              serializedBytes: savedSession.serializedBytes,
+              written: savedSession.written,
+              skippedUnchanged: savedSession.skippedUnchanged,
+            });
+            return deserializeForWorkflow(savedSession.serializedJson);
           });
 
           agentSession = requireAgentSessionState(limited);

@@ -9,6 +9,35 @@ import { createDb, type Db } from "./db.js";
 import { sessions, sessionRuntime } from "./schema.js";
 import { eq } from "drizzle-orm";
 
+export interface SerializedSaveResult {
+  serializedJson: string;
+  serializedBytes: number;
+  written: boolean;
+  skippedUnchanged: boolean;
+}
+
+function serializedSize(json: string): number {
+  return new TextEncoder().encode(json).byteLength;
+}
+
+function unchangedSave(serializedJson: string): SerializedSaveResult {
+  return {
+    serializedJson,
+    serializedBytes: serializedSize(serializedJson),
+    written: false,
+    skippedUnchanged: true,
+  };
+}
+
+function writtenSave(serializedJson: string): SerializedSaveResult {
+  return {
+    serializedJson,
+    serializedBytes: serializedSize(serializedJson),
+    written: true,
+    skippedUnchanged: false,
+  };
+}
+
 export class SessionRuntimeRepository {
   private readonly db: Db;
 
@@ -70,10 +99,18 @@ export class SessionRuntimeRepository {
   async saveWorkflowSession(
     sessionId: string,
     session: unknown
-  ): Promise<void> {
+  ): Promise<SerializedSaveResult> {
     const now = Date.now();
 
     const workflowSessionJson = JSON.stringify(session);
+    const existing = await this.db.query.sessionRuntime.findFirst({
+      columns: { workflowSessionJson: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+    if (existing?.workflowSessionJson === workflowSessionJson) {
+      return unchangedSave(workflowSessionJson);
+    }
+
     await this.db
       .insert(sessionRuntime)
       .values({ sessionId, workflowSessionJson, updatedAt: now })
@@ -81,6 +118,7 @@ export class SessionRuntimeRepository {
         target: sessionRuntime.sessionId,
         set: { workflowSessionJson, updatedAt: now },
       });
+    return writtenSave(workflowSessionJson);
   }
 
   async getSnapshot(sessionId: string): Promise<unknown | null> {
@@ -94,10 +132,18 @@ export class SessionRuntimeRepository {
       : null;
   }
 
-  async saveSnapshot(sessionId: string, snapshot: unknown): Promise<void> {
+  async saveSnapshot(sessionId: string, snapshot: unknown): Promise<SerializedSaveResult> {
     const now = Date.now();
 
     const snapshotJson = JSON.stringify(snapshot);
+    const existing = await this.db.query.sessionRuntime.findFirst({
+      columns: { snapshotJson: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+    if (existing?.snapshotJson === snapshotJson) {
+      return unchangedSave(snapshotJson);
+    }
+
     await this.db
       .insert(sessionRuntime)
       .values({ sessionId, snapshotJson, updatedAt: now })
@@ -105,6 +151,7 @@ export class SessionRuntimeRepository {
         target: sessionRuntime.sessionId,
         set: { snapshotJson, updatedAt: now },
       });
+    return writtenSave(snapshotJson);
   }
 }
 
@@ -117,10 +164,18 @@ export class SnapshotRepository {
     this.db = "query" in db ? db : createDb(db);
   }
 
-  async save(sessionId: string, snapshot: unknown): Promise<void> {
+  async save(sessionId: string, snapshot: unknown): Promise<SerializedSaveResult> {
     const now = Date.now();
 
     const snapshotJson = JSON.stringify(snapshot);
+    const existing = await this.db.query.sessionRuntime.findFirst({
+      columns: { snapshotJson: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+    if (existing?.snapshotJson === snapshotJson) {
+      return unchangedSave(snapshotJson);
+    }
+
     await this.db
       .insert(sessionRuntime)
       .values({ sessionId, snapshotJson, updatedAt: now })
@@ -128,6 +183,7 @@ export class SnapshotRepository {
         target: sessionRuntime.sessionId,
         set: { snapshotJson, updatedAt: now },
       });
+    return writtenSave(snapshotJson);
   }
 
   async get(sessionId: string): Promise<unknown | null> {
