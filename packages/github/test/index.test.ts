@@ -12,6 +12,7 @@ import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
 describe("github egress handler", () => {
   interface MockEnv {
     GITHUB_TOKEN?: string;
+    GITHUB_USERNAME?: string;
     GITHUB_SMART_HTTP_EGRESS?: string;
     MOCK_AI?: string;
   }
@@ -238,6 +239,70 @@ describe("github egress handler", () => {
       expect(capturedRequest.headers.get("Accept")).toBe("application/x-git-upload-pack-advertisement");
       expect(capturedRequest.headers.get("User-Agent")).toBeNull();
       expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
+    });
+
+    it("should add Basic auth for native git smart HTTP clone and fetch requests", async () => {
+      const capturedRequest = await captureFetchRequest(
+        new Request(
+          "https://github.com/owner/repo.git/info/refs?service=git-upload-pack",
+          { headers: { Accept: "application/x-git-upload-pack-advertisement" } }
+        ),
+        { GITHUB_USERNAME: "octocat", GITHUB_TOKEN: "ghp_secret123" }
+      );
+
+      expect(capturedRequest.headers.get("Authorization")).toBe(`Basic ${btoa("octocat:ghp_secret123")}`);
+      expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
+    });
+
+    it("should add Basic auth for native git smart HTTP push requests", async () => {
+      const capturedRequest = await captureFetchRequest(
+        new Request(
+          "https://github.com/owner/repo.git/git-receive-pack",
+          {
+            method: "POST",
+            headers: { Accept: "application/x-git-receive-pack-result" },
+          }
+        ),
+        { GITHUB_USERNAME: "octocat", GITHUB_TOKEN: "ghp_secret123" }
+      );
+
+      expect(capturedRequest.headers.get("Authorization")).toBe(`Basic ${btoa("octocat:ghp_secret123")}`);
+    });
+
+    it("should override client-provided Authorization for native git smart HTTP", async () => {
+      const capturedRequest = await captureFetchRequest(
+        new Request(
+          "https://github.com/owner/repo.git/git-upload-pack",
+          {
+            method: "POST",
+            headers: {
+              Accept: "application/x-git-upload-pack-result",
+              Authorization: "Basic d3Jvbmc6Y3JlZGVudGlhbHM=",
+            },
+          }
+        ),
+        { GITHUB_USERNAME: "octocat", GITHUB_TOKEN: "ghp_secret123" }
+      );
+
+      expect(capturedRequest.headers.get("Authorization")).toBe(`Basic ${btoa("octocat:ghp_secret123")}`);
+    });
+
+    it("should remove client-provided Authorization from native git smart HTTP when configured credentials are incomplete", async () => {
+      const capturedRequest = await captureFetchRequest(
+        new Request(
+          "https://github.com/owner/repo.git/git-upload-pack",
+          {
+            method: "POST",
+            headers: {
+              Accept: "application/x-git-upload-pack-result",
+              Authorization: "Basic d3Jvbmc6Y3JlZGVudGlhbHM=",
+            },
+          }
+        ),
+        { GITHUB_TOKEN: "ghp_secret123" }
+      );
+
+      expect(capturedRequest.headers.get("Authorization")).toBeNull();
     });
 
     it("should remove browser-only headers from native git smart HTTP", async () => {

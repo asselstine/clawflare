@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
 import {
   handleConfigureEgressHandler,
+  handleDeleteEgressHandler,
   handleGetEgressHandler,
   handleListAvailableEgressHandlers,
   handleListEgressHandlers,
@@ -307,6 +308,81 @@ describe("egress handler routes", () => {
 
       expect(response.status).toBe(200);
       expect(data.egressHandlers.map((handler) => handler.egressHandlerId)).toContain("github");
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("deletes a configured egress handler and resets it to the built-in fallback", async () => {
+    const { db, dispose } = await createDb();
+    const ctx = createRequestContext();
+    await seedWorkspace(db, ctx);
+
+    try {
+      await handleConfigureEgressHandler(
+        new Request("https://example.com/v1/egress-handlers", {
+          method: "POST",
+          body: JSON.stringify({
+            egressHandlerId: "github",
+            secrets: { GITHUB_TOKEN: "ghp_secret" },
+            config: { GITHUB_USERNAME: "octocat" },
+            enabled: true,
+          }),
+        }),
+        { DB: db, SECRET_BROKER: createSecretBroker() } as Env,
+        ctx
+      );
+
+      const deleteResponse = await handleDeleteEgressHandler(
+        { DB: db, SECRET_BROKER: createSecretBroker() } as Env,
+        ctx,
+        "github"
+      );
+      const deleteData = (await deleteResponse.json()) as { ok: boolean; egressHandlerId: string };
+
+      expect(deleteResponse.status).toBe(200);
+      expect(deleteData).toEqual({ ok: true, egressHandlerId: "github" });
+
+      const enabledResponse = await handleListEgressHandlers(
+        { DB: db } as Env,
+        new URL("https://example.com/v1/egress-handlers"),
+        ctx
+      );
+      const enabledData = (await enabledResponse.json()) as {
+        egressHandlers: Array<{ egressHandlerId: string }>;
+      };
+      expect(enabledData.egressHandlers.map((handler) => handler.egressHandlerId)).not.toContain("github");
+
+      const fallbackResponse = await handleGetEgressHandler(
+        { DB: db } as Env,
+        ctx,
+        "github"
+      );
+      const fallbackData = (await fallbackResponse.json()) as {
+        egressHandler: { egressHandlerId: string; enabled: boolean; configuredSecrets: string[]; updatedAt: number };
+      };
+
+      expect(fallbackResponse.status).toBe(200);
+      expect(fallbackData.egressHandler.egressHandlerId).toBe("github");
+      expect(fallbackData.egressHandler.enabled).toBe(false);
+      expect(fallbackData.egressHandler.configuredSecrets).toEqual([]);
+      expect(fallbackData.egressHandler.updatedAt).toBe(0);
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("returns not found when deleting an unconfigured egress handler", async () => {
+    const { db, dispose } = await createDb();
+
+    try {
+      const response = await handleDeleteEgressHandler(
+        { DB: db, SECRET_BROKER: createSecretBroker() } as Env,
+        createRequestContext(),
+        "github"
+      );
+
+      expect(response.status).toBe(404);
     } finally {
       await dispose();
     }

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { ClawflareTUIApp, getPersistedToolResultIsError, getToolCallVisualState } from "../src/tui-app.js";
+import {
+  ClawflareTUIApp,
+  getPersistedToolResultIsError,
+  getToolCallVisualState,
+  shouldShowTrailingThinking,
+} from "../src/tui-app.js";
 
 describe("getPersistedToolResultIsError", () => {
   it("treats persisted execution details with ok false as an error", () => {
@@ -27,6 +32,29 @@ describe("getToolCallVisualState", () => {
       hasError: true,
       isComplete: false,
     });
+  });
+});
+
+describe("shouldShowTrailingThinking", () => {
+  it("shows thinking after the last tool result while loading", () => {
+    expect(shouldShowTrailingThinking(true, [
+      { role: "assistant", toolCalls: [{}] },
+      { role: "toolResult" },
+    ])).toBe(true);
+  });
+
+  it("does not show thinking while another tool call is still pending", () => {
+    expect(shouldShowTrailingThinking(true, [
+      { role: "assistant", toolCalls: [{}, {}] },
+      { role: "toolResult" },
+    ])).toBe(false);
+  });
+
+  it("does not show thinking when not loading", () => {
+    expect(shouldShowTrailingThinking(false, [
+      { role: "assistant", toolCalls: [{}] },
+      { role: "toolResult" },
+    ])).toBe(false);
   });
 });
 

@@ -22,6 +22,10 @@ const EGRESS_HANDLER_DEFINITIONS: EgressHandlerDefinition[] = [
     configSchema: {
       type: "object",
       properties: {
+        GITHUB_USERNAME: {
+          type: "string",
+          description: "GitHub username used with GITHUB_TOKEN for native Git smart-HTTP Basic authentication.",
+        },
         GITHUB_SMART_HTTP_EGRESS: {
           type: "string",
           enum: ["enabled", "disabled"],

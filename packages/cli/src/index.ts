@@ -20,6 +20,7 @@ import {
   egressDisableCommand,
   egressEnableCommand,
   egressListCommand,
+  egressRemoveCommand,
 } from "./commands/egress.js";
 
 function formatCliError(error: unknown): string {
@@ -177,6 +178,17 @@ program
       .option("-t, --token <token>", "API token for authentication")
       .action(async (egressHandlerId: string | undefined, options: { server?: string; token?: string }) => {
         await egressDisableCommand({ ...options, egressHandlerId });
+      })
+  )
+  .addCommand(
+    new Command("remove")
+      .alias("delete")
+      .description("Delete a configured egress handler and its stored secrets")
+      .argument("[egressHandlerId]", "Egress handler ID")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (egressHandlerId: string | undefined, options: { server?: string; token?: string }) => {
+        await egressRemoveCommand({ ...options, egressHandlerId });
       })
   );
 

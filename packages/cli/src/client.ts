@@ -94,6 +94,11 @@ export interface ServerInfo {
   };
 }
 
+interface DeleteEgressHandlerResponse {
+  ok: boolean;
+  egressHandlerId: string;
+}
+
 const SESSION_EVENT_PAGE_SIZE = 100;
 
 export class AgentClient {
@@ -384,6 +389,13 @@ export class AgentClient {
       }
     );
     return data.egressHandler;
+  }
+
+  async deleteEgressHandler(egressHandlerId: string): Promise<DeleteEgressHandlerResponse> {
+    return this.requestJson<DeleteEgressHandlerResponse>(
+      `/v1/egress-handlers/${encodeURIComponent(egressHandlerId)}`,
+      { method: "DELETE" }
+    );
   }
 
   // Debug endpoint - inspect DO storage

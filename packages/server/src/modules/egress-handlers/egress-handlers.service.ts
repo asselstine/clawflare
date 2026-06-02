@@ -176,6 +176,35 @@ export async function setEgressHandlerEnabled(
   return updated;
 }
 
+export async function deleteEgressHandler(
+  env: Env,
+  workspaceId: string,
+  egressHandlerId: string,
+  auth: AuthSession
+): Promise<void> {
+  const repo = new EgressHandlerRepository(env.DB);
+  const existing = await repo.getConfigured(workspaceId, egressHandlerId);
+  if (!existing) {
+    throw new Error("Egress handler not found");
+  }
+
+  const secretBroker = getSecretBrokerClient(env);
+  const deleteErrors: string[] = [];
+  for (const ref of Object.values(existing.secretRefs)) {
+    try {
+      await secretBroker.delete(auth, ref);
+    } catch (error) {
+      deleteErrors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  await repo.delete(workspaceId, egressHandlerId);
+
+  if (deleteErrors.length > 0) {
+    console.warn("[deleteEgressHandler] Failed to delete some secrets:", deleteErrors);
+  }
+}
+
 export async function resolveEgressHandler(
   env: Env,
   auth: AuthSession | undefined,

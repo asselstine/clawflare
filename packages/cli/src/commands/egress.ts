@@ -177,7 +177,9 @@ export async function egressListCommand(options: ListOptions): Promise<void> {
 async function selectConfiguredHandler(client: AgentClient, egressHandlerId?: string): Promise<string> {
   if (egressHandlerId) return egressHandlerId;
 
-  const handlers = await client.listEgressHandlers({ enabledOnly: false });
+  const handlers = (await client.listEgressHandlers({ enabledOnly: false })).filter(
+    (handler) => handler.updatedAt > 0
+  );
   if (handlers.length === 0) {
     console.error("No egress handlers configured.");
     process.exit(1);
@@ -205,4 +207,21 @@ export async function egressDisableCommand(options: ToggleOptions): Promise<void
   const egressHandlerId = await selectConfiguredHandler(client, options.egressHandlerId);
   const handler = await client.updateEgressHandler(egressHandlerId, { enabled: false });
   console.log(`Disabled egress handler "${handler.name}".`);
+}
+
+export async function egressRemoveCommand(options: ToggleOptions): Promise<void> {
+  const client = await getClient(options);
+  const egressHandlerId = await selectConfiguredHandler(client, options.egressHandlerId);
+  const confirmed = await confirm({
+    message: `Delete egress handler "${egressHandlerId}" and its stored secrets?`,
+    default: false,
+  });
+
+  if (!confirmed) {
+    console.log("Delete cancelled.");
+    return;
+  }
+
+  await client.deleteEgressHandler(egressHandlerId);
+  console.log(`Deleted egress handler "${egressHandlerId}".`);
 }

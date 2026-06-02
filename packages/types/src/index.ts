@@ -152,6 +152,11 @@ export interface EgressHandlerResponse {
   egressHandler: EgressHandlerInfo;
 }
 
+export interface DeleteEgressHandlerResponse {
+  ok: boolean;
+  egressHandlerId: string;
+}
+
 export interface ConfigureEgressHandlerRequest {
   egressHandlerId: string;
   secrets?: Record<string, string>;

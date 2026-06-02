@@ -15,6 +15,7 @@ export const metadata = {
 
 interface GithubEnv {
   GITHUB_TOKEN?: string;
+  GITHUB_USERNAME?: string;
   GITHUB_SMART_HTTP_EGRESS?: string;
   MOCK_AI?: string;
 }
@@ -99,6 +100,10 @@ function createOutboundRequest(request: Request, headers: Headers): Request {
   });
 }
 
+function createGithubSmartHttpAuthorization(username: string, token: string): string {
+  return `Basic ${btoa(`${username}:${token}`)}`;
+}
+
 const baseGithubHandler = defineHttpEgressHandler<GithubEnv>({
   name: metadata.name,
   description: metadata.description,
@@ -143,8 +148,12 @@ export const githubHandler = {
       headers.delete("Sec-Fetch-Mode");
       headers.delete("Sec-Fetch-Site");
       headers.delete("Sec-Fetch-User");
-      if (handlerEnv.GITHUB_TOKEN && !headers.has("Authorization")) {
-        headers.set("Authorization", `Bearer ${handlerEnv.GITHUB_TOKEN}`);
+      headers.delete("Authorization");
+      if (handlerEnv.GITHUB_USERNAME && handlerEnv.GITHUB_TOKEN) {
+        headers.set(
+          "Authorization",
+          createGithubSmartHttpAuthorization(handlerEnv.GITHUB_USERNAME, handlerEnv.GITHUB_TOKEN)
+        );
       }
     } else {
       decorateGithubHeaders(headers, request, context);

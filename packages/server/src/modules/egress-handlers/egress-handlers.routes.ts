@@ -9,6 +9,7 @@ import { logger } from "../../lib/logger.js";
 import type { AuthSession } from "../secrets/index.js";
 import {
   configureEgressHandler,
+  deleteEgressHandler,
   listAvailableEgressHandlers,
   redactEgressHandler,
   setEgressHandlerEnabled,
@@ -31,6 +32,9 @@ egressHandlersRoutes.get("/:egressHandlerId", (c) =>
 );
 egressHandlersRoutes.patch("/:egressHandlerId", (c) =>
   handleUpdateEgressHandler(c.req.raw, c.env, c.get("requestContext")!, c.req.param("egressHandlerId"))
+);
+egressHandlersRoutes.delete("/:egressHandlerId", (c) =>
+  handleDeleteEgressHandler(c.env, c.get("requestContext")!, c.req.param("egressHandlerId"))
 );
 
 function createAuthSession(ctx: RequestContext): AuthSession {
@@ -200,5 +204,34 @@ export async function handleUpdateEgressHandler(
       workspaceId: requestContext.workspace.id,
     });
     return badRequest(message);
+  }
+}
+
+export async function handleDeleteEgressHandler(
+  env: Env,
+  requestContext: RequestContext,
+  egressHandlerId: string
+): Promise<Response> {
+  try {
+    await deleteEgressHandler(
+      env,
+      requestContext.workspace.id,
+      egressHandlerId,
+      createAuthSession(requestContext)
+    );
+
+    return json({ ok: true, egressHandlerId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Egress handler not found")) {
+      return notFound("Egress handler");
+    }
+    logger.error("Delete egress handler failed", error, {
+      handler: "handleDeleteEgressHandler",
+      route: "DELETE /v1/egress-handlers/:egressHandlerId",
+      egressHandlerId,
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError(message);
   }
 }

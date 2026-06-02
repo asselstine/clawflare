@@ -170,6 +170,20 @@ export class EgressHandlerRepository {
     return null;
   }
 
+  async getConfigured(workspaceId: string, egressHandlerId: string): Promise<EgressHandlerMetadata | null> {
+    const row = await this.db.query.egressHandlers.findFirst({
+      where: and(eq(egressHandlers.workspaceId, workspaceId), eq(egressHandlers.egressHandlerId, egressHandlerId)),
+    });
+
+    return row ? mapEgressHandler(row) : null;
+  }
+
+  async delete(workspaceId: string, egressHandlerId: string): Promise<void> {
+    await this.db
+      .delete(egressHandlers)
+      .where(and(eq(egressHandlers.workspaceId, workspaceId), eq(egressHandlers.egressHandlerId, egressHandlerId)));
+  }
+
   async list(workspaceId: string, enabledOnly = false): Promise<EgressHandlerMetadata[]> {
     const rows = await this.db.query.egressHandlers.findMany({
       where: enabledOnly

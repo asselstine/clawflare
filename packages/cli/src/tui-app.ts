@@ -333,6 +333,32 @@ export function getToolCallVisualState(
   return { hasError, isComplete };
 }
 
+export function shouldShowTrailingThinking(
+  isLoading: boolean,
+  messages: Array<{ role: DisplayMessageRole; toolCalls?: unknown[] }>
+): boolean {
+  if (!isLoading || messages.at(-1)?.role !== "toolResult") return false;
+
+  let lastAssistantIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === "assistant") {
+      lastAssistantIndex = i;
+      break;
+    }
+  }
+  if (lastAssistantIndex === -1) return false;
+
+  const lastAssistant = messages[lastAssistantIndex];
+  const expectedToolResults = lastAssistant?.toolCalls?.length ?? 0;
+  if (expectedToolResults === 0) return false;
+
+  const followingToolResults = messages
+    .slice(lastAssistantIndex + 1)
+    .filter((message) => message.role === "toolResult").length;
+
+  return followingToolResults >= expectedToolResults;
+}
+
 interface ToolCallInfo {
   id: string;
   name: string;
@@ -887,6 +913,10 @@ export class ClawflareTUIApp {
 
     // Show thinking indicator when loading but no messages yet at all
     if (this.isLoading && this.messages.length === 0) {
+      this.renderThinkingIndicator("");
+    }
+
+    if (shouldShowTrailingThinking(this.isLoading, this.messages)) {
       this.renderThinkingIndicator("");
     }
 
