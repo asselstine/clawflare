@@ -69,7 +69,11 @@ function isNextStepInfo(value: unknown): value is NextStepInfo {
     (value.type === "assistant" || value.type === "tool" || value.type === "complete" || value.type === "finalize") &&
     typeof value.stepId === "string" &&
     typeof value.displayName === "string" &&
-    (value.toolCallId === undefined || typeof value.toolCallId === "string")
+    (value.toolCallId === undefined || typeof value.toolCallId === "string") &&
+    (
+      value.toolCallIds === undefined ||
+      (Array.isArray(value.toolCallIds) && value.toolCallIds.every((toolCallId) => typeof toolCallId === "string"))
+    )
   );
 }
 
@@ -476,6 +480,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
               stepId: currentStep.stepId,
               displayName: currentStep.displayName,
               toolCallId: currentStep.toolCallId,
+              toolCallIds: currentStep.toolCallIds,
             });
             const runtime = new SessionRuntimeRepository(this.env.DB);
             const events = new SessionEventRepository(this.env.DB);
