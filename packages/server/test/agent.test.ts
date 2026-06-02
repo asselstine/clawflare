@@ -114,6 +114,75 @@ describe("Agent", () => {
     expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
   });
 
+  it("runs multiple pending tool calls from the same turn in one parallel step", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const tool = {
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async (_toolCallId: string) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return {
+          content: [{ type: "text", text: _toolCallId }],
+          details: { ok: true },
+        };
+      },
+    } satisfies AgentTool;
+
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool] });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      status: "running" as const,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1", "tool-2"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+        "tool-2": {
+          id: "tool-2",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const step = agent.determineNextStep(session);
+
+    expect(step).toMatchObject({
+      type: "tool",
+      toolCallId: "tool-1",
+      toolCallIds: ["tool-1", "tool-2"],
+    });
+
+    const result = await agent.runSingleStep(session, step!);
+    const toolResults = result.session.messages.filter((message) => message.role === "toolResult");
+
+    expect(maxActive).toBe(2);
+    expect(toolResults.map((message) => message.toolCallId)).toEqual(["tool-1", "tool-2"]);
+    expect(result.session.turns[0]?.toolResultIds).toEqual(["tool-1", "tool-2"]);
+    expect(result.session.toolCalls["tool-1"]?.status).toBe("complete");
+    expect(result.session.toolCalls["tool-2"]?.status).toBe("complete");
+    expect(result.nextStep?.type).toBe("complete");
+  });
+
   it("passes Bedrock credentials as bearerToken", async () => {
     const model = {
       id: "minimax.minimax-m2.5",

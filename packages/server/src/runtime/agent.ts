@@ -75,6 +75,10 @@ export interface ToolStepResult extends AgentStepResult {
   toolResultMessage: ToolResultMessage;
 }
 
+export interface ToolBatchStepResult extends AgentStepResult {
+  toolResultMessages: ToolResultMessage[];
+}
+
 export interface CompleteTurnResult extends AgentStepResult {
   completedTurnIndex: number;
   shouldContinue: boolean;
@@ -89,6 +93,7 @@ export interface NextStepInfo {
   stepId: string;
   displayName: string;
   toolCallId?: string;
+  toolCallIds?: string[];
 }
 
 export interface RunStepResult extends AgentStepResult {
@@ -344,12 +349,14 @@ export class Agent {
     // Check for pending tool calls first
     const pending = unsatisfiedToolCalls(session);
     if (pending.length > 0) {
+      const toolCallIds = pending.map((toolCall) => toolCall.id);
       const toolCall = pending[0]!;
       return {
         type: "tool",
-        stepId: `tool-${toolCall.id}`,
-        displayName: `Running ${toolCall.name}`,
+        stepId: toolCallIds.length === 1 ? `tool-${toolCall.id}` : `tools-${toolCallIds.join("-")}`,
+        displayName: toolCallIds.length === 1 ? `Running ${toolCall.name}` : `Running ${toolCallIds.length} tools`,
         toolCallId: toolCall.id,
+        toolCallIds,
       };
     }
 
@@ -701,6 +708,69 @@ export class Agent {
     return { session: nextSession, events, toolResultMessage };
   }
 
+  async runToolBatchStep(
+    session: AgentSessionState,
+    toolCallIds: string[],
+    signal?: AbortSignal,
+  ): Promise<ToolBatchStepResult> {
+    const uniqueToolCallIds = [...new Set(toolCallIds)];
+    if (uniqueToolCallIds.length === 0) {
+      return { session, events: [], toolResultMessages: [] };
+    }
+    if (uniqueToolCallIds.length === 1) {
+      const result = await this.runToolStep(session, uniqueToolCallIds[0]!, signal);
+      return {
+        session: result.session,
+        events: result.events,
+        toolResultMessages: [result.toolResultMessage],
+      };
+    }
+
+    const results = await Promise.all(
+      uniqueToolCallIds.map((toolCallId) => this.runToolStep(session, toolCallId, signal)),
+    );
+    const resultByToolCallId = new Map(
+      results.map((result) => [result.toolResultMessage.toolCallId, result]),
+    );
+    const orderedResults = uniqueToolCallIds.map((toolCallId) => {
+      const result = resultByToolCallId.get(toolCallId);
+      if (!result) throw new Error(`Missing tool result for ${toolCallId}`);
+      return result;
+    });
+
+    const nextToolCalls = { ...session.toolCalls };
+    for (const result of orderedResults) {
+      const toolCall = result.session.toolCalls[result.toolResultMessage.toolCallId];
+      if (toolCall) nextToolCalls[toolCall.id] = toolCall;
+    }
+
+    const toolResultMessages = orderedResults.map((result) => result.toolResultMessage);
+    const completedToolCallIds = new Set(toolResultMessages.map((message) => message.toolCallId));
+    const turns = session.turns.map((turn) => {
+      const orderedTurnResults = turn.toolCallIds.filter((toolCallId) => completedToolCallIds.has(toolCallId));
+      if (orderedTurnResults.length === 0) return turn;
+      return {
+        ...turn,
+        toolResultIds: [
+          ...turn.toolResultIds,
+          ...orderedTurnResults.filter((toolCallId) => !turn.toolResultIds.includes(toolCallId)),
+        ],
+      };
+    });
+
+    return {
+      session: {
+        ...session,
+        updatedAt: now(),
+        messages: [...session.messages, ...toolResultMessages],
+        toolCalls: nextToolCalls,
+        turns,
+      },
+      events: orderedResults.flatMap((result) => result.events),
+      toolResultMessages,
+    };
+  }
+
   completeTurn(session: AgentSessionState): CompleteTurnResult {
     return Agent.completeTurn(session);
   }
@@ -738,10 +808,11 @@ export class Agent {
         break;
       }
       case "tool": {
-        if (!stepInfo.toolCallId) {
+        const toolCallIds = stepInfo.toolCallIds ?? (stepInfo.toolCallId ? [stepInfo.toolCallId] : []);
+        if (toolCallIds.length === 0) {
           throw new Error("toolCallId required for tool step");
         }
-        const toolResult = await this.runToolStep(session, stepInfo.toolCallId, signal);
+        const toolResult = await this.runToolBatchStep(session, toolCallIds, signal);
         result = {
           session: toolResult.session,
           events: toolResult.events,
