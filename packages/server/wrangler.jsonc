@@ -43,8 +43,8 @@
 		{
 			"binding": "DB",
 			"database_name": "clawflare",
-			"database_id": "a1561801-7369-4995-8f2c-9bb0bdc76618",
-			"preview_database_id": "a1561801-7369-4995-8f2c-9bb0bdc76618",
+			"database_id": "28d8fdf1-a1db-45bd-9134-5ed84198cf1b",
+			"preview_database_id": "28d8fdf1-a1db-45bd-9134-5ed84198cf1b",
 			"migrations_dir": "migrations"
 		}
 	],

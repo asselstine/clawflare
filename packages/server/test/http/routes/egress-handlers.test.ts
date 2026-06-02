@@ -111,7 +111,7 @@ describe("egress handler routes", () => {
       .toContain("GITHUB_TOKEN");
   });
 
-  it("lists built-in egress handlers without exposing config", async () => {
+  it("omits unconfigured built-in egress handlers from enabled lists", async () => {
     const { db, dispose } = await createDb();
     try {
       const response = await handleListEgressHandlers(
@@ -129,14 +129,39 @@ describe("egress handler routes", () => {
       };
 
       expect(response.status).toBe(200);
-      expect(data.egressHandlers.map((handler) => handler.egressHandlerId)).toContain(
+      expect(data.egressHandlers.map((handler) => handler.egressHandlerId)).not.toContain(
         "cloudflare"
       );
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("lists available built-in egress handlers without exposing config when requested", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      const response = await handleListEgressHandlers(
+        { DB: db } as Env,
+        new URL("https://example.com/v1/egress-handlers?enabledOnly=false"),
+        createRequestContext()
+      );
+      const data = (await response.json()) as {
+        egressHandlers: Array<{
+          name: string;
+          egressHandlerId: string;
+          domains: string[];
+          enabled: boolean;
+          config?: unknown;
+        }>;
+      };
+
+      expect(response.status).toBe(200);
       const cloudflare = data.egressHandlers.find(
         (handler) => handler.egressHandlerId === "cloudflare"
       );
       expect(cloudflare?.name).toBe("Cloudflare");
       expect(cloudflare?.domains).toEqual(["api.cloudflare.com"]);
+      expect(cloudflare?.enabled).toBe(false);
       expect(cloudflare).not.toHaveProperty("config");
     } finally {
       await dispose();
@@ -164,7 +189,7 @@ describe("egress handler routes", () => {
       expect(data.egressHandler.egressHandlerId).toBe("cloudflare");
       expect(data.egressHandler.name).toBe("Cloudflare");
       expect(data.egressHandler.domains).toEqual(["api.cloudflare.com"]);
-      expect(data.egressHandler.enabled).toBe(true);
+      expect(data.egressHandler.enabled).toBe(false);
     } finally {
       await dispose();
     }

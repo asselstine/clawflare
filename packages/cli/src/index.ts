@@ -22,6 +22,14 @@ import {
   egressListCommand,
 } from "./commands/egress.js";
 
+function formatCliError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "Invalid or missing authentication") {
+    return "Invalid or missing authentication. Please run `clawflare login` first.";
+  }
+  return message;
+}
+
 const program = new Command()
   .name("clawflare")
   .description("Clawflare CLI - Client for the Clawflare hosted agent harness")
@@ -200,4 +208,9 @@ program
   });
 
 // Parse arguments
-program.parse();
+try {
+  await program.parseAsync();
+} catch (error) {
+  console.error(`Error: ${formatCliError(error)}`);
+  process.exit(1);
+}

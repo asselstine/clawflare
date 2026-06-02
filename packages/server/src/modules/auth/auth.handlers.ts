@@ -458,7 +458,9 @@ export async function handleDeviceAuthStart(
 
     const result = await createDeviceAuthorization(env, clientName);
     if (!result) {
-      return serverError("Failed to create device authorization");
+      return serverError(
+        "Failed to create device authorization. The server database may need auth migrations applied."
+      );
     }
 
     const baseUrl = new URL(request.url).origin;

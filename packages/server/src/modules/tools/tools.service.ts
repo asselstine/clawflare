@@ -263,7 +263,7 @@ function createSearchTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolConte
   return {
     name: "search",
     description:
-      "Search stored code and egress handlers. Use this to find reusable code or discover domain-specific egress handlers that provide enhanced authentication/capabilities for outbound HTTP requests.",
+      "Search stored code and egress handlers. Use this to find reusable code or discover whether configured egress handlers provide authenticated outbound HTTP access for external services, accounts, resources, profiles, or APIs before claiming access is unavailable.",
     label: "Search",
     parameters: Type.Object({
       collection: Type.Optional(
