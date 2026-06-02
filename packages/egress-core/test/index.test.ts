@@ -2,7 +2,12 @@
  * Unit tests for egress-core package
  */
 import { describe, it, expect } from "vitest";
-import { EgressRegistry, hostnameMatchesDomain, type EgressHandler, type EgressContext } from "../src/index.js";
+import { EgressRegistry, hostnameMatchesDomain, type EgressHandler, type EgressContext, type EgressLogger } from "../src/index.js";
+
+const logger: EgressLogger = {
+  info: () => {},
+  warn: () => {},
+};
 
 describe("egress-core", () => {
   describe("EgressRegistry", () => {
@@ -117,7 +122,7 @@ describe("egress-core", () => {
       };
 
       const request = new Request("https://api.example.com/data");
-      const context: EgressContext<{ TOKEN: string }> = { env: { TOKEN: "secret123" } };
+      const context: EgressContext<{ TOKEN: string }> = { env: { TOKEN: "secret123" }, logger };
 
       expect(await handler.handles(request, context)).toBe(true);
       const response = await handler.fetch!(request, context);
@@ -149,7 +154,7 @@ describe("egress-core", () => {
 
       expect(typeof handler.fetch).toBe("undefined");
       expect(typeof handler.connect).toBe("undefined");
-      expect(await handler.handles(new Request("https://example.com"), {} as EgressContext)).toBe(true);
+      expect(await handler.handles(new Request("https://example.com"), { env: {}, logger })).toBe(true);
     });
   });
 });

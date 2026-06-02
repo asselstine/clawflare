@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { registerEgressHandlers } from "../src/index.js";
-import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
+import { EgressRegistry, type EgressContext, type EgressLogger } from "@clawflare/egress-core";
 
 describe("cloudflare egress handler", () => {
   interface MockEnv {
@@ -12,7 +12,11 @@ describe("cloudflare egress handler", () => {
   }
 
   const createRegistry = () => new EgressRegistry<MockEnv>();
-  const createContext = (env: MockEnv): EgressContext<MockEnv> => ({ env });
+  const createLogger = (): EgressLogger => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+  });
+  const createContext = (env: MockEnv): EgressContext<MockEnv> => ({ env, logger: createLogger() });
 
   describe("registration", () => {
     it("should register the cloudflare handler", () => {

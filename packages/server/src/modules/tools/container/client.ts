@@ -116,6 +116,8 @@ export interface HealthResult {
 const DEFAULT_CONTAINER_TIMEOUT = 30000;
 const MAX_CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const MAX_ERROR_DETAIL_CHARS = 8000;
+const CONTAINER_START_MAX_ATTEMPTS = 2;
+const CONTAINER_CODE_UPDATE_RESET_MESSAGE = "Durable Object reset because its code was updated";
 
 interface RuntimeCallOptions {
   allowRuntimeFailure?: boolean;
@@ -133,6 +135,28 @@ function appendDetail(parts: string[], label: string, value: unknown): void {
 
   const text = typeof value === "string" ? value : String(value);
   parts.push(`${label}:\n${truncateDetail(text)}`);
+}
+
+export function isContainerCodeUpdateResetError(error: unknown): boolean {
+  return error instanceof Error
+    ? error.message.includes(CONTAINER_CODE_UPDATE_RESET_MESSAGE)
+    : String(error).includes(CONTAINER_CODE_UPDATE_RESET_MESSAGE);
+}
+
+export function buildContainerStartupFailureMessage(
+  containerId: string,
+  error: unknown,
+): string {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (isContainerCodeUpdateResetError(error)) {
+    return [
+      `Container ${containerId} was interrupted by a Worker deployment while starting.`,
+      "Retry the operation; if this is an older session, the container filesystem may have been reset.",
+    ].join(" ");
+  }
+
+  return `Container ${containerId} failed to start: ${message}`;
 }
 
 export function buildContainerRuntimeFailureMessage(
@@ -182,6 +206,39 @@ function getContainerStub(env: Env, id: string) {
   return getContainer(env.CODING_CONTAINER, id);
 }
 
+async function waitForContainerPort(
+  env: Env,
+  containerId: string,
+  signal?: AbortSignal,
+) {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= CONTAINER_START_MAX_ATTEMPTS; attempt += 1) {
+    const container = getContainerStub(env, containerId);
+
+    try {
+      await container.startAndWaitForPorts({
+        ports: [8080],
+        startOptions: { enableInternet: false },
+        cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
+      });
+      await container.setOutboundHandler("clawflare", { containerId });
+      return container;
+    } catch (error) {
+      lastError = error;
+      if (
+        signal?.aborted ||
+        !isContainerCodeUpdateResetError(error) ||
+        attempt === CONTAINER_START_MAX_ATTEMPTS
+      ) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(buildContainerStartupFailureMessage(containerId, lastError));
+}
+
 /**
  * Call the container runtime server
  */
@@ -193,14 +250,7 @@ export async function callContainerRuntime(
   signal?: AbortSignal,
   options: RuntimeCallOptions = {},
 ): Promise<ContainerRuntimeResponse> {
-  const container = getContainerStub(env, containerId);
-
-  // Start container and wait for port
-  await container.startAndWaitForPorts({
-    ports: [8080],
-    startOptions: { enableInternet: false },
-    cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
-  });
+  const container = await waitForContainerPort(env, containerId, signal);
 
   const response = await container.containerFetch(`http://localhost${endpoint}`, {
     method: "POST",
@@ -238,13 +288,7 @@ export async function getContainerHealth(
   containerId: string,
   signal?: AbortSignal
 ): Promise<HealthResult> {
-  const container = getContainerStub(env, containerId);
-
-  await container.startAndWaitForPorts({
-    ports: [8080],
-    startOptions: { enableInternet: false },
-    cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
-  });
+  const container = await waitForContainerPort(env, containerId, signal);
 
   const response = await container.containerFetch("http://localhost/health", {
     method: "GET",

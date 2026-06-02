@@ -75,30 +75,30 @@ export async function verifyAccessToken(
   userId: string;
 } | null> {
   try {
-    logger.debug("Verifying access token", { tokenLength: token.length, tokenPrefix: token.slice(0, 15) });
+    // logger.debug("Verifying access token", { tokenLength: token.length, tokenPrefix: token.slice(0, 15) });
     const tokenHash = await hashToken(token);
 
     const accessTokens = new AccessTokenRepository(env.DB);
     const row = await accessTokens.findByTokenHash(tokenHash);
 
     if (!row) {
-      logger.debug("Access token not found", { tokenHashPrefix: tokenHash.slice(0, 16) });
+      // logger.debug("Access token not found", { tokenHashPrefix: tokenHash.slice(0, 16) });
       return null;
     }
 
     // Check if token is expired
     if (row.expiresAt && Date.now() > row.expiresAt) {
-      logger.debug("Access token expired", { tokenId: row.id, expiresAt: row.expiresAt });
+      // logger.debug("Access token expired", { tokenId: row.id, expiresAt: row.expiresAt });
       return null;
     }
 
     // Check if token is revoked
     if (row.revokedAt) {
-      logger.debug("Access token revoked", { tokenId: row.id, revokedAt: row.revokedAt });
+      // logger.debug("Access token revoked", { tokenId: row.id, revokedAt: row.revokedAt });
       return null;
     }
 
-    logger.debug("Access token verified", { tokenId: row.id, userId: row.userId });
+    // logger.debug("Access token verified", { tokenId: row.id, userId: row.userId });
 
     // Update last_used_at
     await accessTokens.updateLastUsedAt(row.id);

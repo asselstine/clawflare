@@ -6,9 +6,10 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "../../internal-types/index.js";
 import type { ExecutionResult } from "../../internal-types/tools.js";
-import { EgressHandlerRepository, StoredCodeRepository } from "../../data/index.js";
+import { EgressHandlerRepository, StoredCodeRepository, type EgressHandlerMetadata } from "../../data/index.js";
 import { executeDynamicWorker, USER_FUNCTION_CONTRACT } from "./dynamic-worker.js";
 import { createContainerTools } from "./container/tools.js";
+import { getEgressHandlerDefinition } from "../egress-handlers/egress-handlers.catalog.js";
 
 // Tool parameter types
 interface StoreCodeParams {
@@ -331,9 +332,20 @@ function createSearchTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolConte
       if (collection === "egress_handlers" || collection === "all") {
         lines.push(`Egress Handlers (${results.egressHandlers.length}):`);
         for (const handler of results.egressHandlers) {
-          lines.push(`  - ${handler.name} (${handler.egressHandlerId}): ${handler.description || "(no description)"}`);
+          const definition = getEgressHandlerDefinition(handler.egressHandlerId);
+          const configuredSecrets = Object.keys(handler.secretRefs);
+          const configKeys = configuredConfigKeys(handler);
+
+          const description = definition?.description ?? handler.description;
+          lines.push(`  - ${handler.name} (${handler.egressHandlerId}): ${description || "(no description)"}`);
           lines.push(`    enabled: ${handler.enabled}`);
           lines.push(`    domains: ${handler.domains.join(", ")}`);
+          lines.push(`    configured secrets: ${configuredSecrets.join(", ") || "none"}`);
+          if (definition) {
+            lines.push(`    required secrets: ${definition.requiredSecrets.join(", ") || "none"}`);
+            lines.push(`    optional secrets: ${definition.optionalSecrets.join(", ") || "none"}`);
+          }
+          lines.push(`    configured config keys: ${configKeys.join(", ") || "none"}`);
         }
         if (results.egressHandlers.length === 0) {
           lines.push("  (none found)");
@@ -352,6 +364,27 @@ function createSearchTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolConte
       };
     },
   };
+}
+
+function objectKeys(value: unknown): string[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return [];
+  }
+  return Object.keys(value);
+}
+
+function configuredConfigKeys(handler: EgressHandlerMetadata): string[] {
+  const keys = objectKeys(handler.config);
+  const definition = getEgressHandlerDefinition(handler.egressHandlerId);
+  if (!definition?.configSchema) {
+    return keys;
+  }
+
+  const properties = definition.configSchema.properties;
+  const allowed = properties && typeof properties === "object" && !Array.isArray(properties)
+    ? new Set(Object.keys(properties))
+    : undefined;
+  return allowed ? keys.filter((key) => allowed.has(key)) : keys;
 }
 
 interface FormatExecutionOptions {

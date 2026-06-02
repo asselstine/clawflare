@@ -9,6 +9,7 @@ import {
   type SessionInputEvent,
 } from "../data/index.js";
 import { logger } from "../lib/logger.js";
+import { createWorkflowInstance, withWorkflowInstance } from "./workflow-handles.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -141,16 +142,17 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
     }
 
     if (!existingSession) {
-      await this.env.AGENT_WORKFLOW.create({
+      await createWorkflowInstance(this.env.AGENT_WORKFLOW, {
         id: workflowId,
         params: { sessionId },
       });
     }
 
-    const workflowInstance = await this.env.AGENT_WORKFLOW.get(workflowId);
-    await workflowInstance.sendEvent({
-      type: "session-input",
-      payload: { type: "wake" },
+    await withWorkflowInstance(this.env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
+      return workflowInstance.sendEvent({
+        type: "session-input",
+        payload: { type: "wake" },
+      });
     });
 
     ws.send(JSON.stringify({

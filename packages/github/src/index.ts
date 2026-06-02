@@ -9,7 +9,7 @@ export const domains = ["api.github.com", "github.com", "raw.githubusercontent.c
 export const metadata = {
   name: "github",
   description:
-    "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers for API requests",
+    "GitHub API, content, archive, web, and native Git smart-HTTP egress. Injects REST API Bearer auth and, when GITHUB_USERNAME plus GITHUB_TOKEN are configured, Basic auth for HTTPS git clone, fetch, and push.",
   domains,
 } as const;
 
@@ -63,7 +63,7 @@ export function decorateGithubHeaders(
   context: HttpEgressHandlerContext<GithubEnv>
 ): void {
   const kind = classifyGithubRequest(request);
-  const handlerEnv = context?.env ?? {};
+  const handlerEnv = context.env;
 
   if (kind === "api") {
     headers.set("User-Agent", headers.get("User-Agent") || "Clawflare-Agent");
@@ -117,7 +117,14 @@ export const githubHandler = {
 
   async fetch(request: Request, context: HttpEgressHandlerContext<GithubEnv>): Promise<Response> {
     const kind = classifyGithubRequest(request);
-    const handlerEnv = context?.env ?? {};
+    const handlerEnv = context.env;
+
+    context.logger.info("GitHub egress request", {
+      handler: metadata.name,
+      kind,
+      requestId: context.requestId,
+      url: request.url,
+    });
 
     if (handlerEnv.MOCK_AI === "true" && kind !== "git-smart-http") {
       return Response.json({ ok: true, handler: metadata.name, url: request.url });
@@ -154,6 +161,21 @@ export const githubHandler = {
           "Authorization",
           createGithubSmartHttpAuthorization(handlerEnv.GITHUB_USERNAME, handlerEnv.GITHUB_TOKEN)
         );
+        const url = new URL(request.url);
+        context.logger.info("Injected Git smart-HTTP Basic auth", {
+          handler: metadata.name,
+          path: url.pathname,
+          requestId: context.requestId,
+        });
+      } else {
+        const url = new URL(request.url);
+        context.logger.warn("Skipping Git smart-HTTP Basic auth injection", {
+          handler: metadata.name,
+          hasGithubUsername: Boolean(handlerEnv.GITHUB_USERNAME),
+          hasGithubToken: Boolean(handlerEnv.GITHUB_TOKEN),
+          path: url.pathname,
+          requestId: context.requestId,
+        });
       }
     } else {
       decorateGithubHeaders(headers, request, context);

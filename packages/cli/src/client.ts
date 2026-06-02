@@ -207,10 +207,12 @@ export class AgentClient {
   }
 
   // List sessions - optional status filter ("active", "idle", "closed", "expired", "error")
-  async listSessions(options?: { status?: string; sessionId?: string }): Promise<SessionListResponse> {
+  async listSessions(options?: { status?: string; sessionId?: string; limit?: number; offset?: number }): Promise<SessionListResponse> {
     const query = new URLSearchParams();
     if (options?.status && options.status !== "all") query.set("status", options.status);
     if (options?.sessionId) query.set("sessionId", options.sessionId);
+    if (options?.limit !== undefined) query.set("limit", String(options.limit));
+    if (options?.offset !== undefined) query.set("offset", String(options.offset));
 
     const path = `/v1/sessions${query.toString() ? `?${query.toString()}` : ""}`;
     return this.requestJson<SessionListResponse>(path);

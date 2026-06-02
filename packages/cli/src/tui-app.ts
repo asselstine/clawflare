@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary } from "./client.js";
+import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -81,7 +81,7 @@ const slashCommands = [
   { name: "fork", description: "Fork the current context" },
   { name: "sessions", description: "Show recent sessions" },
   { name: "open", description: "Open an existing session" },
-  { name: "kill", description: "Terminate a session workflow and containers" },
+  { name: "kill", description: "Terminate session workflows and containers" },
   { name: "name", description: "Name the current session" },
   { name: "tools", description: "List available tools" },
   { name: "models", description: "Select workspace default model" },
@@ -453,6 +453,17 @@ type DisplayMessage = {
   toolCalls?: ToolCallInfo[];
 };
 
+type SessionSelectorState = {
+  sessions: SessionSummary[];
+  total: number;
+  selectedIndex: number;
+};
+
+type KillAllSessionsResult = {
+  killed: KillSessionResponse[];
+  skipped: SessionSummary[];
+};
+
 // Helper to create user message block with full-width background and padding
 function createUserBlock(content: string): Text {
   // Dark gray background for the entire block (pi-coding-agent user message bg)
@@ -490,6 +501,7 @@ export class ClawflareTUIApp {
   private agentEvents: SessionEvent[] = [];
   private skills: AgentSkill[] = [];
   private skillsPrompt = "";
+  private sessionSelector: SessionSelectorState | null = null;
   
   // Track pending optimistic user message during processing
   private pendingUserMessage: DisplayMessage | null = null;
@@ -611,6 +623,9 @@ export class ClawflareTUIApp {
       if (matchesKey(data, "ctrl+d")) {
         this.exit();
         return { consume: true };
+      }
+      if (this.sessionSelector) {
+        return this.handleSessionSelectorInput(data);
       }
       if (matchesKey(data, "esc")) {
         this.abortCurrentOperation();
@@ -920,6 +935,8 @@ export class ClawflareTUIApp {
       this.renderThinkingIndicator("");
     }
 
+    this.renderSessionSelector();
+
     // Show error if any
     if (this.error) {
       this.messageContainer.addChild(createText(""));
@@ -928,6 +945,72 @@ export class ClawflareTUIApp {
 
     this.messageContainer.invalidate();
     this.tui.requestRender();
+  }
+
+  private renderSessionSelector(): void {
+    if (!this.sessionSelector) return;
+
+    const { sessions, total, selectedIndex } = this.sessionSelector;
+    const box = new Box(2, 1, (text: string) => chalk.bgHex("#20242c")(text));
+    box.addChild(createText(chalk.bold("Open session")));
+    box.addChild(createText(theme.dim("Use ↑/↓ to choose, Enter to open, Esc to cancel")));
+    box.addChild(createText(""));
+
+    for (let i = 0; i < sessions.length; i++) {
+      const session = sessions[i]!;
+      const selected = i === selectedIndex;
+      const prefix = selected ? chalk.hex("#5f87ff")("❯ ") : "  ";
+      const name = session.name ? ` ${session.name}` : "";
+      const current = session.id === this.sessionId ? " [current]" : "";
+      const active = session.isActive ? " active" : "";
+      const model = session.modelProvider && session.modelName
+        ? ` ${session.modelProvider}/${session.modelName}`
+        : "";
+      const countLabel = session.messageCount === 1 ? "event" : "events";
+      const line = `${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}${model}`;
+      box.addChild(createText(prefix + (selected ? chalk.bold(line) : line)));
+    }
+
+    if (total > sessions.length) {
+      box.addChild(createText(""));
+      box.addChild(createText(theme.dim(`Showing ${sessions.length} of ${total}. Narrow with /open <prefix> if needed.`)));
+    }
+
+    this.messageContainer.addChild(box);
+    this.messageContainer.addChild(createBlockGap());
+  }
+
+  private handleSessionSelectorInput(data: string): { consume: true } | undefined {
+    if (!this.sessionSelector) return undefined;
+
+    if (matchesKey(data, "up")) {
+      const count = this.sessionSelector.sessions.length;
+      this.sessionSelector.selectedIndex = (this.sessionSelector.selectedIndex - 1 + count) % count;
+      this.renderMessages();
+      return { consume: true };
+    }
+
+    if (matchesKey(data, "down")) {
+      const count = this.sessionSelector.sessions.length;
+      this.sessionSelector.selectedIndex = (this.sessionSelector.selectedIndex + 1) % count;
+      this.renderMessages();
+      return { consume: true };
+    }
+
+    if (matchesKey(data, "enter")) {
+      const selected = this.sessionSelector.sessions[this.sessionSelector.selectedIndex];
+      if (selected) {
+        void this.openSelectedSession(selected.id);
+      }
+      return { consume: true };
+    }
+
+    if (matchesKey(data, "esc")) {
+      this.cancelSessionSelection();
+      return { consume: true };
+    }
+
+    return { consume: true };
   }
 
   private renderThinkingIndicator(indent: string): void {
@@ -1260,7 +1343,7 @@ export class ClawflareTUIApp {
   private async resolveSessionIdForOpen(input: string): Promise<string> {
     const sessionId = input.trim();
     if (!sessionId) {
-      throw new Error("Usage: /open <session-id>");
+      throw new Error("Usage: /open [session-id]");
     }
 
     if (sessionId.length >= 32) {
@@ -1278,6 +1361,49 @@ export class ClawflareTUIApp {
     throw new Error(`No recent session matches "${sessionId}". Use /sessions to view sessions.`);
   }
 
+  private async beginOpenSessionSelection(): Promise<boolean> {
+    if (this.isLoading) {
+      throw new Error("Cannot open a session while an operation is running. Press Esc to abort first.");
+    }
+
+    const response = await this.client.listSessions({ status: "all" });
+    if (response.sessions.length === 0) {
+      this.messages.push({
+        role: "assistant",
+        content: "No sessions found.",
+      });
+      return false;
+    }
+
+    this.sessionSelector = {
+      sessions: response.sessions,
+      total: response.total,
+      selectedIndex: Math.max(0, response.sessions.findIndex((session) => session.id !== this.sessionId)),
+    };
+    this.error = null;
+    return true;
+  }
+
+  private cancelSessionSelection(): void {
+    this.sessionSelector = null;
+    this.renderMessages();
+    this.setStatus("Open cancelled", "gray");
+  }
+
+  private async openSelectedSession(sessionId: string): Promise<void> {
+    this.sessionSelector = null;
+    this.setStatus("Opening session...", "yellow");
+    try {
+      await this.openSession(sessionId);
+      this.renderMessages();
+      this.setStatus(`Opened session ${this.sessionId.slice(0, 8)}`, "green");
+    } catch (e) {
+      this.error = e instanceof Error ? e.message : "Failed to open session";
+      this.renderMessages();
+      this.setStatus(`Error: ${this.error}`, "red");
+    }
+  }
+
   private async openSession(sessionIdInput: string): Promise<void> {
     if (this.isLoading) {
       throw new Error("Cannot open a session while an operation is running. Press Esc to abort first.");
@@ -1293,7 +1419,90 @@ export class ClawflareTUIApp {
     this.pendingUserMessage = null;
     this.lastUsage = null;
     this.error = null;
+    this.sessionSelector = null;
     this.updateHeader();
+  }
+
+  private resetKilledCurrentSession(): void {
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+    this.isLoading = false;
+    this.pendingUserMessage = null;
+    this.pendingMessageCount = 0;
+    this.sawProcessingStatus = false;
+    this.agentEvents = [];
+  }
+
+  private formatKilledSession(killed: KillSessionResponse): string {
+    const details = [
+      `Session ${killed.sessionId.slice(0, 8)} killed.`,
+      killed.workflowTerminated ? "Workflow terminated." : "Workflow was not running.",
+      killed.destroyedContainers.length > 0
+        ? `Destroyed containers: ${killed.destroyedContainers.join(", ")}`
+        : "No containers to destroy.",
+      ...killed.errors.map((error) => `Error: ${error}`),
+    ];
+    return details.join("\n");
+  }
+
+  private async listAllSessions(): Promise<SessionSummary[]> {
+    const pageSize = 100;
+    const sessions: SessionSummary[] = [];
+
+    for (let offset = 0; ; offset += pageSize) {
+      const response = await this.client.listSessions({
+        status: "all",
+        limit: pageSize,
+        offset,
+      });
+      sessions.push(...response.sessions);
+
+      if (sessions.length >= response.total || response.sessions.length === 0) {
+        break;
+      }
+    }
+
+    return sessions;
+  }
+
+  private async killAllSessions(): Promise<KillAllSessionsResult> {
+    const sessions = await this.listAllSessions();
+    const killable = sessions.filter((session) => session.status !== "closed" && session.status !== "expired");
+    const skipped = sessions.filter((session) => session.status === "closed" || session.status === "expired");
+    const killed: KillSessionResponse[] = [];
+
+    for (const session of killable) {
+      const result = await this.client.killSession(session.id);
+      killed.push(result);
+      if (session.id === this.sessionId) {
+        this.resetKilledCurrentSession();
+      }
+    }
+
+    return { killed, skipped };
+  }
+
+  private formatKillAllSessionsResult(result: KillAllSessionsResult): string {
+    const okCount = result.killed.filter((session) => session.ok).length;
+    const errorCount = result.killed.length - okCount;
+    const lines = [
+      `Killed ${okCount} session${okCount === 1 ? "" : "s"}.`,
+    ];
+
+    if (errorCount > 0) {
+      lines.push(`${errorCount} session${errorCount === 1 ? "" : "s"} had errors.`);
+    }
+    if (result.skipped.length > 0) {
+      lines.push(`Skipped ${result.skipped.length} closed/expired session${result.skipped.length === 1 ? "" : "s"}.`);
+    }
+    if (result.killed.length > 0) {
+      lines.push("");
+      lines.push(...result.killed.map((session) => this.formatKilledSession(session)));
+    }
+
+    return lines.join("\n");
   }
 
   private abortCurrentOperation(): void {
@@ -1418,11 +1627,17 @@ export class ClawflareTUIApp {
         }
 
         case "open":
-          this.setStatus("Opening session...", "yellow");
+          this.setStatus(args.trim() ? "Opening session..." : "Loading sessions...", "yellow");
           try {
-            await this.openSession(args);
-            this.renderMessages();
-            this.setStatus(`Opened session ${this.sessionId.slice(0, 8)}`, "green");
+            if (args.trim()) {
+              await this.openSession(args);
+              this.renderMessages();
+              this.setStatus(`Opened session ${this.sessionId.slice(0, 8)}`, "green");
+            } else {
+              const hasSessions = await this.beginOpenSessionSelection();
+              this.renderMessages();
+              this.setStatus(hasSessions ? "Select a session" : "No sessions found", hasSessions ? "blue" : "yellow");
+            }
           } catch (e) {
             this.error = e instanceof Error ? e.message : "Failed to open session";
             this.renderMessages();
@@ -1431,38 +1646,37 @@ export class ClawflareTUIApp {
           break;
 
         case "kill": {
-          this.setStatus("Killing session...", "yellow");
+          const target = args.trim();
+          this.setStatus(target === "all" ? "Killing all sessions..." : "Killing session...", "yellow");
           try {
-            const targetSessionId = args.trim()
-              ? await this.resolveSessionIdForOpen(args)
+            if (target === "all") {
+              const result = await this.killAllSessions();
+              const hasErrors = result.killed.some((session) => !session.ok);
+              this.messages.push({
+                role: hasErrors ? "error" : "assistant",
+                content: this.formatKillAllSessionsResult(result),
+              });
+              this.renderMessages();
+              this.setStatus(hasErrors ? "Sessions killed with errors" : "Sessions killed", hasErrors ? "red" : "green");
+              break;
+            }
+
+            const targetSessionId = target
+              ? await this.resolveSessionIdForOpen(target)
               : this.sessionId;
             if (!targetSessionId) {
-              throw new Error("Usage: /kill [session-id]");
+              throw new Error("Usage: /kill [session-id|all]");
             }
 
             const killed = await this.client.killSession(targetSessionId);
             const killedCurrentSession = targetSessionId === this.sessionId;
-            if (killedCurrentSession && this.abortController) {
-              this.abortController.abort();
-              this.abortController = null;
-              this.isLoading = false;
-              this.pendingUserMessage = null;
-              this.pendingMessageCount = 0;
-              this.sawProcessingStatus = false;
-              this.agentEvents = [];
+            if (killedCurrentSession) {
+              this.resetKilledCurrentSession();
             }
 
-            const details = [
-              `Session ${killed.sessionId.slice(0, 8)} killed.`,
-              killed.workflowTerminated ? "Workflow terminated." : "Workflow was not running.",
-              killed.destroyedContainers.length > 0
-                ? `Destroyed containers: ${killed.destroyedContainers.join(", ")}`
-                : "No containers to destroy.",
-              ...killed.errors.map((error) => `Error: ${error}`),
-            ];
             this.messages.push({
               role: killed.ok ? "assistant" : "error",
-              content: details.join("\n"),
+              content: this.formatKilledSession(killed),
             });
             this.renderMessages();
             this.setStatus(killed.ok ? "Session killed" : "Session killed with errors", killed.ok ? "green" : "red");
@@ -1565,8 +1779,8 @@ export class ClawflareTUIApp {
 /new - Start a new chat context
 /fork - Fork the current context
 /sessions [status] - Show recent sessions
-/open <session-id> - Open an existing session
-/kill [session-id] - Terminate a session workflow and containers
+/open [session-id] - Open an existing session
+/kill [session-id|all] - Terminate session workflows and containers
 /name <name> - Name the current session
 /tools - List available tools
 /models - Show available model connections

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { EgressLogger } from "@clawflare/egress-core";
 import { githubHandler } from "../src/index.js";
 
 interface GithubRepoResponse {
@@ -13,9 +14,13 @@ const fullName = `${owner}/${repo}`;
 const env = {
   GITHUB_TOKEN: process.env.GITHUB_TOKEN,
 };
+const logger: EgressLogger = {
+  info: () => {},
+  warn: () => {},
+};
 
 function createContext() {
-  return { env };
+  return { env, logger };
 }
 
 async function fetchThroughGithubEgress(url: string, init?: RequestInit): Promise<Response> {

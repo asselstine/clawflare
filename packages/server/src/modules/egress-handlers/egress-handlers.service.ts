@@ -47,7 +47,7 @@ export function redactEgressHandler(handler: EgressHandlerMetadata): PublicEgres
     egressHandlerId: handler.egressHandlerId,
     name: handler.name,
     displayName: handler.name,
-    description: handler.description,
+    description: definition?.description ?? handler.description,
     domains: handler.domains,
     enabled: handler.enabled,
     configuredSecrets: Object.keys(handler.secretRefs),

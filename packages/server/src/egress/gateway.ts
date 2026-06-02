@@ -5,6 +5,7 @@ import { createEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
 import { resolveEgressHandler } from "../modules/egress-handlers/egress-handlers.service.js";
 import type { AuthSession } from "../modules/secrets/index.js";
+import { logger } from "../lib/logger.js";
 
 // Default workspace for egress handlers during transition - Phase 6
 const DEFAULT_WORKSPACE_ID = "default-workspace";
@@ -47,6 +48,7 @@ export async function routeOutboundRequest(
     const context: EgressContext<Env> = {
       env: { ...env, ...(handlerConfig ?? {}), ...resolved.secrets },
       handlerConfig,
+      logger,
       requestId,
     };
 
@@ -65,6 +67,7 @@ export async function routeOutboundRequest(
 
     const context: EgressContext<Env> = {
       env,
+      logger,
       requestId,
     };
 

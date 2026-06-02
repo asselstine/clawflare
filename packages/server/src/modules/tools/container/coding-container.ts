@@ -16,14 +16,19 @@ import { ContainerContextRepository } from "../../../data/index.js";
 export { ContainerProxy };
 
 // Outbound request handler - routes through Clawflare egress system
+interface CodingContainerOutboundParams {
+  containerId?: string;
+}
+
 const codingContainerOutbound = async (
   request: Request,
   env: Env,
-  ctx: { containerId?: string }
+  ctx: { containerId?: string; params?: unknown }
 ): Promise<Response> => {
   // Pass container ID as request ID for egress logging/tracking
-  const requestId = ctx?.containerId ? `container:${ctx.containerId}` : "container:unknown";
-  const containerId = ctx?.containerId;
+  const params = ctx?.params as CodingContainerOutboundParams | undefined;
+  const containerId = params?.containerId ?? ctx?.containerId;
+  const requestId = containerId ? `container:${containerId}` : "container:unknown";
   if (!containerId) {
     return routeOutboundRequest(env, request, requestId);
   }
@@ -50,6 +55,9 @@ export class CodingContainer extends Container<Env> {
   static {
     // Assign through the base accessor so @cloudflare/containers registers the handler.
     this.outbound = codingContainerOutbound;
+    this.outboundHandlers = {
+      clawflare: codingContainerOutbound,
+    };
   }
 
   defaultPort = 8080;

@@ -19,6 +19,7 @@ import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
+import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
 export const sessionsRoutes = new Hono<AppBindings>();
@@ -122,7 +123,7 @@ export async function handleCreateSession(
     await sessions.save(initialState);
 
     // Create persistent workflow (initially idle)
-    await env.AGENT_WORKFLOW.create({
+    await createWorkflowInstance(env.AGENT_WORKFLOW, {
       id: workflowId,
       params: { sessionId },
     });
@@ -301,10 +302,11 @@ export async function handleCloseSession(
     await inputQueue.enqueue(sessionId, inputEvent);
 
     // Get workflow instance and wake it to consume the queued close event
-    const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
-    await workflowInstance.sendEvent({
-      type: "session-input",
-      payload: { type: "wake" },
+    await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, (workflowInstance) => {
+      return workflowInstance.sendEvent({
+        type: "session-input",
+        payload: { type: "wake" },
+      });
     });
 
     // Mark session as closed immediately for UI feedback
@@ -356,13 +358,15 @@ export async function handleKillSession(
 
     if (session.workflowId) {
       try {
-        const workflowInstance = await env.AGENT_WORKFLOW.get(session.workflowId);
-        const status = await workflowInstance.status();
+        const status = await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, async (workflowInstance) => {
+          const status = await workflowInstance.status();
+          if (!isTerminalWorkflowStatus(status.status)) {
+            await workflowInstance.terminate();
+            workflowTerminated = true;
+          }
+          return status;
+        });
         workflowStatusBefore = status.status;
-        if (!isTerminalWorkflowStatus(status.status)) {
-          await workflowInstance.terminate();
-          workflowTerminated = true;
-        }
       } catch (error) {
         errors.push(`Workflow: ${error instanceof Error ? error.message : String(error)}`);
       }

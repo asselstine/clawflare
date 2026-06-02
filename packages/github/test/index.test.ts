@@ -7,7 +7,7 @@ import {
   decorateGithubHeaders,
   registerEgressHandlers,
 } from "../src/index.js";
-import { EgressRegistry, type EgressContext } from "@clawflare/egress-core";
+import { EgressRegistry, type EgressContext, type EgressLogger } from "@clawflare/egress-core";
 
 describe("github egress handler", () => {
   interface MockEnv {
@@ -18,7 +18,11 @@ describe("github egress handler", () => {
   }
 
   const createRegistry = () => new EgressRegistry<MockEnv>();
-  const createContext = (env: MockEnv): EgressContext<MockEnv> => ({ env });
+  const createLogger = (): EgressLogger => ({
+    info: vi.fn(),
+    warn: vi.fn(),
+  });
+  const createContext = (env: MockEnv): EgressContext<MockEnv> => ({ env, logger: createLogger() });
 
   async function captureFetchRequest(request: Request, env: MockEnv = {}): Promise<Request> {
     const registry = createRegistry();
@@ -49,7 +53,8 @@ describe("github egress handler", () => {
       const handler = registry.get("github");
       expect(handler).toBeDefined();
       expect(handler?.name).toBe("github");
-      expect(handler?.description?.startsWith("GitHub API and content access")).toBe(true);
+      expect(handler?.description).toContain("native Git smart-HTTP");
+      expect(handler?.description).toContain("push");
     });
 
     it("should register with correct domains", () => {
@@ -68,22 +73,30 @@ describe("github egress handler", () => {
   });
 
   describe("fetch context", () => {
-    it("does not throw when called without an egress context", async () => {
+    it("logs request metadata when fetching", async () => {
       const registry = createRegistry();
       registerEgressHandlers(registry);
       const handler = registry.get("github")!;
 
       const originalFetch = globalThis.fetch;
+      const info = vi.fn();
       globalThis.fetch = vi.fn(() =>
         Promise.resolve(new Response(JSON.stringify({ login: "octocat" })))
       ) as typeof globalThis.fetch;
 
       try {
-        const response = await handler.fetch!(
-          new Request("https://api.github.com/user"),
-          undefined as unknown as EgressContext<MockEnv>
-        );
+        const response = await handler.fetch!(new Request("https://api.github.com/user"), {
+          env: {},
+          logger: { info, warn: vi.fn() },
+          requestId: "request-1",
+        });
         expect(response.status).toBe(200);
+        expect(info).toHaveBeenCalledWith("GitHub egress request", {
+          handler: "github",
+          kind: "api",
+          requestId: "request-1",
+          url: "https://api.github.com/user",
+        });
       } finally {
         globalThis.fetch = originalFetch;
       }
@@ -93,13 +106,22 @@ describe("github egress handler", () => {
   describe("classification", () => {
     it.each([
       ["https://api.github.com/repos/owner/repo", "api"],
+      ["https://API.GITHUB.COM/repos/owner/repo", "api"],
       ["https://raw.githubusercontent.com/owner/repo/main/a.ts", "raw"],
       ["https://codeload.github.com/owner/repo/tar.gz/main", "archive"],
       ["https://github.com/owner/repo/archive/refs/heads/main.tar.gz", "archive"],
+      ["https://github.com/owner/repo/archive/refs/tags/v1.0.0.zip", "archive"],
       ["https://github.com/owner/repo", "web"],
+      ["https://github.com/owner/repo/archive/main", "web"],
       ["https://github.com/owner/repo.git", "git-smart-http"],
       ["https://github.com/owner/repo.git/info/refs?service=git-upload-pack", "git-smart-http"],
+      ["https://github.com/owner/repo.git/info/refs?service=git-receive-pack", "git-smart-http"],
       ["https://github.com/owner/repo.git/git-upload-pack", "git-smart-http"],
+      ["https://github.com/owner/repo.git/git-receive-pack", "git-smart-http"],
+      ["https://github.com/owner/repo/info/refs?service=git-upload-pack", "git-smart-http"],
+      ["https://github.com/owner/repo/git-upload-pack", "git-smart-http"],
+      ["https://gist.github.com/owner/gist-id", "unknown"],
+      ["https://example.com/owner/repo.git", "unknown"],
     ] as const)("classifies %s as %s", (url, kind) => {
       expect(classifyGithubRequest(new Request(url))).toBe(kind);
     });
@@ -254,6 +276,37 @@ describe("github egress handler", () => {
       expect(capturedRequest.headers.get("X-GitHub-Api-Version")).toBeNull();
     });
 
+    it("should log when native git smart HTTP credentials are injected", async () => {
+      const registry = createRegistry();
+      registerEgressHandlers(registry);
+      const handler = registry.get("github")!;
+
+      const originalFetch = globalThis.fetch;
+      const info = vi.fn();
+      globalThis.fetch = vi.fn(() =>
+        Promise.resolve(new Response(JSON.stringify({ success: true })))
+      ) as typeof globalThis.fetch;
+
+      try {
+        await handler.fetch!(
+          new Request("https://github.com/owner/repo.git/info/refs?service=git-upload-pack"),
+          {
+            env: { GITHUB_USERNAME: "octocat", GITHUB_TOKEN: "ghp_secret123" },
+            logger: { info, warn: vi.fn() },
+            requestId: "request-1",
+          }
+        );
+
+        expect(info).toHaveBeenCalledWith("Injected Git smart-HTTP Basic auth", {
+          handler: "github",
+          path: "/owner/repo.git/info/refs",
+          requestId: "request-1",
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
     it("should add Basic auth for native git smart HTTP push requests", async () => {
       const capturedRequest = await captureFetchRequest(
         new Request(
@@ -303,6 +356,45 @@ describe("github egress handler", () => {
       );
 
       expect(capturedRequest.headers.get("Authorization")).toBeNull();
+    });
+
+    it("should log when native git smart HTTP credentials are incomplete", async () => {
+      const registry = createRegistry();
+      registerEgressHandlers(registry);
+      const handler = registry.get("github")!;
+
+      const originalFetch = globalThis.fetch;
+      const warn = vi.fn();
+      globalThis.fetch = vi.fn(() =>
+        Promise.resolve(new Response(JSON.stringify({ success: true })))
+      ) as typeof globalThis.fetch;
+
+      try {
+        await handler.fetch!(
+          new Request("https://github.com/owner/repo.git/git-receive-pack", {
+            method: "POST",
+            headers: { Authorization: "Basic d3Jvbmc6Y3JlZGVudGlhbHM=" },
+          }),
+          {
+            env: { GITHUB_TOKEN: "ghp_secret123" },
+            logger: { info: vi.fn(), warn },
+            requestId: "request-1",
+          }
+        );
+
+        expect(warn).toHaveBeenCalledWith(
+          "Skipping Git smart-HTTP Basic auth injection",
+          {
+            handler: "github",
+            hasGithubUsername: false,
+            hasGithubToken: true,
+            path: "/owner/repo.git/git-receive-pack",
+            requestId: "request-1",
+          }
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
 
     it("should remove browser-only headers from native git smart HTTP", async () => {

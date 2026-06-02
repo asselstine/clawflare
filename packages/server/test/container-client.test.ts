@@ -1,5 +1,31 @@
-import { describe, expect, it } from "vitest";
-import { buildContainerRuntimeFailureMessage } from "../src/modules/tools/container/client.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  buildContainerRuntimeFailureMessage,
+  buildContainerStartupFailureMessage,
+  getContainerHealth,
+  isContainerCodeUpdateResetError,
+} from "../src/modules/tools/container/client.js";
+import type { Env } from "../src/internal-types/index.js";
+
+const containerMocks = vi.hoisted(() => ({
+  containerFetch: vi.fn(),
+  setOutboundHandler: vi.fn(),
+  startAndWaitForPorts: vi.fn(),
+}));
+
+vi.mock("@cloudflare/containers", () => ({
+  getContainer: vi.fn(() => ({
+    containerFetch: containerMocks.containerFetch,
+    setOutboundHandler: containerMocks.setOutboundHandler,
+    startAndWaitForPorts: containerMocks.startAndWaitForPorts,
+  })),
+}));
+
+beforeEach(() => {
+  containerMocks.containerFetch.mockReset();
+  containerMocks.setOutboundHandler.mockReset();
+  containerMocks.startAndWaitForPorts.mockReset();
+});
 
 describe("container runtime failure formatting", () => {
   it("includes command stdout and stderr for runtime ok=false responses", () => {
@@ -32,5 +58,52 @@ describe("container runtime failure formatting", () => {
 
     expect(message).toContain("HTTP 502 Bad Gateway");
     expect(message).toContain("Response body:\nupstream unavailable");
+  });
+});
+
+describe("container startup failure formatting", () => {
+  it("recognizes Cloudflare code update reset errors", () => {
+    const error = new Error("Durable Object reset because its code was updated.");
+
+    expect(isContainerCodeUpdateResetError(error)).toBe(true);
+    expect(isContainerCodeUpdateResetError("some other startup failure")).toBe(false);
+  });
+
+  it("formats code update reset errors as retryable container startup failures", () => {
+    const message = buildContainerStartupFailureMessage(
+      "session-abc",
+      new Error("Durable Object reset because its code was updated."),
+    );
+
+    expect(message).toContain("Container session-abc was interrupted by a Worker deployment");
+    expect(message).toContain("Retry the operation");
+    expect(message).toContain("older session");
+  });
+
+  it("preserves ordinary startup error details", () => {
+    const message = buildContainerStartupFailureMessage("session-abc", new Error("port timeout"));
+
+    expect(message).toBe("Container session-abc failed to start: port timeout");
+  });
+});
+
+describe("container egress setup", () => {
+  it("passes the logical container ID to the outbound handler", async () => {
+    containerMocks.startAndWaitForPorts.mockResolvedValue(undefined);
+    containerMocks.setOutboundHandler.mockResolvedValue(undefined);
+    containerMocks.containerFetch.mockResolvedValue(
+      new Response(JSON.stringify({
+        ok: true,
+        status: "healthy",
+        workspace: "/workspace",
+      }))
+    );
+
+    await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-abc");
+
+    expect(containerMocks.setOutboundHandler).toHaveBeenCalledWith(
+      "clawflare",
+      { containerId: "session-abc" }
+    );
   });
 });

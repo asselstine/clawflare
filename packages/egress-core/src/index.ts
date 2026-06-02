@@ -1,6 +1,16 @@
+export type EgressLogContext = Record<string, unknown>;
+
+export interface EgressLogger {
+  debug?: (message: string, context?: EgressLogContext) => void;
+  info: (message: string, context?: EgressLogContext) => void;
+  warn: (message: string, context?: EgressLogContext) => void;
+  error?: (message: string, error?: unknown, context?: EgressLogContext) => void;
+}
+
 export interface EgressContext<Env = unknown> {
   env: Env;
   handlerConfig?: unknown;
+  logger: EgressLogger;
   requestId?: string;
 }
 
@@ -63,6 +73,7 @@ export interface DefineHttpEgressHandlerConfig<Env = unknown> {
 export interface HttpEgressHandlerContext<Env = unknown> {
   env: Env & { MOCK_AI?: string };
   handlerConfig?: unknown;
+  logger: EgressLogger;
   requestId?: string;
 }
 

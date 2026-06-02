@@ -13,6 +13,7 @@ import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } f
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
+import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
 
 export const chatRoutes = new Hono<AppBindings>();
 
@@ -144,10 +145,11 @@ async function handleExistingSession(
   }
 
   // Send a wake event to trigger the workflow to consume the durable queue
-  const workflowInstance = await env.AGENT_WORKFLOW.get(workflowId);
-  await workflowInstance.sendEvent({
-    type: "session-input",
-    payload: { type: "wake" },
+  await withWorkflowInstance(env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
+    return workflowInstance.sendEvent({
+      type: "session-input",
+      payload: { type: "wake" },
+    });
   });
 
   // Get fresh event cursor
@@ -234,16 +236,17 @@ async function handleNewSession(
   } as SessionInputEvent);
 
   // Create persistent workflow after the initial input is queued
-  await env.AGENT_WORKFLOW.create({
+  await createWorkflowInstance(env.AGENT_WORKFLOW, {
     id: workflowId,
     params: { sessionId },
   });
 
   // Get workflow instance and wake it to consume the queued prompt
-  const workflowInstance = await env.AGENT_WORKFLOW.get(workflowId);
-  await workflowInstance.sendEvent({
-    type: "session-input",
-    payload: { type: "wake" },
+  await withWorkflowInstance(env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
+    return workflowInstance.sendEvent({
+      type: "session-input",
+      payload: { type: "wake" },
+    });
   });
 
   const response: {
