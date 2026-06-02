@@ -140,7 +140,17 @@ Built-in egress packages:
 
 GitHub REST API requests receive API-specific headers and optional `GITHUB_TOKEN` auth. Raw content and codeload archives pass through without REST JSON headers. Native Git smart-HTTP pass-through is enabled by default and can be disabled with `GITHUB_SMART_HTTP_EGRESS=disabled`.
 
-Enabled handler metadata is stored in D1.
+Egress handlers are configured per-workspace through the API/CLI. Secrets are stored as encrypted secret refs, while non-secret params are stored in D1:
+
+```bash
+clawflare egress list --available
+clawflare egress add
+clawflare egress list --all
+clawflare egress disable github
+clawflare egress enable github
+```
+
+Enabled handler metadata, config params, and encrypted secret references are stored in D1.
 
 ## Deployment
 

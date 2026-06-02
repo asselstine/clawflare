@@ -17,7 +17,7 @@ import {
   getWorkspaceDefaultModelConnection,
   setWorkspaceDefaultModelConnection,
 } from "./model-connections.service.js";
-import type { AuthSession } from "../../data/secrets/index.js";
+import type { AuthSession } from "../secrets/index.js";
 import { logger } from "../../lib/logger.js";
 
 export const modelConnectionsRoutes = new Hono<AppBindings>();

@@ -13,24 +13,32 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(__dirname, "../../..");
 
-async function runWrangler(args, { stdio } = {}) {
+async function runCommand(command, args, { cwd = repoRoot, stdio } = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn("npx", ["wrangler", ...args], {
+    const proc = spawn(command, args, {
       stdio: stdio ?? "inherit",
-      cwd: join(__dirname, ".."),
+      cwd,
       env: process.env,
     });
 
     proc.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`wrangler ${args.join(" ")} exited with code ${code}`));
+        reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
       } else {
         resolve();
       }
     });
 
     proc.on("error", reject);
+  });
+}
+
+async function runWrangler(args, { stdio } = {}) {
+  return runCommand("npx", ["wrangler", ...args], {
+    cwd: join(__dirname, ".."),
+    stdio,
   });
 }
 
@@ -59,7 +67,13 @@ Users should run 'clawflare providers add' to configure providers.
     process.exit(0);
   }
 
-  console.log("🚀 Deploying...\n");
+  console.log("🔨 Building deploy dependencies...\n");
+  await runCommand("pnpm", ["--filter", "@clawflare/egress-core", "build"]);
+  await runCommand("pnpm", ["--filter", "@clawflare/github", "build"]);
+  await runCommand("pnpm", ["--filter", "@clawflare/cloudflare", "build"]);
+  await runCommand("pnpm", ["--filter", "@clawflare/types", "build"]);
+  await runCommand("pnpm", ["--filter", "@clawflare/server", "build"]);
+  console.log("\n🚀 Deploying...\n");
   await runWrangler(["deploy"]);
   console.log("\n✅ Deployed successfully!");
 }

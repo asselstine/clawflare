@@ -9,7 +9,7 @@ export const domains = ["api.github.com", "github.com", "raw.githubusercontent.c
 export const metadata = {
   name: "github",
   description:
-    "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers when GITHUB_TOKEN is configured for API requests",
+    "GitHub API and content access - automatically injects Authorization: Bearer token and API version headers for API requests",
   domains,
 } as const;
 
@@ -62,14 +62,15 @@ export function decorateGithubHeaders(
   context: HttpEgressHandlerContext<GithubEnv>
 ): void {
   const kind = classifyGithubRequest(request);
+  const handlerEnv = context?.env ?? {};
 
   if (kind === "api") {
     headers.set("User-Agent", headers.get("User-Agent") || "Clawflare-Agent");
     headers.set("Accept", headers.get("Accept") || "application/vnd.github+json");
     headers.set("X-GitHub-Api-Version", headers.get("X-GitHub-Api-Version") || "2022-11-28");
 
-    if (context.env.GITHUB_TOKEN) {
-      headers.set("Authorization", `Bearer ${context.env.GITHUB_TOKEN}`);
+    if (handlerEnv.GITHUB_TOKEN) {
+      headers.set("Authorization", `Bearer ${handlerEnv.GITHUB_TOKEN}`);
     }
   }
 
@@ -111,12 +112,13 @@ export const githubHandler = {
 
   async fetch(request: Request, context: HttpEgressHandlerContext<GithubEnv>): Promise<Response> {
     const kind = classifyGithubRequest(request);
+    const handlerEnv = context?.env ?? {};
 
-    if (context.env.MOCK_AI === "true" && kind !== "git-smart-http") {
+    if (handlerEnv.MOCK_AI === "true" && kind !== "git-smart-http") {
       return Response.json({ ok: true, handler: metadata.name, url: request.url });
     }
 
-    if (kind === "git-smart-http" && context.env.GITHUB_SMART_HTTP_EGRESS === "disabled") {
+    if (kind === "git-smart-http" && handlerEnv.GITHUB_SMART_HTTP_EGRESS === "disabled") {
       return new Response(
         "Native Git smart-HTTP is disabled for this egress handler. " +
           "Use the GitHub archive clone path or enable Git smart-HTTP egress.",
@@ -141,8 +143,8 @@ export const githubHandler = {
       headers.delete("Sec-Fetch-Mode");
       headers.delete("Sec-Fetch-Site");
       headers.delete("Sec-Fetch-User");
-      if (context.env.GITHUB_TOKEN && !headers.has("Authorization")) {
-        headers.set("Authorization", `Bearer ${context.env.GITHUB_TOKEN}`);
+      if (handlerEnv.GITHUB_TOKEN && !headers.has("Authorization")) {
+        headers.set("Authorization", `Bearer ${handlerEnv.GITHUB_TOKEN}`);
       }
     } else {
       decorateGithubHeaders(headers, request, context);

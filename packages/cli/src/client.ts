@@ -26,6 +26,10 @@ import type {
   ProviderListResponse,
   ProviderModelInfo,
   ProviderModelsResponse,
+  EgressHandlerInfo,
+  EgressHandlerListResponse,
+  ConfigureEgressHandlerRequest,
+  UpdateEgressHandlerRequest,
 } from "@clawflare/types";
 
 export type {
@@ -46,6 +50,10 @@ export type {
   ProviderListResponse,
   ProviderModelInfo,
   ProviderModelsResponse,
+  EgressHandlerInfo,
+  EgressHandlerListResponse,
+  ConfigureEgressHandlerRequest,
+  UpdateEgressHandlerRequest,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -330,6 +338,38 @@ export class AgentClient {
       `/v1/providers/${encodeURIComponent(providerId)}/models`
     );
     return data.models || [];
+  }
+
+  async listAvailableEgressHandlers(): Promise<EgressHandlerInfo[]> {
+    const data = await this.requestJson<EgressHandlerListResponse>("/v1/egress-handlers/available");
+    return data.egressHandlers || [];
+  }
+
+  async listEgressHandlers(options?: { enabledOnly?: boolean }): Promise<EgressHandlerInfo[]> {
+    const query = new URLSearchParams();
+    if (options?.enabledOnly === false) query.set("enabledOnly", "false");
+    const path = `/v1/egress-handlers${query.toString() ? `?${query.toString()}` : ""}`;
+    const data = await this.requestJson<EgressHandlerListResponse>(path);
+    return data.egressHandlers || [];
+  }
+
+  async configureEgressHandler(input: ConfigureEgressHandlerRequest): Promise<EgressHandlerInfo> {
+    const data = await this.requestJson<{ egressHandler: EgressHandlerInfo }>("/v1/egress-handlers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return data.egressHandler;
+  }
+
+  async updateEgressHandler(egressHandlerId: string, input: UpdateEgressHandlerRequest): Promise<EgressHandlerInfo> {
+    const data = await this.requestJson<{ egressHandler: EgressHandlerInfo }>(
+      `/v1/egress-handlers/${encodeURIComponent(egressHandlerId)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      }
+    );
+    return data.egressHandler;
   }
 
   // Debug endpoint - inspect DO storage

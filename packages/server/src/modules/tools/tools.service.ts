@@ -87,7 +87,10 @@ export function createContainerToolsIfAvailable(
   if (!toolCtx?.sessionId) {
     return [];
   }
-  return createContainerTools(env, { sessionId: toolCtx.sessionId });
+  return createContainerTools(env, {
+    sessionId: toolCtx.sessionId,
+    workspaceId: toolCtx.workspaceId,
+  });
 }
 
 /**
@@ -202,7 +205,11 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext, toolCtx?:
         throw new Error(`Code "${p.name}" not found in workspace. Use store_code to save it first.`);
       }
 
-      const result = await executeDynamicWorker(env, ctx, stored.code, p.input);
+      const result = await executeDynamicWorker(env, ctx, stored.code, p.input, {
+        requestId: toolCtx?.sessionId ? `session:${toolCtx.sessionId}` : undefined,
+        sessionId: toolCtx?.sessionId,
+        workspaceId,
+      });
 
       return formatExecutionResult(result, {
         maxResponseLength: p.maxResponseLength,
@@ -213,7 +220,9 @@ function createExecuteStoredCodeTool(env: Env, ctx?: ExecutionContext, toolCtx?:
 }
 
 // Tool: Execute code inline
-function createExecuteCodeTool(env: Env, ctx?: ExecutionContext, _toolCtx?: ToolContext): AgentTool {
+function createExecuteCodeTool(env: Env, ctx?: ExecutionContext, toolCtx?: ToolContext): AgentTool {
+  const workspaceId = toolCtx?.workspaceId ?? DEFAULT_WORKSPACE_ID;
+
   return {
     name: "execute_code",
     description:
@@ -236,7 +245,11 @@ function createExecuteCodeTool(env: Env, ctx?: ExecutionContext, _toolCtx?: Tool
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ExecuteCodeParams;
 
-      const result = await executeDynamicWorker(env, ctx, p.code, p.input);
+      const result = await executeDynamicWorker(env, ctx, p.code, p.input, {
+        requestId: toolCtx?.sessionId ? `session:${toolCtx.sessionId}` : undefined,
+        sessionId: toolCtx?.sessionId,
+        workspaceId,
+      });
 
       return formatExecutionResult(result, { maxResponseLength: p.maxResponseLength });
     },
@@ -318,7 +331,7 @@ function createSearchTool(env: Env, _ctx?: ExecutionContext, toolCtx?: ToolConte
       if (collection === "egress_handlers" || collection === "all") {
         lines.push(`Egress Handlers (${results.egressHandlers.length}):`);
         for (const handler of results.egressHandlers) {
-          lines.push(`  - ${handler.name}: ${handler.description || "(no description)"}`);
+          lines.push(`  - ${handler.name} (${handler.egressHandlerId}): ${handler.description || "(no description)"}`);
           lines.push(`    enabled: ${handler.enabled}`);
           lines.push(`    domains: ${handler.domains.join(", ")}`);
         }

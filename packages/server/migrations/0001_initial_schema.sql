@@ -266,6 +266,22 @@ CREATE INDEX idx_session_runtime_active ON session_runtime(active);
 CREATE INDEX idx_session_runtime_workspace ON session_runtime(workspace_id);
 
 -- =============================================================================
+-- Container Contexts
+-- =============================================================================
+CREATE TABLE container_contexts (
+  container_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_container_contexts_session ON container_contexts(session_id);
+CREATE INDEX idx_container_contexts_workspace ON container_contexts(workspace_id);
+
+-- =============================================================================
 -- Stored Code (workspace-scoped)
 -- =============================================================================
 CREATE TABLE stored_code (
@@ -287,16 +303,21 @@ CREATE INDEX idx_stored_code_workspace_name ON stored_code(workspace_id, name);
 -- Egress Handlers
 -- =============================================================================
 CREATE TABLE egress_handlers (
-  name TEXT PRIMARY KEY,
-  workspace_id TEXT,
+  workspace_id TEXT NOT NULL,
+  egress_handler_id TEXT NOT NULL,
+  name TEXT NOT NULL,
   description TEXT NOT NULL,
   domains_json TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,
+  secret_refs_json TEXT NOT NULL DEFAULT '{}',
   config_json TEXT NOT NULL DEFAULT '{}',
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (workspace_id, egress_handler_id),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 ) STRICT;
 
 CREATE INDEX idx_egress_handlers_enabled ON egress_handlers(enabled);
+CREATE INDEX idx_egress_handlers_id ON egress_handlers(egress_handler_id);
 CREATE INDEX idx_egress_handlers_name ON egress_handlers(name);
 CREATE INDEX idx_egress_handlers_updated ON egress_handlers(updated_at DESC);
 CREATE INDEX idx_egress_handlers_workspace ON egress_handlers(workspace_id);

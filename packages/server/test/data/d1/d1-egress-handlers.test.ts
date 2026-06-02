@@ -14,7 +14,8 @@ describe("D1 Egress Handler Repository", () => {
   it("UpsertEgressHandlerParams type is valid (workspace-scoped)", () => {
     const params: UpsertEgressHandlerParams = {
       workspaceId: DEFAULT_WORKSPACE_ID,
-      name: "github",
+      egressHandlerId: "github",
+      name: "GitHub",
       description: "GitHub API handler",
       domains: ["api.github.com", "github.com"],
       enabled: true,
@@ -22,7 +23,8 @@ describe("D1 Egress Handler Repository", () => {
     };
 
     expect(params.workspaceId).toBe(DEFAULT_WORKSPACE_ID);
-    expect(params.name).toBe("github");
+    expect(params.egressHandlerId).toBe("github");
+    expect(params.name).toBe("GitHub");
     expect(params.domains).toEqual(["api.github.com", "github.com"]);
     expect(params.enabled).toBe(true);
   });
@@ -30,15 +32,19 @@ describe("D1 Egress Handler Repository", () => {
   it("EgressHandlerMetadata type includes workspaceId and all fields", () => {
     const handler: EgressHandlerMetadata = {
       workspaceId: DEFAULT_WORKSPACE_ID,
-      name: "cloudflare",
+      egressHandlerId: "cloudflare",
+      name: "Cloudflare",
       description: "Cloudflare API handler",
       domains: ["api.cloudflare.com"],
       enabled: true,
+      secretRefs: {},
       config: { apiToken: "xxx" },
       updatedAt: Date.now(),
     };
 
     expect(handler.workspaceId).toBe(DEFAULT_WORKSPACE_ID);
+    expect(handler.egressHandlerId).toBe("cloudflare");
+    expect(handler.name).toBe("Cloudflare");
     expect(handler.domains.length).toBeGreaterThan(0);
     expect(typeof handler.updatedAt).toBe("number");
   });
@@ -47,7 +53,7 @@ describe("D1 Egress Handler Repository", () => {
     // The search query in EgressHandlerRepository should search domains_json
     // This is a contract test - the actual search logic is in the repository
     expect(
-      "Search query should include: WHERE name LIKE ? OR description LIKE ? OR domains_json LIKE ?"
+      "Search query should include: WHERE name LIKE ? OR egress_handler_id LIKE ? OR description LIKE ? OR domains_json LIKE ?"
     ).toBeTruthy();
   });
 });

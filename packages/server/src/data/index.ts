@@ -94,6 +94,16 @@ export {
 } from "./snapshots.js";
 
 // =============================================================================
+// Container Contexts
+// =============================================================================
+
+export type {
+  ContainerContext,
+  RegisterContainerContextParams,
+} from "./container-contexts.js";
+export { ContainerContextRepository } from "./container-contexts.js";
+
+// =============================================================================
 // Auth
 // =============================================================================
 

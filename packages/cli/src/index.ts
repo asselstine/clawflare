@@ -15,6 +15,12 @@ import {
   providersRemoveCommand,
   providersListCommand,
 } from "./commands/providers.js";
+import {
+  egressAddCommand,
+  egressDisableCommand,
+  egressEnableCommand,
+  egressListCommand,
+} from "./commands/egress.js";
 
 const program = new Command()
   .name("clawflare")
@@ -119,6 +125,50 @@ program
       .option("--available", "List available providers from the server catalog")
       .action(async (options: { server?: string; token?: string; available?: boolean }) => {
         await providersListCommand(options);
+      })
+  );
+
+// egress command
+program
+  .command("egress")
+  .description("Manage egress handlers")
+  .addCommand(
+    new Command("add")
+      .description("Add or configure an egress handler")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (options: { server?: string; token?: string }) => {
+        await egressAddCommand(options);
+      })
+  )
+  .addCommand(
+    new Command("list")
+      .description("List egress handlers")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .option("-a, --available", "List available egress handlers from the server catalog")
+      .action(async (options: { server?: string; token?: string; available?: boolean }) => {
+        await egressListCommand(options);
+      })
+  )
+  .addCommand(
+    new Command("enable")
+      .description("Enable a configured egress handler")
+      .argument("[egressHandlerId]", "Egress handler ID")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (egressHandlerId: string | undefined, options: { server?: string; token?: string }) => {
+        await egressEnableCommand({ ...options, egressHandlerId });
+      })
+  )
+  .addCommand(
+    new Command("disable")
+      .description("Disable a configured egress handler")
+      .argument("[egressHandlerId]", "Egress handler ID")
+      .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
+      .option("-t, --token <token>", "API token for authentication")
+      .action(async (egressHandlerId: string | undefined, options: { server?: string; token?: string }) => {
+        await egressDisableCommand({ ...options, egressHandlerId });
       })
   );
 

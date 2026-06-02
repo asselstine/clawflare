@@ -178,14 +178,14 @@ export {
   type PublicModelConnection,
 } from "./modules/model-connections/model-connections.validation.js";
 
-// Export secret store adapter and authorization types
+// Export secret broker client and authorization types
 export {
-  createSecretStore,
-  getSecretStore,
-  type SecretStore,
+  SecretBrokerClient,
+  createSecretBrokerClient,
+  getSecretBrokerClient,
   type AuthSession,
   type AuthorizationContext,
-} from "./data/secrets/index.js";
+} from "./modules/secrets/index.js";
 
 // Main Cloudflare Worker export
 export default {

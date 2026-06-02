@@ -9,6 +9,7 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "../../../internal-types/index.js";
+import { ContainerContextRepository } from "../../../data/index.js";
 import {
   containerBash,
   containerRead,
@@ -26,6 +27,7 @@ import { tailToolOutput, getEffectiveOutputLimit } from "./output.js";
 // Tool execution context
 export interface ContainerToolContext {
   sessionId: string;
+  workspaceId?: string;
 }
 
 // Container create parameters
@@ -244,6 +246,20 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+async function registerContainerContext(
+  env: Env,
+  ctx: ContainerToolContext,
+  containerId: string
+): Promise<void> {
+  if (!ctx.workspaceId) return;
+  const contexts = new ContainerContextRepository(env.DB);
+  await contexts.register({
+    containerId,
+    workspaceId: ctx.workspaceId,
+    sessionId: ctx.sessionId,
+  });
+}
+
 // Tool: container_create
 export function createContainerCreateTool(
   env: Env,
@@ -273,6 +289,7 @@ export function createContainerCreateTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerCreateParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
+      await registerContainerContext(env, ctx, containerId);
       
       // Get or start container
       const health = await getContainerHealth(env, containerId, signal);
@@ -339,7 +356,8 @@ export function createContainerBashTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerBashParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerBash(
         env,
         containerId,
@@ -406,7 +424,8 @@ export function createContainerReadTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerReadParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerRead(
         env,
         containerId,
@@ -469,7 +488,8 @@ export function createContainerWriteTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerWriteParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerWrite(
         env,
         containerId,
@@ -525,7 +545,8 @@ export function createContainerEditTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerEditParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerEdit(
         env,
         containerId,
@@ -586,7 +607,8 @@ export function createContainerGrepTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerGrepParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerGrep(
         env,
         containerId,
@@ -644,7 +666,8 @@ export function createContainerFindTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerFindParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerFind(
         env,
         containerId,
@@ -697,7 +720,8 @@ export function createContainerLsTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerLsParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      
+      await registerContainerContext(env, ctx, containerId);
+
       const result = await containerLs(
         env,
         containerId,
@@ -738,10 +762,15 @@ export function createContainerDestroyTool(
     ): Promise<AgentToolResult<unknown>> => {
       const p = params as ContainerDestroyParams;
       const containerId = deriveContainerId(ctx.sessionId, p.containerId);
+      await registerContainerContext(env, ctx, containerId);
       if (signal?.aborted) {
         throw new Error("Container destroy aborted");
       }
       await destroyContainer(env, containerId);
+      if (ctx.workspaceId) {
+        const contexts = new ContainerContextRepository(env.DB);
+        await contexts.deleteForSession(ctx.workspaceId, ctx.sessionId, containerId);
+      }
 
       return {
         content: [{ type: "text", text: `Destroyed container: ${containerId}` }],

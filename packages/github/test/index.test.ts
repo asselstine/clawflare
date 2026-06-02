@@ -66,6 +66,29 @@ describe("github egress handler", () => {
     });
   });
 
+  describe("fetch context", () => {
+    it("does not throw when called without an egress context", async () => {
+      const registry = createRegistry();
+      registerEgressHandlers(registry);
+      const handler = registry.get("github")!;
+
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn(() =>
+        Promise.resolve(new Response(JSON.stringify({ login: "octocat" })))
+      ) as typeof globalThis.fetch;
+
+      try {
+        const response = await handler.fetch!(
+          new Request("https://api.github.com/user"),
+          undefined as unknown as EgressContext<MockEnv>
+        );
+        expect(response.status).toBe(200);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+  });
+
   describe("classification", () => {
     it.each([
       ["https://api.github.com/repos/owner/repo", "api"],

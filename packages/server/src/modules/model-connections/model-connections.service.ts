@@ -7,7 +7,10 @@ import {
   SessionRepository,
   type ModelConnection,
 } from "../../data/index.js";
-import { getSecretStore, type AuthSession } from "../../data/secrets/index.js";
+import {
+  getSecretBrokerClient,
+  type AuthSession,
+} from "../secrets/index.js";
 import {
   requiredSecretsForProvider,
   defaultModelForProvider,
@@ -36,6 +39,14 @@ export interface ResolvedModelConnection {
 export interface CreateModelConnectionResult {
   connection: ModelConnection;
   secretsStored: string[];
+}
+
+function createModelConnectionSecretRef(
+  workspaceId: string,
+  connectionId: string,
+  key: string
+): string {
+  return `workspaces_${workspaceId}_mc_${connectionId}_${key}`;
 }
 
 /**
@@ -73,7 +84,7 @@ export async function createModelConnection(
   }
 
   const modelConnections = new ModelConnectionRepository(env.DB);
-  const secretStore = getSecretStore(env);
+  const secretBroker = getSecretBrokerClient(env);
 
   // Create D1 record first
   const connection = await modelConnections.create({
@@ -90,12 +101,8 @@ export async function createModelConnection(
 
   for (const [key, value] of Object.entries(input.secrets)) {
     if (value) {
-      const ref = await secretStore.putModelConnectionSecret(auth, {
-        workspaceId,
-        connectionId: connection.id,
-        key,
-        value,
-      });
+      const ref = createModelConnectionSecretRef(workspaceId, connection.id, key);
+      await secretBroker.put(auth, ref, value);
       secretRefs[key] = ref;
       secretsStored.push(key);
     }
@@ -138,7 +145,7 @@ export async function updateModelConnection(
   }
 ): Promise<ModelConnection> {
   const modelConnections = new ModelConnectionRepository(env.DB);
-  const secretStore = getSecretStore(env);
+  const secretBroker = getSecretBrokerClient(env);
 
   // Get existing connection
   const existing = await modelConnections.get(workspaceId, id);
@@ -163,12 +170,8 @@ export async function updateModelConnection(
     // Store new secrets
     for (const [key, value] of Object.entries(input.secrets)) {
       if (value) {
-        const ref = await secretStore.putModelConnectionSecret(auth, {
-          workspaceId,
-          connectionId: id,
-          key,
-          value,
-        });
+        const ref = createModelConnectionSecretRef(workspaceId, id, key);
+        await secretBroker.put(auth, ref, value);
         secretRefs[key] = ref;
       }
     }
@@ -208,7 +211,7 @@ export async function deleteModelConnection(
   auth: AuthSession
 ): Promise<void> {
   const modelConnections = new ModelConnectionRepository(env.DB);
-  const secretStore = getSecretStore(env);
+  const secretBroker = getSecretBrokerClient(env);
 
   // Get connection to find secret refs
   const connection = await modelConnections.get(workspaceId, id);
@@ -220,7 +223,7 @@ export async function deleteModelConnection(
   const deleteErrors: string[] = [];
   for (const ref of Object.values(connection.secretRefs)) {
     try {
-      await secretStore.deleteModelConnectionSecret(auth, ref);
+      await secretBroker.delete(auth, ref);
     } catch (error) {
       deleteErrors.push(error instanceof Error ? error.message : String(error));
     }
@@ -260,7 +263,7 @@ export async function resolveModelConnection(
   auth: AuthSession
 ): Promise<ResolvedModelConnection> {
   const modelConnections = new ModelConnectionRepository(env.DB);
-  const secretStore = getSecretStore(env);
+  const secretBroker = getSecretBrokerClient(env);
 
   const connection = await modelConnections.get(workspaceId, connectionId);
   if (!connection) {
@@ -279,7 +282,7 @@ export async function resolveModelConnection(
       );
     }
 
-    const value = await secretStore.getModelConnectionSecret(auth, ref);
+    const value = await secretBroker.get(auth, ref);
     if (!value) {
       throw new Error(
         `Model connection "${connection.id}" is missing required secret "${key}"`

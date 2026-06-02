@@ -131,7 +131,11 @@ async function getSessionWorkspaceId(env: Env, sessionId: string): Promise<strin
   return session?.workspaceId ?? "default-workspace";
 }
 
-async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> {
+async function createWorkflowAgent(
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  sessionId: string
+): Promise<Agent> {
   const componentsStart = timingStart();
   
   // Fetch workspace ID for session to scope tool operations
@@ -151,7 +155,7 @@ async function createWorkflowAgent(env: Env, sessionId: string): Promise<Agent> 
   const streamFn = shouldUseMockAI(env) ? createMockStream() : components.streamFn;
   
   // Create tools with workspace context
-  const tools = createTools(env, undefined, { sessionId, workspaceId });
+  const tools = createTools(env, ctx, { sessionId, workspaceId });
   
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
     model: components.model.id,
@@ -393,7 +397,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
         await saveSessionMetadata(sessions, runtime, events, sessionId, "processing");
         logTiming(this.env, sessionId, "workflow.session.processing_saved", metadataStart);
 
-        const agent = await createWorkflowAgent(this.env, sessionId);
+        const agent = await createWorkflowAgent(this.env, this.ctx, sessionId);
         const loadedSession = await loadAgentSession(this.env, sessionId);
         const enqueueStart = timingStart();
         const result = agent.enqueuePrompt(loadedSession, input.content);
@@ -437,7 +441,7 @@ export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, Persisten
             });
             const runtime = new SessionRuntimeRepository(this.env.DB);
             const events = new SessionEventRepository(this.env.DB);
-            const agent = await createWorkflowAgent(this.env, sessionId);
+            const agent = await createWorkflowAgent(this.env, this.ctx, sessionId);
             const result = await agent.runSingleStep(agentSession, currentStep);
             logTiming(this.env, sessionId, "workflow.agent_step.ran", stepStart, {
               stepType: currentStep.type,

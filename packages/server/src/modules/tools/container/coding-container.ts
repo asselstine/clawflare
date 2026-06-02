@@ -10,6 +10,7 @@
 import { Container, ContainerProxy } from "@cloudflare/containers";
 import type { Env } from "../../../internal-types/index.js";
 import { routeOutboundRequest } from "../../../egress/gateway.js";
+import { ContainerContextRepository } from "../../../data/index.js";
 
 // Required for outbound interception to work.
 export { ContainerProxy };
@@ -22,7 +23,21 @@ const codingContainerOutbound = async (
 ): Promise<Response> => {
   // Pass container ID as request ID for egress logging/tracking
   const requestId = ctx?.containerId ? `container:${ctx.containerId}` : "container:unknown";
-  return routeOutboundRequest(env, request, requestId);
+  const containerId = ctx?.containerId;
+  if (!containerId) {
+    return routeOutboundRequest(env, request, requestId);
+  }
+
+  const contexts = new ContainerContextRepository(env.DB);
+  const containerContext = await contexts.get(containerId);
+  if (!containerContext) {
+    return routeOutboundRequest(env, request, requestId);
+  }
+
+  return routeOutboundRequest(env, request, requestId, {
+    workspaceId: containerContext.workspaceId,
+    auth: { type: "session", sessionId: containerContext.sessionId },
+  });
 };
 
 /**

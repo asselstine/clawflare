@@ -166,6 +166,7 @@ describe("migrations", () => {
       "idx_stored_code_workspace_updated",
       "idx_stored_code_workspace_name",
       "idx_egress_handlers_enabled",
+      "idx_egress_handlers_id",
       "idx_egress_handlers_name",
       "idx_egress_handlers_updated",
     ];

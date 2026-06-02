@@ -176,6 +176,14 @@ export const sessionRuntime = sqliteTable("session_runtime", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+export const containerContexts = sqliteTable("container_contexts", {
+  containerId: text("container_id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
 export const storedCode = sqliteTable(
   "stored_code",
   {
@@ -192,15 +200,23 @@ export const storedCode = sqliteTable(
   })
 );
 
-export const egressHandlers = sqliteTable("egress_handlers", {
-  name: text("name").primaryKey(),
-  workspaceId: text("workspace_id"),
-  description: text("description").notNull(),
-  domainsJson: text("domains_json").notNull(),
-  enabled: integer("enabled").notNull().default(1),
-  configJson: text("config_json").notNull().default(sql`'{}'`),
-  updatedAt: integer("updated_at").notNull(),
-});
+export const egressHandlers = sqliteTable(
+  "egress_handlers",
+  {
+    workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    egressHandlerId: text("egress_handler_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description").notNull(),
+    domainsJson: text("domains_json").notNull(),
+    enabled: integer("enabled").notNull().default(1),
+    secretRefsJson: text("secret_refs_json").notNull().default(sql`'{}'`),
+    configJson: text("config_json").notNull().default(sql`'{}'`),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.workspaceId, table.egressHandlerId] }),
+  })
+);
 
 export const modelConnections = sqliteTable("model_connections", {
   id: text("id").primaryKey(),

@@ -7,20 +7,24 @@
 
 export interface EgressHandlerMetadata {
   workspaceId: string;
+  egressHandlerId: string;
   name: string;
   description: string;
   domains: string[];
   enabled: boolean;
+  secretRefs: Record<string, string>;
   config: unknown;
   updatedAt: number;
 }
 
 export interface UpsertEgressHandlerParams {
   workspaceId: string;
+  egressHandlerId: string;
   name: string;
   description: string;
   domains: string[];
   enabled?: boolean;
+  secretRefs?: Record<string, string>;
   config?: unknown;
 }
 
@@ -35,18 +39,22 @@ import { and, asc, eq, like, or } from "drizzle-orm";
 
 const BUILT_IN_EGRESS_HANDLERS: Omit<EgressHandlerMetadata, "workspaceId">[] = [
   {
-    name: githubMetadata.name,
+    egressHandlerId: githubMetadata.name,
+    name: "GitHub",
     description: githubMetadata.description,
     domains: githubMetadata.domains,
     enabled: true,
+    secretRefs: {},
     config: {},
     updatedAt: 0,
   },
   {
-    name: cloudflareMetadata.name,
+    egressHandlerId: cloudflareMetadata.name,
+    name: "Cloudflare",
     description: cloudflareMetadata.description,
     domains: cloudflareMetadata.domains,
     enabled: true,
+    secretRefs: {},
     config: {},
     updatedAt: 0,
   },
@@ -60,36 +68,43 @@ function mergeBuiltIns(
   workspaceId: string,
   rows: EgressHandlerMetadata[]
 ): EgressHandlerMetadata[] {
-  const byName = new Map<string, EgressHandlerMetadata>();
+  const byId = new Map<string, EgressHandlerMetadata>();
   
   // Add built-ins first (they'll be overridden by DB entries if same name exists)
   for (const handler of BUILT_IN_EGRESS_HANDLERS) {
-    byName.set(handler.name, { ...handler, workspaceId });
+    byId.set(handler.egressHandlerId, { ...handler, workspaceId });
   }
   
   // Override with DB entries
   for (const handler of rows) {
-    byName.set(handler.name, handler);
+    byId.set(handler.egressHandlerId, handler);
   }
   
-  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return Array.from(byId.values()).sort((a, b) => a.egressHandlerId.localeCompare(b.egressHandlerId));
 }
 
 function matchesQuery(handler: EgressHandlerMetadata, query: string): boolean {
   if (query === "*" || query === "") return true;
-  const normalized = query.replace(/^\*/, "").toLowerCase();
+  const normalized = query.replace(/^\*+|\*+$/g, "").toLowerCase();
   return handler.name.toLowerCase().includes(normalized)
+    || handler.egressHandlerId.toLowerCase().includes(normalized)
     || handler.description.toLowerCase().includes(normalized)
     || handler.domains.some((domain) => domain.toLowerCase().includes(normalized));
+}
+
+function normalizeSearchQuery(query: string): string {
+  return query.replace(/^\*+|\*+$/g, "");
 }
 
 function mapEgressHandler(row: typeof egressHandlers.$inferSelect): EgressHandlerMetadata {
   return {
     workspaceId: row.workspaceId ?? "",
+    egressHandlerId: row.egressHandlerId,
     name: row.name,
     description: row.description,
     domains: JSON.parse(row.domainsJson) as string[],
     enabled: Boolean(row.enabled),
+    secretRefs: JSON.parse(row.secretRefsJson) as Record<string, string>,
     config: JSON.parse(row.configJson) as unknown,
     updatedAt: row.updatedAt,
   };
@@ -105,38 +120,42 @@ export class EgressHandlerRepository {
   async upsert(params: UpsertEgressHandlerParams): Promise<void> {
     const now = Date.now();
     const domainsJson = JSON.stringify(params.domains);
+    const secretRefsJson = JSON.stringify(params.secretRefs ?? {});
     const configJson = JSON.stringify(params.config ?? {});
 
     await this.db
       .insert(egressHandlers)
       .values({
         workspaceId: params.workspaceId,
+        egressHandlerId: params.egressHandlerId,
         name: params.name,
         description: params.description,
         domainsJson,
         enabled: params.enabled === false ? 0 : 1,
+        secretRefsJson,
         configJson,
         updatedAt: now,
       })
       .onConflictDoUpdate({
-        target: egressHandlers.name,
+        target: [egressHandlers.workspaceId, egressHandlers.egressHandlerId],
         set: {
-          workspaceId: params.workspaceId,
+          name: params.name,
           description: params.description,
           domainsJson,
           enabled: params.enabled === false ? 0 : 1,
+          secretRefsJson,
           configJson,
           updatedAt: now,
         },
       });
   }
 
-  async get(workspaceId: string, name: string): Promise<EgressHandlerMetadata | null> {
+  async get(workspaceId: string, egressHandlerId: string): Promise<EgressHandlerMetadata | null> {
     // First check built-ins
-    const builtIn = BUILT_IN_EGRESS_HANDLERS.find((h) => h.name === name);
+    const builtIn = BUILT_IN_EGRESS_HANDLERS.find((h) => h.egressHandlerId === egressHandlerId);
     
     const row = await this.db.query.egressHandlers.findFirst({
-      where: and(eq(egressHandlers.workspaceId, workspaceId), eq(egressHandlers.name, name)),
+      where: and(eq(egressHandlers.workspaceId, workspaceId), eq(egressHandlers.egressHandlerId, egressHandlerId)),
     });
 
     if (row) {
@@ -163,13 +182,15 @@ export class EgressHandlerRepository {
   }
 
   async search(workspaceId: string, query: string, limit = 20): Promise<EgressHandlerMetadata[]> {
-    const q = query === "*" ? "%" : `%${query}%`;
+    const normalizedQuery = normalizeSearchQuery(query);
+    const q = query === "*" || normalizedQuery === "" ? "%" : `%${normalizedQuery}%`;
 
     const rows = await this.db.query.egressHandlers.findMany({
       where: and(
         eq(egressHandlers.workspaceId, workspaceId),
         or(
           like(egressHandlers.name, q),
+          like(egressHandlers.egressHandlerId, q),
           like(egressHandlers.description, q),
           like(egressHandlers.domainsJson, q)
         )

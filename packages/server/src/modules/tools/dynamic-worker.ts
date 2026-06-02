@@ -1,8 +1,11 @@
 import type { Env, WorkerLoaderWorkerCode } from "../../internal-types/index.js";
 import type { ExecutionResult } from "../../internal-types/tools.js";
+import type { HttpGatewayProps } from "../../egress/gateway.js";
 
 interface DynamicExecutionOptions {
   requestId?: string;
+  sessionId?: string;
+  workspaceId?: string;
   allowOutbound?: boolean;
 }
 
@@ -18,13 +21,13 @@ export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a
 
 export async function executeDynamicWorker(
   env: Env,
-  _ctx: ExecutionContext | undefined,
+  ctx: ExecutionContext | undefined,
   code: string,
   input?: unknown,
   options: DynamicExecutionOptions = {}
 ): Promise<ExecutionResult> {
   try {
-    const outbound = options.allowOutbound === false ? null : createGatewayOutbound(env);
+    const outbound = options.allowOutbound === false ? null : createGatewayOutbound(env, ctx, options);
     const userModule = createUserModule(code);
 
     const workerCode: WorkerLoaderWorkerCode = {
@@ -123,8 +126,31 @@ export default {
   }
 }
 
-function createGatewayOutbound(env: Env): Fetcher {
-  return env.HTTP_GATEWAY;
+function createGatewayOutbound(
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  options: DynamicExecutionOptions
+): Fetcher {
+  if (!options.sessionId && !options.workspaceId && !options.requestId) {
+    return env.HTTP_GATEWAY;
+  }
+
+  const ctxExports = (ctx as unknown as { exports?: Record<string, unknown> } | undefined)?.exports;
+  const httpGateway = ctxExports?.HttpGateway as
+    | ((options: { props?: HttpGatewayProps }) => Fetcher)
+    | undefined;
+
+  if (!httpGateway) {
+    return env.HTTP_GATEWAY;
+  }
+
+  return httpGateway({
+    props: {
+      requestId: options.requestId,
+      workspaceId: options.workspaceId,
+      sessionId: options.sessionId,
+    },
+  });
 }
 
 function createUserModule(code: string): string {

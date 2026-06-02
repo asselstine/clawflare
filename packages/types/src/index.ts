@@ -118,6 +118,41 @@ export interface ProviderModelsResponse {
   models: ProviderModelInfo[];
 }
 
+export interface EgressHandlerInfo {
+  egressHandlerId: string;
+  name: string;
+  displayName: string;
+  description: string;
+  domains: string[];
+  enabled: boolean;
+  configuredSecrets: string[];
+  requiredSecrets: string[];
+  optionalSecrets: string[];
+  configSchema?: Record<string, unknown>;
+  updatedAt: number;
+}
+
+export interface EgressHandlerListResponse {
+  egressHandlers: EgressHandlerInfo[];
+}
+
+export interface EgressHandlerResponse {
+  egressHandler: EgressHandlerInfo;
+}
+
+export interface ConfigureEgressHandlerRequest {
+  egressHandlerId: string;
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export interface UpdateEgressHandlerRequest {
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
 export interface ModelConnection {
   id: string;
   workspaceId: string;
