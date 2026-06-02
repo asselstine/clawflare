@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { handleGetSession } from "../../../src/modules/sessions/sessions.routes.js";
+import { handleGetSession, handleStreamSessionEvents } from "../../../src/modules/sessions/sessions.routes.js";
 import type { RequestContext } from "../../../src/http/request-context.js";
 import type { Env } from "../../../src/internal-types/index.js";
 
@@ -106,5 +106,39 @@ describe("handleGetSession timeout recovery", () => {
     expect(data.messages).toBeUndefined();
     expect(data.events).toHaveLength(1);
     expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
+  });
+
+  it("streams session responses as server-sent events", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "workflow-1",
+      status: "idle",
+      nextEventCursor: "1",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.listSince.mockResolvedValue({
+      events: [{ type: "message_end", timestamp: Date.now(), sequence: 1 }],
+      nextCursor: "1",
+    });
+    mocks.getWorkflowSession.mockResolvedValue({
+      messages: [{ role: "assistant", content: "hello" }],
+    });
+
+    const response = await handleStreamSessionEvents(
+      "session-1",
+      new URL("https://example.com/v1/session/session-1/events?since=0&includeMessages=auto"),
+      new Request("https://example.com/v1/session/session-1/events"),
+      {} as Env,
+      createRequestContext(),
+    );
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(body).toContain("event: session");
+    expect(body).toContain("\"status\":\"idle\"");
+    expect(body).toContain("\"content\":\"hello\"");
   });
 });

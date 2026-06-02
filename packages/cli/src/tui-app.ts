@@ -1320,8 +1320,9 @@ export class ClawflareTUIApp {
       // Check if complete
       if (actuallyComplete) {
         if (update.session.status === "error") {
-          this.error = update.session.errorMessage || "Processing failed";
-          this.messages.push({ role: "error", content: this.error });
+          const errorMessage = update.session.errorMessage || "Processing failed";
+          this.error = errorMessage;
+          this.messages.push({ role: "error", content: errorMessage });
         }
         break;
       }

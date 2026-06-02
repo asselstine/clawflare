@@ -28,6 +28,9 @@ sessionRoutes.use("*", requireAuth);
 sessionRoutes.post("/", (c) =>
   handleCreateSession(c.req.raw, c.env, c.get("requestContext")!)
 );
+sessionRoutes.get("/:id/events", (c) =>
+  handleStreamSessionEvents(c.req.param("id"), new URL(c.req.url), c.req.raw, c.env, c.get("requestContext")!)
+);
 sessionRoutes.get("/:id", (c) =>
   handleGetSession(c.req.param("id"), new URL(c.req.url), c.env, c.get("requestContext")!)
 );
@@ -156,6 +159,84 @@ export async function handleCreateSession(
 // Handles session polling, closing, and listing
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const SESSION_EVENT_PAGE_SIZE = 100;
+const SESSION_EVENT_STREAM_POLL_MS = 100;
+const SESSION_EVENT_STREAM_HEARTBEAT_MS = 15000;
+const SESSION_EVENT_STREAM_MAX_IDLE_MS = 30 * 60 * 1000;
+
+function isSessionStreamTerminal(status: SessionStatus): boolean {
+  return status === "idle" || status === "error" || status === "closed" || status === "expired";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function buildSessionResponse(
+  sessionId: string,
+  url: URL,
+  env: Env,
+  requestContext: RequestContext,
+): Promise<Response | SessionResponse> {
+  const sessions = new SessionRepository(env.DB);
+  const eventsRepo = new SessionEventRepository(env.DB);
+  const runtime = new SessionRuntimeRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  let sessionState = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+
+  if (!sessionState) {
+    return notFound("Session");
+  }
+
+  // Check for stuck workflows (auto-recovery)
+  if (sessionState.status === "processing" &&
+      Date.now() - sessionState.updatedAt > PROCESSING_TIMEOUT_MS) {
+    console.warn(`[handleGetSession] Session ${sessionId} stuck in processing for ${Date.now() - sessionState.updatedAt}ms, marking as error`);
+    const updatedSession: SessionMetadataState = {
+      ...sessionState,
+      status: "error",
+      errorMessage: "Session timed out - processing took too long. Try closing this session and starting a new one.",
+      updatedAt: Date.now(),
+    };
+    await sessions.save(updatedSession);
+    sessionState = updatedSession;
+  }
+
+  const sinceCursor = url.searchParams.get("since");
+  const { events, nextCursor } = await eventsRepo.listSince(
+    sessionId,
+    sinceCursor || undefined,
+    SESSION_EVENT_PAGE_SIZE
+  );
+
+  const includeMessages = url.searchParams.get("includeMessages");
+  const shouldIncludeMessages = includeMessages === "auto"
+    ? events.some((event) => event.type === "message_end") || sessionState.status === "idle" || sessionState.status === "error"
+    : includeMessages !== "0" && includeMessages !== "false";
+
+  const workflowSession = shouldIncludeMessages
+    ? await runtime.getWorkflowSession(sessionId) as
+      | { messages?: import("../../types.js").AgentMessage[] }
+      | null
+    : null;
+
+  const response: SessionResponse = {
+    id: sessionState.id,
+    name: sessionState.name,
+    status: sessionState.status,
+    events,
+    nextEventCursor: nextCursor,
+    errorMessage: sessionState.errorMessage,
+    workspaceId: sessionState.workspaceId,
+  };
+
+  if (shouldIncludeMessages) {
+    response.messages = workflowSession?.messages ?? [];
+  }
+
+  return response;
+}
 
 /**
  * Get session state - polls for messages and events
@@ -166,71 +247,135 @@ export async function handleGetSession(
   env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
-  const sessions = new SessionRepository(env.DB);
-  const eventsRepo = new SessionEventRepository(env.DB);
-  const runtime = new SessionRuntimeRepository(env.DB);
   // Use workspace from request context
   const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
-    // Find session scoped to workspace
-    let sessionState = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
-
-    if (!sessionState) {
-      return notFound("Session");
-    }
-
-    // Check for stuck workflows (auto-recovery)
-    if (sessionState.status === "processing" &&
-        Date.now() - sessionState.updatedAt > PROCESSING_TIMEOUT_MS) {
-      console.warn(`[handleGetSession] Session ${sessionId} stuck in processing for ${Date.now() - sessionState.updatedAt}ms, marking as error`);
-      const updatedSession: SessionMetadataState = {
-        ...sessionState,
-        status: "error",
-        errorMessage: "Session timed out - processing took too long. Try closing this session and starting a new one.",
-        updatedAt: Date.now(),
-      };
-      await sessions.save(updatedSession);
-      sessionState = updatedSession;
-    }
-
-    const sinceCursor = url.searchParams.get("since");
-    const { events, nextCursor } = await eventsRepo.listSince(
-      sessionId,
-      sinceCursor || undefined,
-      100
-    );
-
-    const includeMessages = url.searchParams.get("includeMessages");
-    const shouldIncludeMessages = includeMessages === "auto"
-      ? events.some((event) => event.type === "message_end") || sessionState.status === "idle" || sessionState.status === "error"
-      : includeMessages !== "0" && includeMessages !== "false";
-
-    const workflowSession = shouldIncludeMessages
-      ? await runtime.getWorkflowSession(sessionId) as
-        | { messages?: import("../../types.js").AgentMessage[] }
-        | null
-      : null;
-
-    const response: SessionResponse = {
-      id: sessionState.id,
-      name: sessionState.name,
-      status: sessionState.status,
-      events,
-      nextEventCursor: nextCursor,
-      errorMessage: sessionState.errorMessage,
-      workspaceId: sessionState.workspaceId,
-    };
-
-    if (shouldIncludeMessages) {
-      response.messages = workflowSession?.messages ?? [];
-    }
+    const response = await buildSessionResponse(sessionId, url, env, requestContext);
+    if (response instanceof Response) return response;
 
     return json(response);
   } catch (error) {
     logger.error("Session poll failed", error, {
       handler: "handleGetSession",
       route: "GET /v1/session/:id",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
+ * Stream session state updates using Server-Sent Events.
+ */
+export async function handleStreamSessionEvents(
+  sessionId: string,
+  url: URL,
+  request: Request,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const effectiveWorkspaceId = requestContext.workspace.id;
+  const encoder = new TextEncoder();
+
+  try {
+    const initial = await buildSessionResponse(sessionId, url, env, requestContext);
+    if (initial instanceof Response) return initial;
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let cursor = url.searchParams.get("since") || undefined;
+        let lastStatus: SessionStatus | undefined;
+        let lastSentAt = Date.now();
+        let closed = false;
+
+        const send = (event: string, data?: SessionResponse): void => {
+          if (closed) return;
+          const payload = data
+            ? `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+            : `: ${event}\n\n`;
+          controller.enqueue(encoder.encode(payload));
+          lastSentAt = Date.now();
+        };
+
+        request.signal.addEventListener("abort", () => {
+          closed = true;
+        });
+
+        try {
+          let next = initial;
+          const startedAt = Date.now();
+
+          while (!closed) {
+            const hasNewEvents = next.events.length > 0;
+            const statusChanged = next.status !== lastStatus;
+            const terminal = isSessionStreamTerminal(next.status);
+            const hasFullPage = next.events.length >= SESSION_EVENT_PAGE_SIZE;
+
+            if (hasNewEvents || statusChanged || terminal) {
+              send("session", next);
+              cursor = next.nextEventCursor;
+              lastStatus = next.status;
+            } else if (Date.now() - lastSentAt >= SESSION_EVENT_STREAM_HEARTBEAT_MS) {
+              send("heartbeat");
+            }
+
+            if (terminal && !hasFullPage) {
+              break;
+            }
+
+            if (Date.now() - startedAt >= SESSION_EVENT_STREAM_MAX_IDLE_MS) {
+              break;
+            }
+
+            if (!hasFullPage) {
+              await delay(SESSION_EVENT_STREAM_POLL_MS);
+            }
+
+            const nextUrl = new URL(url);
+            if (cursor) nextUrl.searchParams.set("since", cursor);
+            const response = await buildSessionResponse(sessionId, nextUrl, env, requestContext);
+            if (response instanceof Response) {
+              closed = true;
+              break;
+            }
+            next = response;
+          }
+        } catch (error) {
+          logger.error("Session event stream failed", error, {
+            handler: "handleStreamSessionEvents",
+            route: "GET /v1/session/:id/events",
+            sessionId,
+            workspaceId: effectiveWorkspaceId,
+          });
+          if (!closed) {
+            controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
+              error: error instanceof Error ? error.message : "Unknown error",
+            })}\n\n`));
+          }
+        } finally {
+          if (!closed) {
+            controller.close();
+          }
+        }
+      },
+      cancel() {
+        request.signal.dispatchEvent(new Event("abort"));
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+      },
+    });
+  } catch (error) {
+    logger.error("Session event stream failed", error, {
+      handler: "handleStreamSessionEvents",
+      route: "GET /v1/session/:id/events",
       sessionId,
       workspaceId: effectiveWorkspaceId,
     });
