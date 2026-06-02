@@ -3,7 +3,7 @@
  * 
  * Session-based API - no workflow concepts exposed
  * - submitChat() returns sessionId for polling
- * - getSession() polls for messages and events
+ * - streamSession() streams session events when available and falls back to polling
  * - Workflows are an internal implementation detail
  */
 
@@ -100,6 +100,8 @@ interface DeleteEgressHandlerResponse {
 }
 
 const SESSION_EVENT_PAGE_SIZE = 100;
+type SessionStreamTransport = "auto" | "sse" | "poll";
+type SessionStreamUpdate = { session: SessionResponse; newEvents: SessionEvent[]; complete: boolean };
 
 export class AgentClient {
   private url: string;
@@ -142,6 +144,17 @@ export class AgentClient {
     });
 
     return this.parseJsonResponse<T>(response);
+  }
+
+  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+    const url = this.buildUrl(path);
+    return fetch(url, {
+      ...init,
+      headers: {
+        ...this.getHeaders(),
+        ...(init.headers || {}),
+      },
+    });
   }
 
   /**
@@ -255,8 +268,40 @@ export class AgentClient {
   async *streamSession(
     sessionId: string,
     signal?: AbortSignal,
+    options: {
+      pollIntervalMs?: number;
+      maxPolls?: number;
+      initialCursor?: string;
+      debug?: boolean;
+      transport?: SessionStreamTransport;
+    } = {},
+  ): AsyncGenerator<SessionStreamUpdate> {
+    const transport = options.transport ?? "auto";
+
+    if (transport !== "poll") {
+      let streamed = false;
+      try {
+        for await (const update of this.streamSessionEvents(sessionId, signal, options)) {
+          streamed = true;
+          yield update;
+        }
+        return;
+      } catch (error) {
+        if (transport === "sse" || streamed || signal?.aborted) throw error;
+        if (options.debug) {
+          console.log(`[streamSession] SSE unavailable, falling back to polling: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+
+    yield* this.pollSession(sessionId, signal, options);
+  }
+
+  private async *pollSession(
+    sessionId: string,
+    signal?: AbortSignal,
     options: { pollIntervalMs?: number; maxPolls?: number; initialCursor?: string; debug?: boolean } = {},
-  ): AsyncGenerator<{ session: SessionResponse; newEvents: SessionEvent[]; complete: boolean }> {
+  ): AsyncGenerator<SessionStreamUpdate> {
     const pollIntervalMs = options.pollIntervalMs ?? 250;
     const maxPolls = options.maxPolls ?? 10000;
     let cursor: string | undefined = options.initialCursor;
@@ -267,7 +312,10 @@ export class AgentClient {
       const session = await this.getSession(sessionId, cursor, { includeMessages: "auto" });
       
       const newEvents = session.events;
-      const sessionComplete = session.status === "idle" || session.status === "error";
+      const sessionComplete = session.status === "idle" ||
+        session.status === "error" ||
+        session.status === "closed" ||
+        session.status === "expired";
       const mayHaveMoreEvents = sessionComplete && newEvents.length >= SESSION_EVENT_PAGE_SIZE;
       const complete = sessionComplete && !mayHaveMoreEvents;
       
@@ -290,6 +338,73 @@ export class AgentClient {
     }
 
     throw new Error(`Session ${sessionId} did not complete before polling timed out`);
+  }
+
+  private async *streamSessionEvents(
+    sessionId: string,
+    signal?: AbortSignal,
+    options: { initialCursor?: string; debug?: boolean } = {},
+  ): AsyncGenerator<SessionStreamUpdate> {
+    const query = new URLSearchParams();
+    if (options.initialCursor) query.set("since", options.initialCursor);
+    query.set("includeMessages", "auto");
+
+    const path = `/v1/session/${sessionId}/events?${query.toString()}`;
+    const response = await this.request(path, {
+      method: "GET",
+      headers: { Accept: "text/event-stream" },
+      signal,
+    });
+
+    if (!response.ok) {
+      const errorData = await this.parseApiError(response);
+      throw new Error(formatApiError(response.status, errorData));
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (!contentType.includes("text/event-stream")) {
+      throw new Error(`Expected text/event-stream response, got ${contentType || "unknown content type"}`);
+    }
+
+    if (!response.body) {
+      throw new Error("Event stream response has no body");
+    }
+
+    for await (const event of parseServerSentEvents(response.body)) {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+      if (event.event === "heartbeat") continue;
+      if (event.event === "error") {
+        const parsed = safeJsonParse<{ error?: string }>(event.data);
+        throw new Error(parsed?.error ?? "Session event stream failed");
+      }
+      if (event.event && event.event !== "session") continue;
+
+      const session = safeJsonParse<SessionResponse>(event.data);
+      if (!session) continue;
+
+      const newEvents = session.events;
+      const sessionComplete = session.status === "idle" ||
+        session.status === "error" ||
+        session.status === "closed" ||
+        session.status === "expired";
+      const mayHaveMoreEvents = sessionComplete && newEvents.length >= SESSION_EVENT_PAGE_SIZE;
+      const complete = sessionComplete && !mayHaveMoreEvents;
+
+      if (options.debug) {
+        console.log(`[streamSession] sse status=${session.status} events=${newEvents.length} complete=${complete} cursor=${session.nextEventCursor}`);
+      }
+
+      yield { session, newEvents, complete };
+
+      if (complete) {
+        if (options.debug) {
+          console.log(`[streamSession] SSE complete - status=${session.status}`);
+        }
+        return;
+      }
+    }
+
+    throw new Error(`Session ${sessionId} event stream ended before completion`);
   }
 
   async createSession(input: CreateSessionRequest = {}): Promise<CreateSessionResponse> {
@@ -469,6 +584,81 @@ export class AgentClient {
       }
     );
   }
+}
+
+interface ParsedServerSentEvent {
+  event?: string;
+  data: string;
+}
+
+function safeJsonParse<T>(value: string): T | null {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function* parseServerSentEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ParsedServerSentEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      let separatorIndex = findEventSeparator(buffer);
+
+      while (separatorIndex !== -1) {
+        const rawEvent = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + eventSeparatorLength(buffer, separatorIndex));
+        const event = parseServerSentEvent(rawEvent);
+        if (event) yield event;
+        separatorIndex = findEventSeparator(buffer);
+      }
+    }
+
+    buffer += decoder.decode();
+    const event = parseServerSentEvent(buffer);
+    if (event) yield event;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function findEventSeparator(value: string): number {
+  const candidates = [
+    value.indexOf("\n\n"),
+    value.indexOf("\r\r"),
+    value.indexOf("\r\n\r\n"),
+  ].filter((index) => index !== -1);
+  return candidates.length === 0 ? -1 : Math.min(...candidates);
+}
+
+function eventSeparatorLength(value: string, index: number): number {
+  return value.startsWith("\r\n\r\n", index) ? 4 : 2;
+}
+
+function parseServerSentEvent(rawEvent: string): ParsedServerSentEvent | null {
+  const lines = rawEvent.split(/\r?\n|\r/);
+  const data: string[] = [];
+  let event: string | undefined;
+
+  for (const line of lines) {
+    if (!line || line.startsWith(":")) continue;
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    const value = colon === -1 ? "" : line.slice(colon + 1).replace(/^ /, "");
+
+    if (field === "event") event = value;
+    if (field === "data") data.push(value);
+  }
+
+  if (!event && data.length === 0) return null;
+  return { event, data: data.join("\n") };
 }
 
 // Format API errors with rich context for display

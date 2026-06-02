@@ -7,8 +7,28 @@ describe("AgentClient", () => {
     return {
       ok: status >= 200 && status < 300,
       status,
+      headers: new Headers({ "content-type": "application/json" }),
       json: () => Promise.resolve(body),
       text: () => Promise.resolve(JSON.stringify(body)),
+    } as Response;
+  }
+
+  function createSseResponse(events: string[]): Response {
+    const encoder = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream; charset=utf-8" }),
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const event of events) {
+            controller.enqueue(encoder.encode(event));
+          }
+          controller.close();
+        },
+      }),
+      json: () => Promise.reject(new Error("not json")),
+      text: () => Promise.resolve(events.join("")),
     } as Response;
   }
 
@@ -46,7 +66,7 @@ describe("AgentClient", () => {
       const client = new AgentClient("https://localhost", "test-token");
       const updates: unknown[] = [];
 
-      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0" })) {
+      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0", transport: "poll" })) {
         updates.push(update);
       }
 
@@ -60,6 +80,84 @@ describe("AgentClient", () => {
       expect(mockFetch).toHaveBeenNthCalledWith(
         2,
         "https://localhost/v1/session/session-id?since=100&includeMessages=auto",
+        expect.any(Object)
+      );
+    });
+
+    it("streams session updates over SSE when available", async () => {
+      const session = {
+        id: "session-id",
+        workspaceId: "workspace-id",
+        status: "idle",
+        messages: [{ role: "assistant", content: "hello" }],
+        events: [{
+          type: "message_end",
+          timestamp: Date.now(),
+          sequence: 1,
+        }],
+        nextEventCursor: "1",
+      };
+      const mockFetch = vi.fn().mockResolvedValue(
+        createSseResponse([`event: session\ndata: ${JSON.stringify(session)}\n\n`])
+      );
+
+      global.fetch = mockFetch;
+
+      const client = new AgentClient("https://localhost", "test-token");
+      const updates: unknown[] = [];
+
+      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0" })) {
+        updates.push(update);
+      }
+
+      expect(updates).toHaveLength(1);
+      expect((updates[0] as { complete: boolean }).complete).toBe(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://localhost/v1/session/session-id/events?since=0&includeMessages=auto",
+        expect.objectContaining({
+          method: "GET",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+            Accept: "text/event-stream",
+          }),
+        })
+      );
+    });
+
+    it("falls back to polling when SSE is unavailable", async () => {
+      const mockFetch = vi.fn()
+        .mockResolvedValueOnce(createMockResponse({ error: "Not found" }, 404))
+        .mockResolvedValueOnce(createMockResponse({
+          id: "session-id",
+          workspaceId: "workspace-id",
+          status: "idle",
+          messages: [],
+          events: [{
+            type: "message_end",
+            timestamp: Date.now(),
+            sequence: 1,
+          }],
+          nextEventCursor: "1",
+        }));
+
+      global.fetch = mockFetch;
+
+      const client = new AgentClient("https://localhost", "test-token");
+      const updates: unknown[] = [];
+
+      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0" })) {
+        updates.push(update);
+      }
+
+      expect(updates).toHaveLength(1);
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        "https://localhost/v1/session/session-id/events?since=0&includeMessages=auto",
+        expect.any(Object)
+      );
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
+        "https://localhost/v1/session/session-id?since=0&includeMessages=auto",
         expect.any(Object)
       );
     });
