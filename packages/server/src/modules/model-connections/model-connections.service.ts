@@ -21,6 +21,7 @@ import {
   redactModelConnection,
   type PublicModelConnection,
 } from "./model-connections.validation.js";
+import { shouldUseMockAI } from "../../runtime/mock-ai.js";
 
 /**
  * Resolved model connection with secrets loaded
@@ -275,6 +276,11 @@ export async function resolveModelConnection(
   const secrets: Record<string, string> = {};
 
   for (const key of requiredSecrets) {
+    if (shouldUseMockAI(env)) {
+      secrets[key] = "mock-secret";
+      continue;
+    }
+
     const ref = connection.secretRefs[key];
     if (!ref) {
       throw new Error(

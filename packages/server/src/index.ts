@@ -117,7 +117,7 @@ export {
 
 // Export core tools (config-driven tools removed in Phase 4)
 export {
-  createTools,
+  loadSessionTools,
   invokeTool,
 } from "./modules/tools/tools.service.js";
 

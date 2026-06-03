@@ -13,7 +13,7 @@ import { Agent, createEmptyAgentSession, type AgentSessionState, type NextStepIn
 import { buildAgentComponents, buildAgentComponentsFromResolved, type BuildAgentComponentsResult } from "./agent-config.js";
 import { LiveAgentEventPersister } from "./live-event-persister.js";
 import { createMockStream, shouldUseMockAI } from "./mock-ai.js";
-import { createTools } from "../modules/tools/tools.service.js";
+import { createBuiltinToolRuntimeContext, loadSessionTools } from "../modules/tools/tools.service.js";
 import { logTiming, timingStart } from "../lib/timing.js";
 import { logger, errorMessage } from "../lib/logger.js";
 import {
@@ -199,7 +199,7 @@ async function createWorkflowAgent(
   const streamFn = mockAI ? createMockStream() : components.streamFn;
   
   // Create tools with workspace context
-  const tools = createTools(env, ctx, { sessionId, workspaceId });
+  const tools = await loadSessionTools(env, sessionId);
   
   logTiming(env, sessionId, "workflow.agent.created", componentsStart, {
     model: components.model.id,
@@ -214,6 +214,11 @@ async function createWorkflowAgent(
     model: components.model,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     tools,
+    toolRuntimeContext: createBuiltinToolRuntimeContext({
+      env,
+      ctx,
+      toolCtx: { sessionId, workspaceId },
+    }),
     streamFn,
     getApiKey: () => components.getApiKey(),
     debugTiming: (phase, startedAt, details) => logTiming(env, sessionId, `agent.${phase}`, startedAt, details),

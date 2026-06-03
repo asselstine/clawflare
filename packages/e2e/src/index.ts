@@ -33,7 +33,7 @@ interface TestResult {
 }
 
 // Track created containers for cleanup
-const createdContainers: string[] = [];
+const createdContainers: Array<{ containerId: string; sessionId: string }> = [];
 let activeDeployment: RemoteDeployment | null = null;
 let activeKeepAlive = false;
 let cleanupStarted = false;
@@ -123,10 +123,14 @@ async function invokeTool<TDetails = unknown>(
   return readJsonResponse<ToolInvokeResponse<TDetails>>(response);
 }
 
-async function destroyTestContainer(url: string, token: string, containerId: string): Promise<void> {
+async function createToolSession(client: AgentClient): Promise<string> {
+  return (await client.createSession()).id;
+}
+
+async function destroyTestContainer(url: string, token: string, containerId: string, sessionId: string): Promise<void> {
   // Track for potential cleanup later
-  if (!createdContainers.includes(containerId)) {
-    createdContainers.push(containerId);
+  if (!createdContainers.some((container) => container.containerId === containerId && container.sessionId === sessionId)) {
+    createdContainers.push({ containerId, sessionId });
   }
   
   try {
@@ -135,7 +139,7 @@ async function destroyTestContainer(url: string, token: string, containerId: str
       token,
       "container_destroy",
       { containerId },
-      containerId
+      sessionId
     );
     if (!data.result.details.ok) {
       console.error(`Failed to destroy container ${containerId}: ${JSON.stringify(data)}`);
@@ -149,14 +153,14 @@ async function cleanupAllContainers(url: string, token: string): Promise<void> {
   if (createdContainers.length === 0) return;
   
   console.log(`   Cleaning up ${createdContainers.length} tracked containers...`);
-  const cleanupPromises = createdContainers.map(async (containerId) => {
+  const cleanupPromises = createdContainers.map(async ({ containerId, sessionId }) => {
     try {
       const data = await invokeTool<{ ok?: boolean }>(
         url,
         token,
         "container_destroy",
         { containerId },
-        containerId
+        sessionId
       );
       if (data.result.details.ok) {
         console.log(`     ✓ Destroyed container: ${containerId.slice(0, 30)}...`);
@@ -529,7 +533,8 @@ async function runTests(url: string): Promise<void> {
     let firstResponse = "";
     for await (const update of client.streamSession(submitted1.sessionId)) {
       if (update.complete) {
-        const lastMsg = update.session.messages.at(-1);
+        const session = update.session.messages ? update.session : await client.getSession(submitted1.sessionId);
+        const lastMsg = session.messages.at(-1);
         if (lastMsg?.role === "assistant") {
           const content = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
           firstResponse = content;
@@ -552,7 +557,7 @@ async function runTests(url: string): Promise<void> {
     
     let secondResponse = "";
     for await (const update of client.streamSession(submitted2.sessionId)) {
-      console.error(`Polling second: status=${update.session.status}, messages=${update.session.messages.length}`);
+      console.error(`Polling second: status=${update.session.status}, messages=${update.session.messages?.length ?? 0}`);
       if (update.complete) {
         // Extra wait for sync
         await new Promise(r => setTimeout(r, 500));
@@ -600,7 +605,21 @@ async function runTests(url: string): Promise<void> {
   await runner.runTest("List tools", async () => {
     const tools = await client.listTools();
     const toolNames = tools.map((tool) => tool.name).sort();
-    const expectedTools = ["execute_code", "execute_stored_code", "search", "store_code"].sort();
+    const expectedTools = [
+      "container_bash",
+      "container_create",
+      "container_destroy",
+      "container_edit",
+      "container_find",
+      "container_grep",
+      "container_ls",
+      "container_read",
+      "container_write",
+      "execute_code",
+      "execute_stored_code",
+      "search",
+      "store_code",
+    ].sort();
     if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
       throw new Error(`Expected tools ${JSON.stringify(expectedTools)}, got ${JSON.stringify(toolNames)}`);
     }
@@ -612,10 +631,11 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("execute_code runs inline Dynamic Worker code", async () => {
+    const sessionId = await createToolSession(client);
     const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
       code: "export default async function(input, env) { return { message: 'ok', input }; }",
       input: { value: 42 },
-    });
+    }, sessionId);
     const text = data.result.content[0]?.text ?? "";
     if (!data.result.details.ok || !text.includes('"message": "ok"') || !text.includes('"value": 42')) {
       throw new Error(`Unexpected execute_code result: ${JSON.stringify(data)}`);
@@ -623,18 +643,19 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("store/search/execute stored code", async () => {
+    const sessionId = await createToolSession(client);
     await invokeTool(url, token, "store_code", {
       name: "double_number",
       description: "Doubles a numeric input",
       code: "export default async function(input, env) { return input.value * 2; }",
-    });
+    }, sessionId);
 
     const search = await invokeTool<{
       storedCode: Array<{ name: string; code?: string }>;
     }>(url, token, "search", {
       collection: "stored_code",
       query: "double",
-    });
+    }, sessionId);
     const found = search.result.details.storedCode.find((item) => item.name === "double_number");
     if (!found) throw new Error(`Stored code not found: ${JSON.stringify(search)}`);
     if (found.code) throw new Error("Search should not return stored code body");
@@ -642,7 +663,7 @@ async function runTests(url: string): Promise<void> {
     const executed = await invokeTool<{ ok?: boolean }>(url, token, "execute_stored_code", {
       name: "double_number",
       input: { value: 21 },
-    });
+    }, sessionId);
     const executedText = executed.result.content[0]?.text ?? "";
     if (!executed.result.details.ok || !executedText.includes("Result: 42")) {
       throw new Error(`Unexpected execute_stored_code result: ${JSON.stringify(executed)}`);
@@ -650,11 +671,11 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("List egress handlers", async () => {
-    const response = await fetch(`${url}/v1/egress-handlers`, {
+    const response = await fetch(`${url}/v1/egress-handlers?enabledOnly=false`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const data = await response.json() as { egressHandlers?: Array<{ name: string }> };
-    const names = data.egressHandlers?.map((h) => h.name).sort();
+    const data = await response.json() as { egressHandlers?: Array<{ egressHandlerId: string }> };
+    const names = data.egressHandlers?.map((h) => h.egressHandlerId).sort();
     if (!names || names.length < 2) {
       throw new Error(`Expected at least 2 handlers, got: ${JSON.stringify(names)}`);
     }
@@ -667,8 +688,8 @@ async function runTests(url: string): Promise<void> {
     const response = await fetch(`${url}/v1/egress-handlers/cloudflare`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-    const data = await response.json() as { egressHandler?: { name: string; domains?: string[]; config?: unknown } };
-    if (data.egressHandler?.name !== "cloudflare") {
+    const data = await response.json() as { egressHandler?: { egressHandlerId: string; domains?: string[]; config?: unknown } };
+    if (data.egressHandler?.egressHandlerId !== "cloudflare") {
       throw new Error(`Expected cloudflare handler, got: ${JSON.stringify(data)}`);
     }
     if (!data.egressHandler.domains?.includes("api.cloudflare.com")) {
@@ -680,9 +701,10 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("generic egress is allowed", async () => {
+    const sessionId = await createToolSession(client);
     const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
       code: "export default async function(input, env) { const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() }; }",
-    });
+    }, sessionId);
     const text = data.result.content[0]?.text ?? "";
     if (!data.result.details.ok || !text.includes('"status": 200') || !text.includes("Example Domain")) {
       throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
@@ -748,6 +770,7 @@ async function runTests(url: string): Promise<void> {
 
   await runner.runTest("Container: create and run ls command", async () => {
     const containerId = `e2e-container-${Date.now()}`;
+    const sessionId = await createToolSession(client);
 
     try {
       const createData = await invokeTool<{ status?: string }>(
@@ -755,7 +778,7 @@ async function runTests(url: string): Promise<void> {
         token,
         "container_create",
         { containerId },
-        containerId
+        sessionId
       );
       if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
       
@@ -764,7 +787,7 @@ async function runTests(url: string): Promise<void> {
         token,
         "container_bash",
         { containerId, command: "ls -la", cwd: "/workspace" },
-        containerId
+        sessionId
       );
       const bashText = bashData.result.content[0]?.text ?? "";
       if (!bashData.result.details.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
@@ -778,12 +801,13 @@ async function runTests(url: string): Promise<void> {
       // Verify container respects the deployed compatibility by checking it works at all
       // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
     } finally {
-      await destroyTestContainer(url, token, containerId);
+      await destroyTestContainer(url, token, containerId, sessionId);
     }
   });
 
   await runner.runTest("Container: git clone works through GitHub egress", async () => {
     const containerId = `e2e-github-clone-${Date.now()}`;
+    const sessionId = await createToolSession(client);
 
     try {
       const createData = await invokeTool<{ status?: string }>(
@@ -791,7 +815,7 @@ async function runTests(url: string): Promise<void> {
         token,
         "container_create",
         { containerId },
-        containerId
+        sessionId
       );
       if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
 
@@ -806,13 +830,13 @@ async function runTests(url: string): Promise<void> {
         token,
         "container_bash",
         { containerId, command: cloneCommand, cwd: "/workspace" },
-        containerId
+        sessionId
       );
       if (!bashData.result.details.ok || bashData.result.details.exitCode !== 0) {
         throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
       }
     } finally {
-      await destroyTestContainer(url, token, containerId);
+      await destroyTestContainer(url, token, containerId, sessionId);
     }
   });
 

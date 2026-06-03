@@ -15,6 +15,7 @@ import { resolveModelConnectionForNewSession } from "../model-connections/model-
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
+import { seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const chatRoutes = new Hono<AppBindings>();
 
@@ -278,6 +279,7 @@ async function handleNewSession(
   };
   const saveStart = timingStart();
   await sessions.save(initialState);
+  await seedDefaultSessionTools(env, sessionId);
   logTiming(env, sessionId, "chat.session.created", saveStart, { workspaceId, workflowId });
 
   // Queue the event before creating/waking the workflow

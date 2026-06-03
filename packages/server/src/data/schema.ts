@@ -176,6 +176,23 @@ export const sessionRuntime = sqliteTable("session_runtime", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+export const sessionTools = sqliteTable(
+  "session_tools",
+  {
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    toolRefType: text("tool_ref_type", { enum: ["builtin", "custom"] }).notNull(),
+    toolRef: text("tool_ref").notNull(),
+    enabled: integer("enabled").notNull().default(1),
+    configJson: text("config_json").notNull().default(sql`'{}'`),
+    pinnedVersionId: text("pinned_version_id"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.sessionId, table.toolRefType, table.toolRef] }),
+  })
+);
+
 export const containerContexts = sqliteTable("container_contexts", {
   containerId: text("container_id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),

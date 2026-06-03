@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   resolveModelConnectionForNewSession: vi.fn(),
   createWorkflowInstance: vi.fn(),
   withWorkflowInstance: vi.fn(),
+  seedDefaults: vi.fn(),
 }));
 
 vi.mock("../../../src/data/index.js", () => ({
@@ -23,6 +24,9 @@ vi.mock("../../../src/data/index.js", () => ({
   })),
   SessionEventRepository: vi.fn().mockImplementation(() => ({
     latestCursor: mocks.latestCursor,
+  })),
+  SessionToolRepository: vi.fn().mockImplementation(() => ({
+    seedDefaults: mocks.seedDefaults,
   })),
 }));
 
@@ -71,6 +75,7 @@ describe("handleChat timing", () => {
       modelName: "gpt-5",
     });
     mocks.createWorkflowInstance.mockResolvedValue(undefined);
+    mocks.seedDefaults.mockResolvedValue(undefined);
     mocks.withWorkflowInstance.mockImplementation(async (
       _workflow: unknown,
       _workflowId: string,

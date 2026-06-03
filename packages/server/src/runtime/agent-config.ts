@@ -1,6 +1,7 @@
 import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@earendil-works/pi-ai";
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
-import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { RuntimeTool } from "../modules/tools/types.js";
 import type { ResolvedModelConnection } from "../modules/model-connections/model-connections.service.js";
 import { MOCK_AI_PROVIDER, MOCK_AI_MODEL } from "./mock-ai.js";
 
@@ -10,7 +11,7 @@ setBedrockProviderModule(bedrockProviderModule);
 export interface BuildAgentComponentsResult {
   model: Model<"bedrock-converse-stream">;
   streamFn: typeof streamSimple;
-  tools: AgentTool[];
+  tools: RuntimeTool[];
   getApiKey: () => Promise<string | undefined>;
 }
 

@@ -1,7 +1,6 @@
 import type {
   AgentEvent,
   AgentMessage,
-  AgentTool,
   AgentToolCall,
   AgentToolResult,
   StreamFn,
@@ -9,6 +8,7 @@ import type {
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Context, Message, Model, ToolResultMessage } from "@earendil-works/pi-ai";
 import { streamSimple, validateToolArguments } from "@earendil-works/pi-ai";
+import type { RuntimeTool, ToolRuntimeContext } from "../modules/tools/types.js";
 
 export type QueueMode = "all" | "one-at-a-time";
 
@@ -52,7 +52,8 @@ export interface AgentSessionState {
 export interface AgentConfig {
   model: Model<any>;
   systemPrompt: string;
-  tools: AgentTool[];
+  tools: RuntimeTool[];
+  toolRuntimeContext: ToolRuntimeContext;
   streamFn?: StreamFn;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -222,7 +223,7 @@ export function createEmptyAgentSession(args: {
 }
 
 export class Agent {
-  private readonly toolsByName: Map<string, AgentTool>;
+  private readonly toolsByName: Map<string, RuntimeTool>;
   private readonly streamFn: StreamFn;
   private readonly convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
@@ -625,7 +626,7 @@ export class Agent {
         });
 
         const executeStart = now();
-        result = await tool.execute(toolCall.id, validatedArgs as never, signal, (partialResult) => {
+        result = await tool.execute(this.config.toolRuntimeContext, toolCall.id, validatedArgs as never, signal, (partialResult) => {
           const event: AgentEvent = {
             type: "tool_execution_update",
             toolCallId: toolCall.id,

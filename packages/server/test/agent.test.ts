@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
-import type { AgentTool, StreamFn } from "@earendil-works/pi-agent-core";
+import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { Agent, createEmptyAgentSession } from "../src/runtime/agent.js";
+import type { RuntimeTool, ToolRuntimeContext } from "../src/modules/tools/types.js";
 
 describe("Agent", () => {
   const model = {
@@ -11,6 +12,12 @@ describe("Agent", () => {
     api: "openai-chat-completions",
     maxTokens: 4096,
   } as Model<any>;
+  const toolRuntimeContext = {
+    kind: "builtin",
+    env: {},
+    sessionId: "session-test",
+    workspaceId: "workspace-test",
+  } as ToolRuntimeContext;
 
   it("emits tool start through onEvent before the tool finishes", async () => {
     let finishTool!: () => void;
@@ -20,6 +27,8 @@ describe("Agent", () => {
 
     const emitted: string[] = [];
     const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
       name: "execute_code",
       label: "Execute Code",
       description: "Execute code",
@@ -31,12 +40,13 @@ describe("Agent", () => {
           details: { ok: true },
         };
       },
-    } satisfies AgentTool;
+    } satisfies RuntimeTool;
 
     const agent = new Agent({
       model,
       systemPrompt: "",
       tools: [tool],
+      toolRuntimeContext,
       onEvent: (event) => {
         emitted.push(event.type);
       },
@@ -75,6 +85,8 @@ describe("Agent", () => {
 
   it("persists tool results with details.ok false as errors", async () => {
     const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
       name: "execute_code",
       label: "Execute Code",
       description: "Execute code",
@@ -83,9 +95,9 @@ describe("Agent", () => {
         content: [{ type: "text", text: "Error: require is not defined" }],
         details: { ok: false },
       }),
-    } satisfies AgentTool;
+    } satisfies RuntimeTool;
 
-    const agent = new Agent({ model, systemPrompt: "", tools: [tool] });
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
     const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
     const session = {
       ...empty,
@@ -118,11 +130,13 @@ describe("Agent", () => {
     let active = 0;
     let maxActive = 0;
     const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
       name: "execute_code",
       label: "Execute Code",
       description: "Execute code",
       parameters: Type.Object({}),
-      execute: async (_toolCallId: string) => {
+      execute: async (_context: ToolRuntimeContext, _toolCallId: string) => {
         active += 1;
         maxActive = Math.max(maxActive, active);
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -132,9 +146,9 @@ describe("Agent", () => {
           details: { ok: true },
         };
       },
-    } satisfies AgentTool;
+    } satisfies RuntimeTool;
 
-    const agent = new Agent({ model, systemPrompt: "", tools: [tool] });
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
     const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
     const session = {
       ...empty,
@@ -221,6 +235,7 @@ describe("Agent", () => {
       model,
       systemPrompt: "",
       tools: [],
+      toolRuntimeContext,
       streamFn,
       getApiKey: () => "bedrock-token",
     });

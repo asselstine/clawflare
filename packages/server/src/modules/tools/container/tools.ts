@@ -5,11 +5,18 @@
  * capabilities within an isolated container environment.
  */
 
-import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "../../../internal-types/index.js";
 import { ContainerContextRepository } from "../../../data/index.js";
+import {
+  requireBuiltinToolContext,
+  type BuiltinToolRuntimeContext,
+  type RuntimeTool,
+  type ToolModule,
+  type ToolRuntimeContext,
+} from "../types.js";
 import {
   containerBash,
   containerRead,
@@ -260,12 +267,23 @@ async function registerContainerContext(
   });
 }
 
+function requireContainerRuntime(context: ToolRuntimeContext): BuiltinToolRuntimeContext {
+  return requireBuiltinToolContext(context);
+}
+
+function containerToolContext(runtime: BuiltinToolRuntimeContext): ContainerToolContext {
+  return {
+    sessionId: runtime.sessionId,
+    workspaceId: runtime.workspaceId,
+  };
+}
+
 // Tool: container_create
 export function createContainerCreateTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_create",
+    groupId: "container",
     name: "container_create",
     description:
       "Create or initialize a persistent coding container for this session. " +
@@ -283,16 +301,19 @@ export function createContainerCreateTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerCreateParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
       
       // Get or start container
-      const health = await getContainerHealth(env, containerId, signal);
+      const health = await getContainerHealth(runtime.env, containerId, signal);
       
       const lines: string[] = [
         `Container ready: ${containerId}`,
@@ -318,10 +339,10 @@ export function createContainerCreateTool(
 
 // Tool: container_bash
 export function createContainerBashTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_bash",
+    groupId: "container",
     name: "container_bash",
     description:
       "Execute a shell command in the container's workspace. " +
@@ -350,16 +371,19 @@ export function createContainerBashTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerBashParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerBash(
-        env,
+        runtime.env,
         containerId,
         p.command,
         p.cwd,
@@ -387,10 +411,10 @@ export function createContainerBashTool(
 
 // Tool: container_read
 export function createContainerReadTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_read",
+    groupId: "container",
     name: "container_read",
     description:
       "Read a text file from the container workspace. " +
@@ -418,16 +442,19 @@ export function createContainerReadTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerReadParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerRead(
-        env,
+        runtime.env,
         containerId,
         p.path,
         p.startLine,
@@ -454,10 +481,10 @@ export function createContainerReadTool(
 
 // Tool: container_write
 export function createContainerWriteTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_write",
+    groupId: "container",
     name: "container_write",
     description:
       "Write or append content to a file in the container workspace. " +
@@ -482,16 +509,19 @@ export function createContainerWriteTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerWriteParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerWrite(
-        env,
+        runtime.env,
         containerId,
         p.path,
         p.content,
@@ -511,10 +541,10 @@ export function createContainerWriteTool(
 
 // Tool: container_edit
 export function createContainerEditTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_edit",
+    groupId: "container",
     name: "container_edit",
     description:
       "Make surgical edits to a file by replacing an exact string. " +
@@ -539,16 +569,19 @@ export function createContainerEditTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerEditParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerEdit(
-        env,
+        runtime.env,
         containerId,
         p.path,
         p.oldString,
@@ -572,10 +605,10 @@ export function createContainerEditTool(
 
 // Tool: container_grep
 export function createContainerGrepTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_grep",
+    groupId: "container",
     name: "container_grep",
     description:
       "Search file contents for a pattern using ripgrep (or grep as fallback). " +
@@ -601,16 +634,19 @@ export function createContainerGrepTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerGrepParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerGrep(
-        env,
+        runtime.env,
         containerId,
         p.pattern,
         p.path,
@@ -629,10 +665,10 @@ export function createContainerGrepTool(
 
 // Tool: container_find
 export function createContainerFindTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_find",
+    groupId: "container",
     name: "container_find",
     description:
       "Find files or directories by name pattern. " +
@@ -660,16 +696,19 @@ export function createContainerFindTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerFindParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerFind(
-        env,
+        runtime.env,
         containerId,
         p.path,
         p.name,
@@ -688,10 +727,10 @@ export function createContainerFindTool(
 
 // Tool: container_ls
 export function createContainerLsTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_ls",
+    groupId: "container",
     name: "container_ls",
     description:
       "List directory contents in the container. " +
@@ -714,16 +753,19 @@ export function createContainerLsTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerLsParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
 
       const result = await containerLs(
-        env,
+        runtime.env,
         containerId,
         p.path,
         p.recursive,
@@ -741,10 +783,10 @@ export function createContainerLsTool(
 
 // Tool: container_destroy
 export function createContainerDestroyTool(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool {
+): RuntimeTool {
   return {
+    ref: "container.container_destroy",
+    groupId: "container",
     name: "container_destroy",
     description:
       "Destroy a session container when it is no longer needed. " +
@@ -756,21 +798,22 @@ export function createContainerDestroyTool(
       })),
     }) as TSchema,
     execute: async (
+      context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
       signal?: AbortSignal
     ): Promise<AgentToolResult<unknown>> => {
+      const runtime = requireContainerRuntime(context);
       const p = params as ContainerDestroyParams;
-      const containerId = deriveContainerId(ctx.sessionId, p.containerId);
-      await registerContainerContext(env, ctx, containerId);
+      const ctx = containerToolContext(runtime);
+      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      await registerContainerContext(runtime.env, ctx, containerId);
       if (signal?.aborted) {
         throw new Error("Container destroy aborted");
       }
-      await destroyContainer(env, containerId);
-      if (ctx.workspaceId) {
-        const contexts = new ContainerContextRepository(env.DB);
-        await contexts.deleteForSession(ctx.workspaceId, ctx.sessionId, containerId);
-      }
+      await destroyContainer(runtime.env, containerId);
+      const contexts = new ContainerContextRepository(runtime.env.DB);
+      await contexts.deleteForSession(runtime.workspaceId, runtime.sessionId, containerId);
 
       return {
         content: [{ type: "text", text: `Destroyed container: ${containerId}` }],
@@ -782,18 +825,22 @@ export function createContainerDestroyTool(
 
 // Export all container tools factory
 export function createContainerTools(
-  env: Env,
-  ctx: ContainerToolContext
-): AgentTool[] {
+): RuntimeTool[] {
   return [
-    createContainerCreateTool(env, ctx),
-    createContainerBashTool(env, ctx),
-    createContainerReadTool(env, ctx),
-    createContainerWriteTool(env, ctx),
-    createContainerEditTool(env, ctx),
-    createContainerGrepTool(env, ctx),
-    createContainerFindTool(env, ctx),
-    createContainerLsTool(env, ctx),
-    createContainerDestroyTool(env, ctx),
+    createContainerCreateTool(),
+    createContainerBashTool(),
+    createContainerReadTool(),
+    createContainerWriteTool(),
+    createContainerEditTool(),
+    createContainerGrepTool(),
+    createContainerFindTool(),
+    createContainerLsTool(),
+    createContainerDestroyTool(),
   ];
 }
+
+export const containerToolModule: ToolModule = {
+  id: "container",
+  label: "Container",
+  tools: createContainerTools(),
+};

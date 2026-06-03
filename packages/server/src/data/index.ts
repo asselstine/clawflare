@@ -94,6 +94,17 @@ export {
 } from "./snapshots.js";
 
 // =============================================================================
+// Session Tools
+// =============================================================================
+
+export type {
+  SessionToolRef,
+  SessionToolRefType,
+  UpsertSessionToolRefParams,
+} from "./session-tools.js";
+export { SessionToolRepository } from "./session-tools.js";
+
+// =============================================================================
 // Container Contexts
 // =============================================================================
 

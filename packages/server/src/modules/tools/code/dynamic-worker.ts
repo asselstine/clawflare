@@ -1,6 +1,6 @@
-import type { Env, WorkerLoaderWorkerCode } from "../../internal-types/index.js";
-import type { ExecutionResult } from "../../internal-types/tools.js";
-import type { HttpGatewayProps } from "../../egress/gateway.js";
+import type { Env, WorkerLoaderWorkerCode } from "../../../internal-types/index.js";
+import type { ExecutionResult } from "../../../internal-types/tools.js";
+import type { HttpGatewayProps } from "../../../egress/gateway.js";
 
 interface DynamicExecutionOptions {
   requestId?: string;
@@ -17,7 +17,9 @@ export default function userFunction(
   env: WorkerEnv,
 ): string | Promise<string>;`;
 
-export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a default export matching this TypeScript contract:\n${USER_FUNCTION_TYPES}\n\nThe env argument has no direct secret bindings. Available globals include console, fetch, Request, Response, URL, and standard Worker runtime APIs; outbound fetch is routed through the configured egress gateway.\n\nExecutable JavaScript example:\nexport default async function(input, env) {\n  return JSON.stringify({ message: "ok", input });\n}`;
+export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a default export matching this TypeScript contract:\n${USER_FUNCTION_TYPES}\n\nThe env argument has no direct secret bindings. Available globals include console, fetch, Request, Response, URL, and standard Worker runtime APIs; outbound fetch is routed through the configured egress gateway.\n\nExecutable JavaScript example:\nexport default async function(input, env) {
+  return JSON.stringify({ message: "ok", input });
+}`;
 
 export async function executeDynamicWorker(
   env: Env,

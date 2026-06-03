@@ -21,6 +21,7 @@ import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
+import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
 export const sessionsRoutes = new Hono<AppBindings>();
@@ -34,6 +35,9 @@ sessionRoutes.get("/:id/events", (c) =>
 );
 sessionRoutes.get("/:id", (c) =>
   handleGetSession(c.req.param("id"), new URL(c.req.url), c.env, c.get("requestContext")!)
+);
+sessionRoutes.get("/:id/tools", (c) =>
+  handleListSessionTools(c.req.param("id"), c.env, c.get("requestContext")!)
 );
 sessionRoutes.post("/:id/name", (c) =>
   handleRenameSession(c.req.param("id"), c.req.raw, c.env, c.get("requestContext")!)
@@ -125,6 +129,7 @@ export async function handleCreateSession(
       modelName: resolvedModel?.modelName,
     };
     await sessions.save(initialState);
+    await seedDefaultSessionTools(env, sessionId);
 
     // Create persistent workflow (initially idle)
     await createWorkflowInstance(env.AGENT_WORKFLOW, {
@@ -153,6 +158,33 @@ export async function handleCreateSession(
       workspaceId: requestContext.workspace.id,
     });
     return badRequest(message);
+  }
+}
+
+export async function handleListSessionTools(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  try {
+    const sessions = new SessionRepository(env.DB);
+    const session = await sessions.findByIdInWorkspace(requestContext.workspace.id, sessionId);
+    if (!session) {
+      return notFound("Session");
+    }
+
+    return json({
+      groups: listToolGroups(),
+      tools: await loadSessionTools(env, sessionId),
+    });
+  } catch (error) {
+    logger.error("List session tools failed", error, {
+      handler: "handleListSessionTools",
+      route: "GET /v1/sessions/:id/tools",
+      sessionId,
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
   }
 }
 

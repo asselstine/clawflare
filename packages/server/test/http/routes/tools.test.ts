@@ -26,7 +26,7 @@ function createRequestContext(): RequestContext {
 }
 
 describe("tools routes", () => {
-  it("invokes a tool by name", async () => {
+  it("requires a session to invoke a tool", async () => {
     const response = await handleInvokeTool(
       new Request("https://example.com/v1/tools/search", {
         method: "POST",
@@ -51,19 +51,9 @@ describe("tools routes", () => {
       "search"
     );
 
-    const data = (await response.json()) as {
-      tool: string;
-      result: {
-        details: {
-          storedCode: unknown[];
-          workspaceId: string;
-        };
-      };
-    };
+    const data = (await response.json()) as { error: string };
 
-    expect(response.status).toBe(200);
-    expect(data.tool).toBe("search");
-    expect(data.result.details.storedCode).toEqual([]);
-    expect(data.result.details.workspaceId).toBe("test-workspace");
+    expect(response.status).toBe(400);
+    expect(data.error).toBe("Tool execution requires a session");
   });
 });

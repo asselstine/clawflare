@@ -3,16 +3,15 @@ import type { AppBindings } from "../../http/app-bindings.js";
 import { requireAuth } from "../../middleware/auth.js";
 import type { Env } from "../../internal-types/index.js";
 import type { RequestContext } from "../../http/request-context.js";
-import { createTools, invokeTool } from "./tools.service.js";
-import { badRequest, json, notFound, serverError } from "../../http/responses.js";
+import { SessionRepository } from "../../data/index.js";
+import { invokeTool, listBuiltinTools, listToolGroups } from "./tools.service.js";
+import { badRequest, json, notFound } from "../../http/responses.js";
 import { logger } from "../../lib/logger.js";
 
 export const toolsRoutes = new Hono<AppBindings>();
 
 toolsRoutes.use("*", requireAuth);
-toolsRoutes.get("/", (c) =>
-  handleListTools(c.env, c.executionCtx, c.get("requestContext")!)
-);
+toolsRoutes.get("/", () => handleListTools());
 toolsRoutes.post("/:name", (c) =>
   handleInvokeTool(
     c.req.raw,
@@ -29,23 +28,11 @@ toolsRoutes.post("/:name", (c) =>
 /**
  * List available tools
  */
-export async function handleListTools(
-  env: Env,
-  ctx: ExecutionContext,
-  requestContext?: RequestContext
-): Promise<Response> {
-  try {
-    const tools = createTools(env, ctx, {
-      workspaceId: requestContext?.workspace.id,
-    });
-    return json({ tools });
-  } catch (error) {
-    logger.error("List tools failed", error, {
-      handler: "handleListTools",
-      route: "GET /v1/tools",
-    });
-    return serverError(error instanceof Error ? error.message : "Unknown error");
-  }
+export function handleListTools(): Response {
+  return json({
+    groups: listToolGroups(),
+    tools: listBuiltinTools(),
+  });
 }
 
 export async function handleInvokeTool(
@@ -60,6 +47,15 @@ export async function handleInvokeTool(
       input?: unknown;
       sessionId?: string;
     };
+    if (!body.sessionId) {
+      return badRequest("Tool execution requires a session");
+    }
+    const sessions = new SessionRepository(env.DB);
+    const session = await sessions.findByIdInWorkspace(requestContext.workspace.id, body.sessionId);
+    if (!session) {
+      return notFound("Session");
+    }
+
     const result = await invokeTool({
       env,
       ctx,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatExecutionResult, MAX_TOOL_RESPONSE_LENGTH_CHARS } from "../src/modules/tools/tools.service.js";
+import { formatExecutionResult, MAX_TOOL_RESPONSE_LENGTH_CHARS } from "../src/modules/tools/code/output.js";
 
 describe("tool output formatting", () => {
   it("shows captured stdout when code returns no explicit result", () => {
