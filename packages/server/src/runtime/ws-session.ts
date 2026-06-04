@@ -4,11 +4,12 @@ import type { Env, SessionMetadataState,} from "../internal-types/index.js";
 import type { ChatRequest } from "../types.js";
 import {
   SessionRepository,
+  SessionRunRepository,
   SessionRuntimeRepository,
   type SessionInputEvent,
 } from "../data/index.js";
 import { logger } from "../lib/logger.js";
-import { createWorkflowInstance, withWorkflowInstance } from "./workflow-handles.js";
+import { runSessionRun } from "./workflow.js";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -97,28 +98,32 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
 
     const promptContent = data.content;
     const sessionId = data.sessionId || crypto.randomUUID();
-    let workflowId: string;
+    const runId = crypto.randomUUID();
     const sessions = new SessionRepository(this.env.DB);
     const existingSession = data.sessionId ? await sessions.findById(data.sessionId) : null;
+    let workspaceId = existingSession?.workspaceId ?? "default-workspace";
 
     if (existingSession) {
       if (existingSession.status === "closed" || existingSession.status === "expired") {
         ws.send(JSON.stringify({ type: "error", content: "Session closed. Create a new session to continue." }));
         return;
       }
+      if (existingSession.status === "processing") {
+        ws.send(JSON.stringify({ type: "error", content: "Session is already processing a prompt" }));
+        return;
+      }
 
-      workflowId = existingSession.workflowId;
       existingSession.status = "processing";
+      existingSession.workflowId = runId;
       existingSession.updatedAt = Date.now();
       await sessions.save(existingSession);
     } else {
-      workflowId = crypto.randomUUID();
       // Phase 6: workspace-scoped sessions
-      const workspaceId = "default-workspace"; // Until full auth is in place
+      workspaceId = "default-workspace"; // Until full auth is in place
       const initialState: SessionMetadataState = {
         id: sessionId,
         workspaceId,
-        workflowId,
+        workflowId: runId,
         status: "processing",
         nextEventCursor: "0",
         updatedAt: Date.now(),
@@ -134,19 +139,9 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       maxTurns: data.maxTurns,
     };
 
-    if (!existingSession) {
-      await createWorkflowInstance(this.env.AGENT_WORKFLOW, {
-        id: workflowId,
-        params: { sessionId, initialInput: inputEvent },
-      });
-    } else {
-      await withWorkflowInstance(this.env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
-        return workflowInstance.sendEvent({
-          type: "session-input",
-          payload: inputEvent,
-        });
-      });
-    }
+    const runs = new SessionRunRepository(this.env.DB);
+    await runs.create({ id: runId, sessionId, workspaceId, input: inputEvent });
+    this.ctx.waitUntil(runSessionRun(this.env, runId));
 
     ws.send(JSON.stringify({
       type: "session_started",

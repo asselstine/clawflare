@@ -5,7 +5,7 @@ import type { Env } from "../../internal-types/index.js";
 import type { ChatRequest, ModelProvider } from "../../types.js";
 import {
   SessionRepository,
-  SessionRuntimeRepository,
+  SessionRunRepository,
   type SessionInputEvent,
 } from "../../data/index.js";
 import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } from "../../http/responses.js";
@@ -13,17 +13,14 @@ import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
-import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
+import { runSessionRun } from "../../runtime/workflow.js";
 import { seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const chatRoutes = new Hono<AppBindings>();
 
-const WORKFLOW_PREWARM_WAIT_MS = 2500;
-const WORKFLOW_PREWARM_RETRY_MS = 100;
-
 chatRoutes.use("*", requireAuth);
 chatRoutes.post("/", (c) =>
-  handleChat(c.req.raw, c.env, c.get("requestContext")!)
+  handleChat(c.req.raw, c.env, c.get("requestContext")!, c.executionCtx)
 );
 
 // Chat Route Handler - /v1/chat
@@ -45,38 +42,6 @@ function createAuthSession(ctx: RequestContext) {
   };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function sendPromptToPrewarmedWorkflow(
-  env: Env,
-  workflowId: string,
-  inputEvent: SessionInputEvent,
-): Promise<void> {
-  const deadline = Date.now() + WORKFLOW_PREWARM_WAIT_MS;
-  let lastError: unknown;
-
-  while (Date.now() <= deadline) {
-    try {
-      await withWorkflowInstance(env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
-        return workflowInstance.sendEvent({
-          type: "session-input",
-          payload: inputEvent,
-        });
-      });
-      return;
-    } catch (error) {
-      lastError = error;
-      await sleep(WORKFLOW_PREWARM_RETRY_MS);
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Prewarmed workflow was not ready before the retry timeout");
-}
-
 /**
  * Handle session-based chat submission
  * Returns session handle immediately; workflow processes async
@@ -84,7 +49,8 @@ async function sendPromptToPrewarmedWorkflow(
 export async function handleChat(
   request: Request,
   env: Env,
-  requestContext: RequestContext
+  requestContext: RequestContext,
+  executionCtx?: ExecutionContext,
 ): Promise<Response> {
   let sessionIdVar: string | undefined;
   const routeStart = timingStart();
@@ -139,7 +105,7 @@ export async function handleChat(
           );
         }
       }
-      response = await handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession, {
+      response = await handleExistingSession(env, sessionId, workspaceId, content, maxTurns, existingSession, executionCtx, {
         apiReceivedAt: routeStart,
         apiRequestId,
       });
@@ -152,6 +118,7 @@ export async function handleChat(
         maxTurns,
         body.modelConnectionId,
         requestContext,
+        executionCtx,
         {
           apiReceivedAt: routeStart,
           apiRequestId,
@@ -187,10 +154,10 @@ async function handleExistingSession(
   content: string,
   maxTurns: number | undefined,
   existingSession: import("../../data/index.js").SessionMetadataState,
+  executionCtx: ExecutionContext | undefined,
   apiTiming: { apiReceivedAt: number; apiRequestId: string },
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
-  const runtime = new SessionRuntimeRepository(env.DB);
 
   if (existingSession.status === "closed" || existingSession.status === "expired") {
     return gone("Session closed. Create a new session to continue.");
@@ -202,31 +169,14 @@ async function handleExistingSession(
     });
   }
 
-  let workflowId = existingSession.workflowId;
-  let needsWorkflowCreate = !workflowId;
-  if (workflowId) {
-    const waitingAt = await runtime.getWorkflowWaitingAt(sessionId);
-    if (waitingAt === null) {
-      workflowId = crypto.randomUUID();
-      needsWorkflowCreate = true;
-      logTiming(env, sessionId, "chat.workflow.prewarm_not_ready", undefined, {
-        workspaceId,
-        previousWorkflowId: existingSession.workflowId,
-        workflowId,
-        apiRequestId: apiTiming.apiRequestId,
-        apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
-      });
-    }
-  } else {
-    workflowId = crypto.randomUUID();
-  }
+  const runId = crypto.randomUUID();
 
   // Mark session as processing BEFORE returning
   existingSession.status = "processing";
-  existingSession.workflowId = workflowId;
+  existingSession.workflowId = runId;
   existingSession.updatedAt = Date.now();
   const processingStart = timingStart();
-  await sessions.markProcessing(sessionId, workflowId);
+  await sessions.markProcessing(sessionId, runId);
   logTiming(env, sessionId, "chat.session.processing_saved", processingStart, {
     workspaceId,
     apiRequestId: apiTiming.apiRequestId,
@@ -241,33 +191,17 @@ async function handleExistingSession(
     apiRequestId: apiTiming.apiRequestId,
   };
 
-  if (needsWorkflowCreate) {
-    const createStart = timingStart();
-    await createWorkflowInstance(env.AGENT_WORKFLOW, {
-      id: workflowId,
-      params: { sessionId, initialInput: inputEvent },
-    });
-    logTiming(env, sessionId, "chat.workflow.created", createStart, {
-      workspaceId,
-      workflowId,
-      apiRequestId: apiTiming.apiRequestId,
-      apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
-      inputType: inputEvent.type,
-      deferredFromSessionCreate: true,
-    });
-  } else {
-    // First prompt usually lands here after /v1/session has prewarmed the workflow in waitUntil.
-    // Retrying briefly smooths over the race where the user submits before that prewarm finishes.
-    const eventStart = timingStart();
-    await sendPromptToPrewarmedWorkflow(env, workflowId, inputEvent);
-    logTiming(env, sessionId, "chat.workflow.input_sent", eventStart, {
-      workspaceId,
-      workflowId,
-      apiRequestId: apiTiming.apiRequestId,
-      apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
-      inputType: inputEvent.type,
-    });
-  }
+  const runStart = timingStart();
+  const runs = new SessionRunRepository(env.DB);
+  await runs.create({ id: runId, sessionId, workspaceId, input: inputEvent });
+  executionCtx?.waitUntil(runSessionRun(env, runId, { ctx: executionCtx }));
+  logTiming(env, sessionId, "chat.session_run.created", runStart, {
+    workspaceId,
+    runId,
+    apiRequestId: apiTiming.apiRequestId,
+    apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
+    inputType: inputEvent.type,
+  });
 
   // Reuse the cursor already stored on session metadata. Immediately after prompt submission,
   // the client should poll from the cursor it had before this turn; re-querying latestCursor
@@ -300,6 +234,7 @@ async function handleNewSession(
   maxTurns: number | undefined,
   modelConnectionId: string | undefined,
   requestContext: RequestContext,
+  executionCtx: ExecutionContext | undefined,
   apiTiming: { apiReceivedAt: number; apiRequestId: string },
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
@@ -347,13 +282,13 @@ async function handleNewSession(
     );
   }
 
-  const workflowId = crypto.randomUUID();
+  const runId = crypto.randomUUID();
 
   // Initialize session state with workspace and model info
   const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
     workspaceId,
-    workflowId,
+    workflowId: runId,
     status: "processing" as const,
     nextEventCursor: "0",
     updatedAt: Date.now(),
@@ -368,7 +303,7 @@ async function handleNewSession(
   await seedDefaultSessionTools(env, sessionId);
   logTiming(env, sessionId, "chat.session.created", saveStart, {
     workspaceId,
-    workflowId,
+    runId,
     apiRequestId: apiTiming.apiRequestId,
     apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
   });
@@ -381,15 +316,13 @@ async function handleNewSession(
     apiRequestId: apiTiming.apiRequestId,
   };
 
-  // Create persistent workflow with the initial prompt attached.
-  const createStart = timingStart();
-  await createWorkflowInstance(env.AGENT_WORKFLOW, {
-    id: workflowId,
-    params: { sessionId, initialInput: inputEvent },
-  });
-  logTiming(env, sessionId, "chat.workflow.created", createStart, {
+  const runStart = timingStart();
+  const runs = new SessionRunRepository(env.DB);
+  await runs.create({ id: runId, sessionId, workspaceId, input: inputEvent });
+  executionCtx?.waitUntil(runSessionRun(env, runId, { ctx: executionCtx }));
+  logTiming(env, sessionId, "chat.session_run.created", runStart, {
     workspaceId,
-    workflowId,
+    runId,
     apiRequestId: apiTiming.apiRequestId,
     apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
   });

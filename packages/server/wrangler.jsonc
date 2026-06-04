@@ -91,13 +91,11 @@
 			]
 		}
 	],
-	"workflows": [
-		{
-			"name": "clawflare-agent-workflow",
-			"binding": "AGENT_WORKFLOW",
-			"class_name": "PersistentSessionWorkflow"
-		}
-	],
+	"triggers": {
+		"crons": [
+			"* * * * *"
+		]
+	},
 	"vars": {
 		"AI_PROVIDER": "amazon-bedrock",
 		"AI_MODEL": "minimax.minimax-m2.5",

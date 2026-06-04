@@ -45,9 +45,6 @@ export interface Env {
   // Worker Loader for Dynamic Worker execution
   LOADER: WorkerLoader;
 
-  // Workflow for durable agent execution
-  AGENT_WORKFLOW: Workflow;
-
   // Secret Broker service for envelope-encrypted secrets
   SECRET_BROKER: Fetcher;
 

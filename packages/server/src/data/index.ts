@@ -94,6 +94,19 @@ export {
 } from "./snapshots.js";
 
 // =============================================================================
+// Session Runs
+// =============================================================================
+
+export type {
+  SessionRun,
+  SessionRunStatus,
+  CreateSessionRunParams,
+  ClaimSessionRunParams,
+  DueSessionRun,
+} from "./session-runs.js";
+export { SessionRunRepository } from "./session-runs.js";
+
+// =============================================================================
 // Session Tools
 // =============================================================================
 

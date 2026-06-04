@@ -2,7 +2,7 @@
 // This runs in Cloudflare Workers and provides an agent powered by pi-agent-core
 
 import { HttpGateway } from "./egress/gateway.js";
-import { PersistentSessionWorkflow } from "./runtime/workflow.js";
+import { recoverSessionRuns } from "./runtime/workflow.js";
 import { ClawflareWebSocketSession } from "./runtime/ws-session.js";
 import { CodingContainer, ContainerProxy } from "./modules/tools/container/coding-container.js";
 import TimingLogger from "./modules/timing/timing-logger.worker.js";
@@ -52,7 +52,6 @@ export {
 // Export the entrypoints for Cloudflare Workers
 export {
   HttpGateway,
-  PersistentSessionWorkflow,
   ClawflareWebSocketSession,
   CodingContainer,
   ContainerProxy,
@@ -193,5 +192,12 @@ export {
 export default {
   async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
     return app.fetch(request, env as import("./internal-types/index.js").Env, ctx);
+  },
+  async scheduled(_controller: ScheduledController, env: unknown, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(recoverSessionRuns(env as import("./internal-types/index.js").Env, {
+      limit: 5,
+      budgetMs: 20_000,
+      ctx,
+    }));
   },
 };

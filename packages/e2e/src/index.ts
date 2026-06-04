@@ -230,7 +230,7 @@ function extractWorkerUrl(output: string, workerName: string): string {
   return url.replace(/\/+$/, "");
 }
 
-async function writeTestConfig(workerName: string, workflowName: string, d1Name: string, d1DatabaseId: string): Promise<string> {
+async function writeTestConfig(workerName: string, d1Name: string, d1DatabaseId: string): Promise<string> {
   const configPath = pathResolve(HARNESS_DIR, `wrangler.e2e.${workerName}.jsonc`);
   const config = {
     $schema: "./node_modules/wrangler/config-schema.json",
@@ -275,7 +275,9 @@ async function writeTestConfig(workerName: string, workflowName: string, d1Name:
       { tag: "v1", new_classes: ["ClawflareWebSocketSession"] },
       { tag: "v2", new_sqlite_classes: ["CodingContainer"] },
     ],
-    workflows: [{ name: workflowName, binding: "AGENT_WORKFLOW", class_name: "PersistentSessionWorkflow" }],
+    triggers: {
+      crons: ["* * * * *"],
+    },
     vars: {
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
@@ -296,20 +298,18 @@ async function deployRemote(): Promise<RemoteDeployment> {
   // so reusing the same Worker name causes deployment failures.
   const runId = randomUUID().slice(0, 8);
   const workerName = `${runtimeNames.e2eWorkerPrefix}-${runId}`;
-  const workflowName = `${runtimeNames.e2eWorkflowPrefix}-${runId}`;
   const d1Name = `${runtimeNames.e2eDatabasePrefix}-${runId}`;
   let configPath = "";
   activeDeployment = { workerName, d1Name };
 
   console.log("🚀 Creating remote E2E deployment...");
   console.log(`   Worker: ${workerName}`);
-  console.log(`   Workflow: ${workflowName}`);
   console.log(`   D1: ${d1Name}`);
 
   try {
     const d1Output = await runWrangler(["d1", "create", d1Name], { capture: true });
     const d1DatabaseId = extractD1DatabaseId(d1Output);
-    configPath = await writeTestConfig(workerName, workflowName, d1Name, d1DatabaseId);
+    configPath = await writeTestConfig(workerName, d1Name, d1DatabaseId);
     activeDeployment.configPath = configPath;
     pendingConfigPath = configPath;
     await runWrangler(["d1", "migrations", "apply", d1Name, "--remote", "--config", configPath]);

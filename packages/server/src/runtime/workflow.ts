@@ -1,11 +1,12 @@
-import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from "cloudflare:workers";
 import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Env } from "../internal-types/index.js";
 import {
   SessionEventRepository,
   SessionRepository,
+  SessionRunRepository,
   SessionRuntimeRepository,
   type NewSessionEvent,
+  type SessionRun,
   type SessionInputEvent,
 } from "../data/index.js";
 import { Agent, createEmptyAgentSession, type AgentSessionState, type NextStepInfo } from "./agent.js";
@@ -193,17 +194,6 @@ function serializeForWorkflow(value: unknown): JsonValue {
 
 function deserializeForWorkflow(serializedJson: string): JsonValue {
   return JSON.parse(serializedJson) as JsonValue;
-}
-
-async function runWorkflowStep<T>(
-  step: WorkflowStep,
-  name: string,
-  callback: () => Promise<T>,
-): Promise<T> {
-  return (step.do as unknown as (
-    stepName: string,
-    stepCallback: () => Promise<T>,
-  ) => Promise<T>)(name, callback);
 }
 
 function messageTimestamp(event: AgentEvent): number | undefined {
@@ -553,439 +543,450 @@ async function markPromptError(
   await saveSessionMetadata(env, sessions, runtime, events, sessionId, "error", message, timing);
 }
 
-/**
- * Persistent workflow params
- */
-export interface PersistentWorkflowParams {
-  sessionId: string;
-  initialInput?: SessionInputEvent;
+export interface RunSessionRunOptions {
+  budgetMs?: number;
+  leaseMs?: number;
+  workerId?: string;
+  ctx?: ExecutionContext;
 }
 
-/**
- * Persistent session workflow - runs continuously per session
- *
- * This workflow:
- * 1. Marks the session as active
- * 2. Waits for input events from Workflow events
- * 3. Processes each input event through the Agent state machine
- * 4. Persists the agent snapshot and appends agent events to the session log
- * 5. Continues until a close event is received
- */
-export class PersistentSessionWorkflow extends WorkflowEntrypoint<Env, PersistentWorkflowParams> {
-  async run(event: Readonly<WorkflowEvent<unknown>>, step: WorkflowStep): Promise<{
-    ok: boolean;
-    sessionId: string;
-    reason: string;
-  }> {
-    const sessionId =
-      (event as unknown as { payload?: { sessionId?: string } }).payload?.sessionId ?? "unknown";
-    const timingCollector = new TimingCollector();
-    const timing = createWorkflowTiming(this.env, sessionId, timingCollector);
-    let pendingInput = (event as unknown as { payload?: { initialInput?: SessionInputEvent } }).payload?.initialInput;
+const DEFAULT_RUN_BUDGET_MS = 20_000;
+const DEFAULT_RUN_LEASE_MS = 30_000;
+const RUN_BUDGET_BUFFER_MS = 1_500;
 
-    try {
-      const workflowEventType = (event as unknown as { type?: unknown }).type;
-      timing("workflow.run.start", undefined, {
-        workflowEventType: typeof workflowEventType === "string" ? workflowEventType : undefined,
-        hasInitialInput: Boolean(pendingInput),
-      });
+class TimeBudgetExceeded extends Error {
+  constructor() {
+    super("Session run yielded before the Worker time budget expired");
+  }
+}
 
-      await step.do("mark-session-active", async () => {
-        const markStart = timingStart();
-        const runtime = new SessionRuntimeRepository(this.env.DB);
-        await runtime.setActive(sessionId, true);
-        timing("workflow.mark_active.done", markStart);
-      });
+class SessionRunCancelled extends Error {
+  constructor() {
+    super("Session run was cancelled");
+  }
+}
 
-      let shouldContinue = true;
-      let inputStep = 0;
+class SessionRunCheckpointContext {
+  constructor(
+    private readonly repo: SessionRunRepository,
+    private readonly run: SessionRun,
+    private readonly deadline: number,
+    private readonly timing: WorkflowTimingLog,
+  ) {}
 
-      while (shouldContinue) {
-        let input: SessionInputEvent | undefined;
-
-        if (pendingInput) {
-          input = pendingInput;
-          pendingInput = undefined;
-          timing("workflow.input.received", undefined, {
-            inputType: input.type,
-            inputSource: "initial",
-          });
-        } else {
-          const waitingStart = timingStart();
-          const runtime = new SessionRuntimeRepository(this.env.DB);
-          const waitingAt = await runtime.markWorkflowWaiting(sessionId);
-          timing("workflow.wait_for_input.start", waitingStart, { waitingAt });
-          await flushTimingCollector(this.env, timingCollector, {
-            sessionId,
-            reason: "waiting_for_input",
-          });
-          const waitStart = timingStart();
-          const inputEvent = await step.waitForEvent<SessionInputEvent>("session-input", {
-            type: "session-input",
-            timeout: "7 days",
-          });
-          const inputCollector = new TimingCollector();
-          const inputTiming = createWorkflowTiming(this.env, sessionId, inputCollector);
-          input = inputEvent.payload;
-          const clearWaitingStart = timingStart();
-          await runtime.clearWorkflowWaiting(sessionId);
-          inputTiming("workflow.wait_for_input.cleared", clearWaitingStart, {
-            inputType: input?.type,
-          });
-          inputTiming("workflow.wait_for_input.done", waitStart, {
-            inputType: input?.type,
-            inputSource: "event",
-            ...(input?.type === "prompt" ? promptApiTimingDetails(input) : {}),
-          });
-          inputTiming("workflow.input.received", undefined, {
-            inputType: input?.type,
-            inputSource: "event",
-            ...(input?.type === "prompt" ? promptApiTimingDetails(input) : {}),
-          });
-          await flushTimingCollector(this.env, inputCollector, {
-            sessionId,
-            reason: "input_received",
-          });
-        }
-
-        if (!input) {
-          continue;
-        }
-
-        if (input.type === "close") {
-          await step.do(`mark-session-closed-${inputStep++}`, async () => {
-            const closeStart = timingStart();
-            const sessions = new SessionRepository(this.env.DB);
-            const runtime = new SessionRuntimeRepository(this.env.DB);
-            await sessions.markClosed(sessionId, "user");
-            await runtime.setActive(sessionId, false);
-            timing("workflow.session.closed", closeStart);
-          });
-          shouldContinue = false;
-          break;
-        }
-
-        if (input.type === "prompt") {
-          const promptStart = timingStart();
-          timing("workflow.prompt.start", undefined, {
-            promptLength: input.content.length,
-            maxTurns: input.maxTurns,
-            ...promptApiTimingDetails(input),
-          });
-          await this.processPrompt(sessionId, input, step, inputStep++, timing);
-          timing("workflow.prompt.done", promptStart);
-          await flushTimingCollector(this.env, timingCollector, {
-            sessionId,
-            reason: "prompt_done",
-          });
-        }
-      }
-
-      await step.do("mark-session-inactive", async () => {
-        const inactiveStart = timingStart();
-        const runtime = new SessionRuntimeRepository(this.env.DB);
-        await runtime.setActive(sessionId, false);
-        timing("workflow.mark_inactive.done", inactiveStart);
-      });
-
-      return { ok: true, sessionId, reason: "closed" };
-    } finally {
-      await flushTimingCollector(this.env, timingCollector, {
-        sessionId,
-        reason: "workflow_finally",
-      });
+  assertBudget(): void {
+    if (Date.now() + RUN_BUDGET_BUFFER_MS >= this.deadline) {
+      throw new TimeBudgetExceeded();
     }
   }
 
-  private async processPrompt(
-    sessionId: string,
-    input: Extract<SessionInputEvent, { type: "prompt" }>,
-    step: WorkflowStep,
-    inputIndex: number,
-    timing: WorkflowTimingLog,
-  ): Promise<void> {
-    let agentSession: AgentSessionState;
-    let nextStep: NextStepInfo | undefined;
-    let completedTurns = 0;
-    let agentStep = 0;
-    const maxTurns = input.maxTurns ?? 20;
+  async assertCanContinue(): Promise<void> {
+    this.assertBudget();
+    const latest = await this.repo.find(this.run.id);
+    if (latest?.status === "cancel_requested" || latest?.status === "cancelled") {
+      throw new SessionRunCancelled();
+    }
+  }
 
-    try {
-      const enqueued = await runWorkflowStep(step, `enqueue-prompt-${inputIndex}`, async () => {
-        const stepCollector = new TimingCollector();
-        const stepTiming = createWorkflowTiming(this.env, sessionId, stepCollector);
-        const runtime = new SessionRuntimeRepository(this.env.DB);
-        const events = new SessionEventRepository(this.env.DB);
+  async step<T>(name: string, callback: () => Promise<T>): Promise<T> {
+    await this.assertCanContinue();
+    const cached = await this.repo.getCompletedStep(this.run.id, name);
+    if (cached !== undefined) {
+      this.timing("workflow.step.replayed", undefined, { stepName: name });
+      return cached as T;
+    }
 
-        const loaded = await loadAgentSession(this.env, sessionId, undefined, stepTiming);
-        const loadedSession = loaded.session;
-        const enqueueStart = timingStart();
-        const enqueueResult = Agent.enqueuePrompt(loadedSession, input.content);
-        let nextStep = Agent.determineNextStep(enqueueResult.session) ?? null;
-        stepTiming("workflow.prompt.enqueued", enqueueStart, {
+    const stepStart = timingStart();
+    const result = await callback();
+    await this.repo.completeStep(this.run.id, name, this.run.attempt, serializeForWorkflow(result));
+    this.timing("workflow.step.completed", stepStart, { stepName: name });
+    return result;
+  }
+}
+
+export async function runSessionRun(
+  env: Env,
+  runId: string,
+  options: RunSessionRunOptions = {},
+): Promise<void> {
+  const repo = new SessionRunRepository(env.DB);
+  const workerId = options.workerId ?? crypto.randomUUID();
+  const leaseMs = options.leaseMs ?? DEFAULT_RUN_LEASE_MS;
+  const budgetMs = options.budgetMs ?? DEFAULT_RUN_BUDGET_MS;
+  const deadline = Date.now() + budgetMs;
+  const claimStart = timingStart();
+  const claimed = await repo.claim({ runId, workerId, leaseMs });
+  if (!claimed) return;
+
+  const sessionId = claimed.sessionId;
+  const collector = new TimingCollector();
+  const timing = createWorkflowTiming(env, sessionId, collector);
+  timing("workflow.run.claimed", claimStart, {
+    runId,
+    workerId,
+    attempt: claimed.attempt,
+    leaseMs,
+    budgetMs,
+  });
+
+  const checkpoints = new SessionRunCheckpointContext(repo, claimed, deadline, timing);
+
+  try {
+    const runtime = new SessionRuntimeRepository(env.DB);
+    await runtime.setActive(sessionId, true);
+
+    if (claimed.input.type !== "prompt") {
+      await repo.cancel(runId);
+      await runtime.setActive(sessionId, false);
+      return;
+    }
+
+    const promptStart = timingStart();
+    timing("workflow.prompt.start", undefined, {
+      runId,
+      promptLength: claimed.input.content.length,
+      maxTurns: claimed.input.maxTurns,
+      ...promptApiTimingDetails(claimed.input),
+    });
+    await processPrompt(env, options.ctx, claimed, checkpoints, claimed.input, 0, timing);
+    timing("workflow.prompt.done", promptStart);
+    await repo.complete(runId, workerId);
+    await runtime.setActive(sessionId, false);
+  } catch (error) {
+    if (error instanceof SessionRunCancelled) {
+      await repo.cancel(runId);
+      const runtime = new SessionRuntimeRepository(env.DB);
+      await runtime.setActive(sessionId, false);
+      timing("workflow.run.cancelled", undefined, { runId });
+      return;
+    }
+
+    if (error instanceof TimeBudgetExceeded) {
+      await repo.releaseRunnable(runId, workerId);
+      timing("workflow.run.yielded", undefined, { runId, reason: "time_budget" });
+      return;
+    }
+
+    const message = errorMessage(error);
+    logger.error("Session run failed", error, {
+      runId,
+      sessionId,
+    });
+    await repo.fail(runId, workerId, message);
+    await markPromptError(env, sessionId, message, timing);
+  } finally {
+    await flushTimingCollector(env, collector, {
+      sessionId,
+      reason: "session_run_finally",
+      runId,
+    });
+  }
+}
+
+export async function recoverSessionRuns(
+  env: Env,
+  options: { limit?: number; budgetMs?: number; ctx?: ExecutionContext } = {},
+): Promise<void> {
+  const repo = new SessionRunRepository(env.DB);
+  const due = await repo.listDue(options.limit ?? 5);
+  await Promise.all(due.map((run) => runSessionRun(env, run.id, {
+    budgetMs: options.budgetMs,
+    ctx: options.ctx,
+  })));
+}
+
+async function processPrompt(
+  env: Env,
+  ctx: ExecutionContext | undefined,
+  run: SessionRun,
+  checkpoints: SessionRunCheckpointContext,
+  input: Extract<SessionInputEvent, { type: "prompt" }>,
+  inputIndex: number,
+  timing: WorkflowTimingLog,
+): Promise<void> {
+  const sessionId = run.sessionId;
+  let agentSession: AgentSessionState;
+  let nextStep: NextStepInfo | undefined;
+  let completedTurns = 0;
+  let agentStep = 0;
+  const maxTurns = input.maxTurns ?? 20;
+
+  try {
+    const enqueued = await checkpoints.step(`enqueue-prompt-${inputIndex}`, async () => {
+      const stepCollector = new TimingCollector();
+      const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
+      const runtime = new SessionRuntimeRepository(env.DB);
+      const events = new SessionEventRepository(env.DB);
+
+      const loaded = await loadAgentSession(env, sessionId, undefined, stepTiming);
+      const loadedSession = loaded.session;
+      const enqueueStart = timingStart();
+      const enqueueResult = Agent.enqueuePrompt(loadedSession, input.content);
+      let nextStep = Agent.determineNextStep(enqueueResult.session) ?? null;
+      stepTiming("workflow.prompt.enqueued", enqueueStart, {
+        eventCount: enqueueResult.events.length,
+        nextStepType: nextStep?.type,
+        nextStepId: nextStep?.stepId,
+        ...promptApiTimingDetails(input),
+      });
+
+      const saveStart = timingStart();
+      const appendStart = timingStart();
+      const savedSessionPromise = runtime.saveWorkflowSession(sessionId, enqueueResult.session).then((savedSession) => {
+        stepTiming("workflow.session.saved", saveStart, {
+          status: enqueueResult.session.status,
+          messageCount: enqueueResult.session.messages.length,
+          turnCount: enqueueResult.session.turns.length,
+          serializedBytes: savedSession.serializedBytes,
+          written: savedSession.written,
+          skippedUnchanged: savedSession.skippedUnchanged,
+        });
+        return savedSession;
+      });
+      const appendEventsPromise = appendAgentEvents(env, events, sessionId, enqueueResult.events, stepTiming).then(() => {
+        stepTiming("workflow.prompt.events_appended", appendStart, {
           eventCount: enqueueResult.events.length,
-          nextStepType: nextStep?.type,
-          nextStepId: nextStep?.stepId,
+          eventTypes: enqueueResult.events.map((event) => event.type),
+        });
+      });
+      let [savedSession] = await Promise.all([savedSessionPromise, appendEventsPromise]);
+
+      if (nextStep?.type === "assistant") {
+        const currentStep = nextStep;
+        const stepStart = timingStart();
+        stepTiming("workflow.agent_step.start", undefined, {
+          stepType: currentStep.type,
+          stepId: currentStep.stepId,
+          displayName: currentStep.displayName,
           ...promptApiTimingDetails(input),
         });
-
-        const saveStart = timingStart();
-        const appendStart = timingStart();
-        const savedSessionPromise = runtime.saveWorkflowSession(sessionId, enqueueResult.session).then((savedSession) => {
-          stepTiming("workflow.session.saved", saveStart, {
-            status: enqueueResult.session.status,
-            messageCount: enqueueResult.session.messages.length,
-            turnCount: enqueueResult.session.turns.length,
-            serializedBytes: savedSession.serializedBytes,
-            written: savedSession.written,
-            skippedUnchanged: savedSession.skippedUnchanged,
-          });
-          return savedSession;
+        const liveEvents = new LiveAgentEventPersister((agentEvents) =>
+          appendAgentEvents(env, events, sessionId, agentEvents, stepTiming)
+        );
+        const agentContext = loaded.agentContext ?? await createWorkflowAgentContext(env, sessionId, stepTiming);
+        const agent = await createWorkflowAgent(
+          env,
+          ctx,
+          sessionId,
+          (event) => liveEvents.onEvent(event),
+          agentContext,
+          stepTiming,
+          () => promptApiTimingDetails(input),
+        );
+        const assistantResult = await agent.runSingleStep(enqueueResult.session, currentStep);
+        stepTiming("workflow.agent_step.ran", stepStart, {
+          stepType: currentStep.type,
+          stepId: currentStep.stepId,
+          eventCount: assistantResult.events.length,
+          nextStepType: assistantResult.nextStep?.type,
+          nextStepId: assistantResult.nextStep?.stepId,
+          sessionStatus: assistantResult.session.status,
+          combinedWithPromptEnqueue: true,
         });
-        const appendEventsPromise = appendAgentEvents(this.env, events, sessionId, enqueueResult.events, stepTiming).then(() => {
-          stepTiming("workflow.prompt.events_appended", appendStart, {
-            eventCount: enqueueResult.events.length,
-            eventTypes: enqueueResult.events.map((event) => event.type),
-          });
-        });
-        let [savedSession] = await Promise.all([savedSessionPromise, appendEventsPromise]);
 
-        if (nextStep?.type === "assistant") {
-          const currentStep = nextStep;
+        const assistantSaveStart = timingStart();
+        savedSession = await runtime.saveWorkflowSession(sessionId, assistantResult.session);
+        stepTiming("workflow.session.saved", assistantSaveStart, {
+          status: assistantResult.session.status,
+          messageCount: assistantResult.session.messages.length,
+          turnCount: assistantResult.session.turns.length,
+          serializedBytes: savedSession.serializedBytes,
+          written: savedSession.written,
+          skippedUnchanged: savedSession.skippedUnchanged,
+          combinedWithPromptEnqueue: true,
+        });
+        await liveEvents.flushUpdates();
+        const unpersistedEvents = assistantResult.events.filter((event) => !liveEvents.hasHandled(event));
+        await appendAgentEvents(env, events, sessionId, unpersistedEvents, stepTiming);
+        nextStep = assistantResult.nextStep ?? null;
+      }
+
+      await flushTimingCollector(env, stepCollector, {
+        sessionId,
+        reason: "enqueue_prompt",
+      });
+
+      return {
+        session: deserializeForWorkflow(savedSession.serializedJson),
+        nextStep: serializeForWorkflow(nextStep),
+      };
+    });
+
+    agentSession = requireAgentSessionState(enqueued.session);
+    nextStep = optionalNextStepInfo(enqueued.nextStep);
+
+    while (nextStep) {
+      await checkpoints.assertCanContinue();
+      const currentStep = nextStep;
+      const stepResult = await checkpoints.step(
+        `agent-${inputIndex}-${agentStep++}-${currentStep.stepId}`,
+        async () => {
+          const stepCollector = new TimingCollector();
+          const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
           const stepStart = timingStart();
           stepTiming("workflow.agent_step.start", undefined, {
             stepType: currentStep.type,
             stepId: currentStep.stepId,
             displayName: currentStep.displayName,
+            toolCallId: currentStep.toolCallId,
+            toolCallIds: currentStep.toolCallIds,
             ...promptApiTimingDetails(input),
           });
+          const runtime = new SessionRuntimeRepository(env.DB);
+          const events = new SessionEventRepository(env.DB);
           const liveEvents = new LiveAgentEventPersister((agentEvents) =>
-            appendAgentEvents(this.env, events, sessionId, agentEvents, stepTiming)
+            appendAgentEvents(env, events, sessionId, agentEvents, stepTiming)
           );
-          const agentContext = loaded.agentContext ?? await createWorkflowAgentContext(this.env, sessionId, stepTiming);
-          const agent = await createWorkflowAgent(
-            this.env,
-            this.ctx,
-            sessionId,
-            (event) => liveEvents.onEvent(event),
-            agentContext,
-            stepTiming,
-            () => promptApiTimingDetails(input),
-          );
-          const assistantResult = await agent.runSingleStep(enqueueResult.session, currentStep);
+          const result = currentStep.type === "complete"
+            ? (() => {
+                const completeResult = Agent.completeTurn(agentSession);
+                const nextStep = Agent.determineNextStep(completeResult.session);
+                return {
+                  session: completeResult.session,
+                  events: completeResult.events,
+                  nextStep,
+                  shouldContinue: Boolean(nextStep) && completeResult.session.status !== "error",
+                  shouldStop: !nextStep || completeResult.session.status === "error",
+                };
+              })()
+            : await (async () => {
+                const agentContext = await createWorkflowAgentContext(env, sessionId, stepTiming);
+                const agent = await createWorkflowAgent(
+                  env,
+                  ctx,
+                  sessionId,
+                  (event) => liveEvents.onEvent(event),
+                  agentContext,
+                  stepTiming,
+                  () => promptApiTimingDetails(input),
+                );
+                return agent.runSingleStep(agentSession, currentStep);
+              })();
           stepTiming("workflow.agent_step.ran", stepStart, {
             stepType: currentStep.type,
             stepId: currentStep.stepId,
-            eventCount: assistantResult.events.length,
-            nextStepType: assistantResult.nextStep?.type,
-            nextStepId: assistantResult.nextStep?.stepId,
-            sessionStatus: assistantResult.session.status,
-            combinedWithPromptEnqueue: true,
+            eventCount: result.events.length,
+            nextStepType: result.nextStep?.type,
+            nextStepId: result.nextStep?.stepId,
+            sessionStatus: result.session.status,
           });
 
-          const assistantSaveStart = timingStart();
-          savedSession = await runtime.saveWorkflowSession(sessionId, assistantResult.session);
-          stepTiming("workflow.session.saved", assistantSaveStart, {
-            status: assistantResult.session.status,
-            messageCount: assistantResult.session.messages.length,
-            turnCount: assistantResult.session.turns.length,
+          const saveStart = timingStart();
+          const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);
+          stepTiming("workflow.session.saved", saveStart, {
+            status: result.session.status,
+            messageCount: result.session.messages.length,
+            turnCount: result.session.turns.length,
             serializedBytes: savedSession.serializedBytes,
             written: savedSession.written,
             skippedUnchanged: savedSession.skippedUnchanged,
-            combinedWithPromptEnqueue: true,
           });
           await liveEvents.flushUpdates();
-          const unpersistedEvents = assistantResult.events.filter((event) => !liveEvents.hasHandled(event));
-          await appendAgentEvents(this.env, events, sessionId, unpersistedEvents, stepTiming);
-          nextStep = assistantResult.nextStep ?? null;
-        }
+          const unpersistedEvents = result.events.filter((event) => !liveEvents.hasHandled(event));
+          await appendAgentEvents(env, events, sessionId, unpersistedEvents, stepTiming);
 
-        await flushTimingCollector(this.env, stepCollector, {
-          sessionId,
-          reason: "enqueue_prompt",
-        });
-
-        return {
-          session: deserializeForWorkflow(savedSession.serializedJson),
-          nextStep: serializeForWorkflow(nextStep),
-        };
-      });
-
-      agentSession = requireAgentSessionState(enqueued.session);
-      nextStep = optionalNextStepInfo(enqueued.nextStep);
-
-      while (nextStep) {
-        const currentStep = nextStep;
-        const stepResult = await runWorkflowStep(
-          step,
-          `agent-${inputIndex}-${agentStep++}-${currentStep.stepId}`,
-          async () => {
-            const stepCollector = new TimingCollector();
-            const stepTiming = createWorkflowTiming(this.env, sessionId, stepCollector);
-            const stepStart = timingStart();
-            stepTiming("workflow.agent_step.start", undefined, {
-              stepType: currentStep.type,
-              stepId: currentStep.stepId,
-              displayName: currentStep.displayName,
-              toolCallId: currentStep.toolCallId,
-              toolCallIds: currentStep.toolCallIds,
-              ...promptApiTimingDetails(input),
-            });
-            const runtime = new SessionRuntimeRepository(this.env.DB);
-            const events = new SessionEventRepository(this.env.DB);
-            const liveEvents = new LiveAgentEventPersister((agentEvents) =>
-              appendAgentEvents(this.env, events, sessionId, agentEvents, stepTiming)
-            );
-            const result = currentStep.type === "complete"
-              ? (() => {
-                  const completeResult = Agent.completeTurn(agentSession);
-                  const nextStep = Agent.determineNextStep(completeResult.session);
-                  return {
-                    session: completeResult.session,
-                    events: completeResult.events,
-                    nextStep,
-                    shouldContinue: Boolean(nextStep) && completeResult.session.status !== "error",
-                    shouldStop: !nextStep || completeResult.session.status === "error",
-                  };
-                })()
-              : await (async () => {
-                  const agentContext = await createWorkflowAgentContext(this.env, sessionId, stepTiming);
-                  const agent = await createWorkflowAgent(
-	                    this.env,
-	                    this.ctx,
-	                    sessionId,
-	                    (event) => liveEvents.onEvent(event),
-	                    agentContext,
-	                    stepTiming,
-	                    () => promptApiTimingDetails(input),
-	                  );
-                  return agent.runSingleStep(agentSession, currentStep);
-                })();
-            stepTiming("workflow.agent_step.ran", stepStart, {
-              stepType: currentStep.type,
-              stepId: currentStep.stepId,
-              eventCount: result.events.length,
-              nextStepType: result.nextStep?.type,
-              nextStepId: result.nextStep?.stepId,
-              sessionStatus: result.session.status,
-            });
-
-            const saveStart = timingStart();
-            const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);
-            stepTiming("workflow.session.saved", saveStart, {
-              status: result.session.status,
-              messageCount: result.session.messages.length,
-              turnCount: result.session.turns.length,
-              serializedBytes: savedSession.serializedBytes,
-              written: savedSession.written,
-              skippedUnchanged: savedSession.skippedUnchanged,
-            });
-            await liveEvents.flushUpdates();
-            const unpersistedEvents = result.events.filter((event) => !liveEvents.hasHandled(event));
-            await appendAgentEvents(this.env, events, sessionId, unpersistedEvents, stepTiming);
-
-            await flushTimingCollector(this.env, stepCollector, {
-              sessionId,
-              reason: "agent_step",
-              stepType: currentStep.type,
-              stepId: currentStep.stepId,
-            });
-
-            return {
-              session: deserializeForWorkflow(savedSession.serializedJson),
-              nextStep: serializeForWorkflow(result.nextStep ?? null),
-            };
-          },
-        );
-
-        agentSession = requireAgentSessionState(stepResult.session);
-        nextStep = optionalNextStepInfo(stepResult.nextStep);
-
-        if (currentStep.type === "complete") {
-          completedTurns += 1;
-        }
-
-        if (nextStep && completedTurns >= maxTurns) {
-          const message = `Agent stopped after reaching maxTurns (${maxTurns}).`;
-          const limited = await runWorkflowStep(step, `agent-${inputIndex}-max-turns`, async () => {
-            const stepCollector = new TimingCollector();
-            const stepTiming = createWorkflowTiming(this.env, sessionId, stepCollector);
-            const limitStart = timingStart();
-            const runtime = new SessionRuntimeRepository(this.env.DB);
-            const events = new SessionEventRepository(this.env.DB);
-            const erroredSession: AgentSessionState = {
-              ...agentSession,
-              updatedAt: Date.now(),
-              status: "error",
-              errorMessage: message,
-            };
-
-            const savedSession = await runtime.saveWorkflowSession(sessionId, erroredSession);
-            await appendErrorEvent(events, sessionId, message);
-            stepTiming("workflow.max_turns_saved", limitStart, {
-              maxTurns,
-              serializedBytes: savedSession.serializedBytes,
-              written: savedSession.written,
-              skippedUnchanged: savedSession.skippedUnchanged,
-            });
-            await flushTimingCollector(this.env, stepCollector, {
-              sessionId,
-              reason: "max_turns",
-            });
-            return deserializeForWorkflow(savedSession.serializedJson);
+          await flushTimingCollector(env, stepCollector, {
+            sessionId,
+            reason: "agent_step",
+            stepType: currentStep.type,
+            stepId: currentStep.stepId,
           });
 
-          agentSession = requireAgentSessionState(limited);
-          nextStep = undefined;
-        }
+          return {
+            session: deserializeForWorkflow(savedSession.serializedJson),
+            nextStep: serializeForWorkflow(result.nextStep ?? null),
+          };
+        },
+      );
+
+      agentSession = requireAgentSessionState(stepResult.session);
+      nextStep = optionalNextStepInfo(stepResult.nextStep);
+
+      if (currentStep.type === "complete") {
+        completedTurns += 1;
       }
 
-      await step.do(`finalize-prompt-${inputIndex}`, async () => {
-        const stepCollector = new TimingCollector();
-        const stepTiming = createWorkflowTiming(this.env, sessionId, stepCollector);
-        const finalizeStart = timingStart();
-        const sessions = new SessionRepository(this.env.DB);
-        const runtime = new SessionRuntimeRepository(this.env.DB);
-        const events = new SessionEventRepository(this.env.DB);
-        const status = agentSession.status === "error" ? "error" : "idle";
-        stepTiming("workflow.prompt.finalizing", finalizeStart, {
-          currentSessionStatus: agentSession.status,
-          willSetStatusTo: status 
-        });
-        await saveSessionMetadata(this.env, sessions, runtime, events, sessionId, status, agentSession.errorMessage, stepTiming);
-        stepTiming("workflow.prompt.finalized", finalizeStart, { status });
-        await flushTimingCollector(this.env, stepCollector, {
-          sessionId,
-          reason: "finalize_prompt",
-          status,
-        });
-      });
-    } catch (error) {
-      const message = errorMessage(error);
+      if (nextStep && completedTurns >= maxTurns) {
+        const message = `Agent stopped after reaching maxTurns (${maxTurns}).`;
+        const limited = await checkpoints.step(`agent-${inputIndex}-max-turns`, async () => {
+          const stepCollector = new TimingCollector();
+          const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
+          const limitStart = timingStart();
+          const runtime = new SessionRuntimeRepository(env.DB);
+          const events = new SessionEventRepository(env.DB);
+          const erroredSession: AgentSessionState = {
+            ...agentSession,
+            updatedAt: Date.now(),
+            status: "error",
+            errorMessage: message,
+          };
 
-      // Always log errors to the server logs - this is NOT gated by CLAWFLARE_DEBUG_TIMING
-      logger.error("Workflow prompt failed", error, {
-        sessionId,
-        inputIndex,
-        maxTurns,
-      });
-
-      // Optional timing-only marker - this is gated by CLAWFLARE_DEBUG_TIMING
-      timing("workflow.prompt.error", undefined, {
-        error: message,
-      });
-
-      await step.do(`prompt-error-${inputIndex}`, async () => {
-        const stepCollector = new TimingCollector();
-        const stepTiming = createWorkflowTiming(this.env, sessionId, stepCollector);
-        const errorStart = timingStart();
-        await markPromptError(this.env, sessionId, message, stepTiming);
-        stepTiming("workflow.prompt.error_saved", errorStart);
-        await flushTimingCollector(this.env, stepCollector, {
-          sessionId,
-          reason: "prompt_error",
+          const savedSession = await runtime.saveWorkflowSession(sessionId, erroredSession);
+          await appendErrorEvent(events, sessionId, message);
+          stepTiming("workflow.max_turns_saved", limitStart, {
+            maxTurns,
+            serializedBytes: savedSession.serializedBytes,
+            written: savedSession.written,
+            skippedUnchanged: savedSession.skippedUnchanged,
+          });
+          await flushTimingCollector(env, stepCollector, {
+            sessionId,
+            reason: "max_turns",
+          });
+          return deserializeForWorkflow(savedSession.serializedJson);
         });
-      });
+
+        agentSession = requireAgentSessionState(limited);
+        nextStep = undefined;
+      }
     }
+
+    await checkpoints.step(`finalize-prompt-${inputIndex}`, async () => {
+      const stepCollector = new TimingCollector();
+      const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
+      const finalizeStart = timingStart();
+      const sessions = new SessionRepository(env.DB);
+      const runtime = new SessionRuntimeRepository(env.DB);
+      const events = new SessionEventRepository(env.DB);
+      const status = agentSession.status === "error" ? "error" : "idle";
+      stepTiming("workflow.prompt.finalizing", finalizeStart, {
+        currentSessionStatus: agentSession.status,
+        willSetStatusTo: status,
+      });
+      await saveSessionMetadata(env, sessions, runtime, events, sessionId, status, agentSession.errorMessage, stepTiming);
+      stepTiming("workflow.prompt.finalized", finalizeStart, { status });
+      await flushTimingCollector(env, stepCollector, {
+        sessionId,
+        reason: "finalize_prompt",
+        status,
+      });
+    });
+  } catch (error) {
+    if (error instanceof TimeBudgetExceeded) {
+      throw error;
+    }
+
+    const message = errorMessage(error);
+    logger.error("Workflow prompt failed", error, {
+      sessionId,
+      inputIndex,
+      maxTurns,
+    });
+
+    timing("workflow.prompt.error", undefined, {
+      error: message,
+    });
+
+    await checkpoints.step(`prompt-error-${inputIndex}`, async () => {
+      const stepCollector = new TimingCollector();
+      const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
+      const errorStart = timingStart();
+      await markPromptError(env, sessionId, message, stepTiming);
+      stepTiming("workflow.prompt.error_saved", errorStart);
+      await flushTimingCollector(env, stepCollector, {
+        sessionId,
+        reason: "prompt_error",
+      });
+    });
   }
 }

@@ -7,6 +7,7 @@ import {
   SessionEventRepository,
   SessionRepository,
   SessionRuntimeRepository,
+  SessionRunRepository,
   type SessionListFilter,
   type SessionMetadataState,
 } from "../../data/index.js";
@@ -18,14 +19,10 @@ import { resolveModelConnectionForNewSession } from "../model-connections/model-
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
-import { createWorkflowInstance, withWorkflowInstance } from "../../runtime/workflow-handles.js";
 import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
 export const sessionsRoutes = new Hono<AppBindings>();
-
-const WORKFLOW_PREWARM_READY_WAIT_MS = 5000;
-const WORKFLOW_PREWARM_READY_POLL_MS = 100;
 
 sessionRoutes.use("*", requireAuth);
 sessionRoutes.post("/", (c) =>
@@ -59,8 +56,7 @@ sessionsRoutes.get("/", (c) =>
 );
 
 // Session Create Route Handler - POST /v1/session
-// Creates a new empty session and waits for its workflow to reach the input listener.
-// This shifts workflow startup latency out of the first prompt path.
+// Creates a new empty session. First prompt starts a durable session run directly.
 
 /**
  * Create an immediate authorization context from the request context
@@ -80,13 +76,13 @@ function createAuthSession(ctx: RequestContext) {
 
 /**
  * Create a new empty session.
- * Returns once the workflow is ready for input or the readiness wait times out.
+ * Returns once the session metadata and default tools have been persisted.
  */
 export async function handleCreateSession(
   request: Request,
   env: Env,
   requestContext: RequestContext,
-  prewarmReadyWaitMs = WORKFLOW_PREWARM_READY_WAIT_MS,
+  _prewarmReadyWaitMs = 0,
 ): Promise<Response> {
   try {
     const body = (await request.json().catch(() => ({}))) as {
@@ -94,13 +90,11 @@ export async function handleCreateSession(
       modelConnectionId?: string;
     };
     const sessionId = body.sessionId || crypto.randomUUID();
-    const workflowId = crypto.randomUUID();
     // Use workspace from request context
     const workspaceId = requestContext.workspace.id;
 
     const sessions = new SessionRepository(env.DB);
     const events = new SessionEventRepository(env.DB);
-    const runtime = new SessionRuntimeRepository(env.DB);
 
     // Create authorization context for this request
     const auth = createAuthSession(requestContext);
@@ -136,36 +130,7 @@ export async function handleCreateSession(
     };
     await sessions.save(initialState);
     await seedDefaultSessionTools(env, sessionId);
-
-    const prewarmWorkflow = async () => {
-      const prewarmStart = timingStart();
-      try {
-        // Prewarm exists specifically to hide Cloudflare Workflow creation/startup latency from
-        // the first prompt. We only call it ready once the Workflow has actually reached
-        // waitForEvent; createWorkflowInstance() can return before the Workflow has started.
-        await createWorkflowInstance(env.AGENT_WORKFLOW, {
-          id: workflowId,
-          params: { sessionId },
-        });
-        const waitingAt = await waitForWorkflowWaiting(runtime, sessionId, prewarmReadyWaitMs);
-        if (waitingAt) {
-          await runtime.saveWorkflowId(sessionId, workflowId);
-        }
-        logTiming(env, sessionId, waitingAt ? "session.workflow.prewarmed" : "session.workflow.prewarm_timeout", prewarmStart, {
-          workspaceId,
-          workflowId,
-          ready: Boolean(waitingAt),
-          waitingAt,
-        });
-      } catch (error) {
-        logger.error("Workflow prewarm failed", error, {
-          sessionId,
-          workspaceId,
-          workflowId,
-        });
-      }
-    };
-    await prewarmWorkflow();
+    logTiming(env, sessionId, "session.created", undefined, { workspaceId });
 
     return json({
       id: sessionId,
@@ -235,20 +200,6 @@ function isSessionStreamTerminal(status: SessionStatus): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForWorkflowWaiting(
-  runtime: SessionRuntimeRepository,
-  sessionId: string,
-  timeoutMs: number,
-): Promise<number | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() <= deadline) {
-    const waitingAt = await runtime.getWorkflowWaitingAt(sessionId);
-    if (waitingAt !== null) return waitingAt;
-    await delay(WORKFLOW_PREWARM_READY_POLL_MS);
-  }
-  return runtime.getWorkflowWaitingAt(sessionId);
 }
 
 interface BuiltSessionResponse {
@@ -751,7 +702,7 @@ export async function handleRenameSession(
 }
 
 /**
- * Close a session - sends close event to workflow
+ * Close a session and ask any active durable run to stop between steps.
  */
 export async function handleCloseSession(
   sessionId: string,
@@ -760,6 +711,7 @@ export async function handleCloseSession(
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
+  const runs = new SessionRunRepository(env.DB);
   // Use workspace from request context
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -775,14 +727,9 @@ export async function handleCloseSession(
       return badRequest("Session already closed");
     }
 
-    if (session.workflowId) {
-      // Get workflow instance and send the close event directly.
-      await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, (workflowInstance) => {
-        return workflowInstance.sendEvent({
-          type: "session-input",
-          payload: { type: "close" },
-        });
-      });
+    const activeRun = await runs.findActiveForSession(sessionId);
+    if (activeRun) {
+      await runs.requestCancel(activeRun.id);
     }
 
     // Mark session as closed immediately for UI feedback
@@ -801,14 +748,8 @@ export async function handleCloseSession(
   }
 }
 
-type WorkflowTerminalStatus = "errored" | "terminated" | "complete";
-
-function isTerminalWorkflowStatus(status: string): status is WorkflowTerminalStatus {
-  return status === "errored" || status === "terminated" || status === "complete";
-}
-
 /**
- * Force-kill a session by terminating its workflow and destroying owned containers.
+ * Force-kill a session by cancelling its durable run and destroying owned containers.
  */
 export async function handleKillSession(
   sessionId: string,
@@ -818,6 +759,7 @@ export async function handleKillSession(
   const sessions = new SessionRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
   const events = new SessionEventRepository(env.DB);
+  const runs = new SessionRunRepository(env.DB);
   const containerContexts = new ContainerContextRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -829,23 +771,12 @@ export async function handleKillSession(
     }
 
     const errors: string[] = [];
-    let workflowStatusBefore: string | undefined;
-    let workflowTerminated = false;
+    let runCancelled = false;
 
-    if (session.workflowId) {
-      try {
-        const status = await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, async (workflowInstance) => {
-          const status = await workflowInstance.status();
-          if (!isTerminalWorkflowStatus(status.status)) {
-            await workflowInstance.terminate();
-            workflowTerminated = true;
-          }
-          return status;
-        });
-        workflowStatusBefore = status.status;
-      } catch (error) {
-        errors.push(`Workflow: ${error instanceof Error ? error.message : String(error)}`);
-      }
+    const activeRun = await runs.findActiveForSession(sessionId);
+    if (activeRun) {
+      await runs.cancel(activeRun.id);
+      runCancelled = true;
     }
 
     const ownedContainers = await containerContexts.listForSession(effectiveWorkspaceId, sessionId);
@@ -884,8 +815,8 @@ export async function handleKillSession(
       status: "closed",
       workspaceId: effectiveWorkspaceId,
       workflowId: session.workflowId,
-      workflowStatusBefore,
-      workflowTerminated,
+      workflowStatusBefore: activeRun?.status,
+      workflowTerminated: runCancelled,
       destroyedContainers,
       errors,
     });

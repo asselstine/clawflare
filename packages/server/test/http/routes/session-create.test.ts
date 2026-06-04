@@ -24,13 +24,6 @@ function createMockEnv(): Env {
       exec: () => Promise.resolve({ count: 0, duration: 0 }),
       dump: () => Promise.resolve(new ArrayBuffer(0)),
     } as unknown as Env["DB"],
-    AGENT_WORKFLOW: {
-      create: () => Promise.resolve({}),
-      get: () => ({
-        fetch: () => Promise.resolve(new Response()),
-        sendEvent: () => Promise.resolve(),
-      }),
-    } as unknown as Env["AGENT_WORKFLOW"],
   } as unknown as Env;
 }
 

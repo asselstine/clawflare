@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   markClosed: vi.fn(),
   append: vi.fn(),
   setActive: vi.fn(),
+  findActiveForSession: vi.fn(),
+  cancelRun: vi.fn(),
   listForSession: vi.fn(),
   deleteForSession: vi.fn(),
   destroyContainer: vi.fn(),
@@ -23,6 +25,10 @@ vi.mock("../../../src/data/index.js", () => ({
   })),
   SessionRuntimeRepository: vi.fn().mockImplementation(() => ({
     setActive: mocks.setActive,
+  })),
+  SessionRunRepository: vi.fn().mockImplementation(() => ({
+    findActiveForSession: mocks.findActiveForSession,
+    cancel: mocks.cancelRun,
   })),
   ContainerContextRepository: vi.fn().mockImplementation(() => ({
     listForSession: mocks.listForSession,
@@ -55,14 +61,11 @@ function createRequestContext(): RequestContext {
 }
 
 describe("handleKillSession", () => {
-  it("terminates the workflow, destroys session containers, and closes the session", async () => {
-    const terminate = vi.fn().mockResolvedValue(undefined);
-    const status = vi.fn().mockResolvedValue({ status: "running" });
-
+  it("cancels the active run, destroys session containers, and closes the session", async () => {
     mocks.findByIdInWorkspace.mockResolvedValue({
       id: "session-1",
       workspaceId: "workspace-1",
-      workflowId: "workflow-1",
+      workflowId: "run-1",
       status: "processing",
       nextEventCursor: "0",
       updatedAt: Date.now(),
@@ -82,12 +85,15 @@ describe("handleKillSession", () => {
     mocks.append.mockResolvedValue({ nextCursor: "1" });
     mocks.markClosed.mockResolvedValue(undefined);
     mocks.setActive.mockResolvedValue(undefined);
+    mocks.findActiveForSession.mockResolvedValue({
+      id: "run-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      status: "running",
+    });
+    mocks.cancelRun.mockResolvedValue(undefined);
 
-    const env = {
-      AGENT_WORKFLOW: {
-        get: vi.fn().mockResolvedValue({ status, terminate }),
-      },
-    } as unknown as Env;
+    const env = {} as Env;
 
     const response = await handleKillSession("session-1", env, createRequestContext());
     const data = (await response.json()) as {
@@ -102,7 +108,7 @@ describe("handleKillSession", () => {
     expect(data.status).toBe("closed");
     expect(data.workflowTerminated).toBe(true);
     expect(data.destroyedContainers).toEqual(["container-1"]);
-    expect(terminate).toHaveBeenCalledOnce();
+    expect(mocks.cancelRun).toHaveBeenCalledWith("run-1");
     expect(mocks.destroyContainer).toHaveBeenCalledWith(env, "container-1");
     expect(mocks.deleteForSession).toHaveBeenCalledWith("workspace-1", "session-1", "container-1");
     expect(mocks.markClosed).toHaveBeenCalledWith("session-1", "user");

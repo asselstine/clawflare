@@ -178,6 +178,39 @@ export const sessionRuntime = sqliteTable("session_runtime", {
   updatedAt: integer("updated_at").notNull(),
 });
 
+export const sessionRuns = sqliteTable("session_runs", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  workspaceId: text("workspace_id"),
+  status: text("status", {
+    enum: ["runnable", "running", "completed", "error", "cancel_requested", "cancelled"],
+  }).notNull(),
+  inputJson: text("input_json").notNull(),
+  attempt: integer("attempt").notNull().default(0),
+  leaseOwner: text("lease_owner"),
+  leaseExpiresAt: integer("lease_expires_at"),
+  stepCursor: integer("step_cursor").notNull().default(0),
+  errorMessage: text("error_message"),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+export const sessionRunSteps = sqliteTable(
+  "session_run_steps",
+  {
+    runId: text("run_id").notNull().references(() => sessionRuns.id, { onDelete: "cascade" }),
+    stepName: text("step_name").notNull(),
+    status: text("status", { enum: ["completed"] }).notNull(),
+    resultJson: text("result_json").notNull(),
+    attempt: integer("attempt").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.runId, table.stepName] }),
+  })
+);
+
 export const sessionTools = sqliteTable(
   "session_tools",
   {
