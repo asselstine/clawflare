@@ -51,6 +51,9 @@ export interface Env {
   // Secret Broker service for envelope-encrypted secrets
   SECRET_BROKER: Fetcher;
 
+  // Service binding used by Workflows to emit collected timing logs from a Worker context.
+  TIMING_LOGGER?: Fetcher;
+
   // Cloudflare Container for isolated development environment
   CODING_CONTAINER: DurableObjectNamespace<Container<Env>>;
 

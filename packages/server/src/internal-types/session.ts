@@ -32,7 +32,7 @@ export interface SessionMetadataState {
  * Input events that can be sent to a running session workflow
  */
 export type SessionInputEvent =
-  | { type: "prompt"; content: string; maxTurns?: number }
+  | { type: "prompt"; content: string; maxTurns?: number; apiReceivedAt?: number; apiRequestId?: string }
   | { type: "steer"; content: string }
   | { type: "fork"; parentId: string }
   | { type: "close" };

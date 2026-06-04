@@ -61,7 +61,7 @@ export interface CompleteSessionEvent extends NewSessionEvent {
 }
 
 export type SessionInputEvent =
-  | { type: "prompt"; content: string; maxTurns?: number }
+  | { type: "prompt"; content: string; maxTurns?: number; apiReceivedAt?: number; apiRequestId?: string }
   | { type: "steer"; content: string }
   | { type: "fork"; parentId: string }
   | { type: "close" };
@@ -227,6 +227,18 @@ export class SessionRepository {
     await this.db
       .update(sessions)
       .set({ status: "error", errorMessage: message, updatedAt: Date.now() })
+      .where(eq(sessions.id, sessionId));
+  }
+
+  async markProcessing(sessionId: string, workflowId: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({
+        status: "processing",
+        workflowId,
+        errorMessage: null,
+        updatedAt: Date.now(),
+      })
       .where(eq(sessions.id, sessionId));
   }
 

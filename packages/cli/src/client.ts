@@ -100,8 +100,14 @@ interface DeleteEgressHandlerResponse {
 }
 
 const SESSION_EVENT_PAGE_SIZE = 100;
-type SessionStreamTransport = "auto" | "sse" | "poll";
+const FAST_POLL_INTERVAL_MS = 50;
+const FAST_POLL_WINDOW_MS = 1500;
+type SessionStreamTransport = "auto" | "ws" | "sse" | "poll";
 type SessionStreamUpdate = { session: SessionResponse; newEvents: SessionEvent[]; complete: boolean };
+type SessionWebSocketMessage =
+  | { type: "session"; session: SessionResponse }
+  | { type: "heartbeat" }
+  | { type: "error"; error?: string; message?: string };
 
 export class AgentClient {
   private url: string;
@@ -162,6 +168,10 @@ export class AgentClient {
    */
   private buildUrl(path: string): string {
     return `${this.url}${path}`;
+  }
+
+  private buildWebSocketUrl(path: string): string {
+    return `${this.url.replace(/^https:/, "wss:")}${path}`;
   }
 
   /**
@@ -278,7 +288,23 @@ export class AgentClient {
   ): AsyncGenerator<SessionStreamUpdate> {
     const transport = options.transport ?? "auto";
 
-    if (transport !== "poll") {
+    if (transport === "auto" || transport === "ws") {
+      let streamed = false;
+      try {
+        for await (const update of this.streamSessionEventsWebSocket(sessionId, signal, options)) {
+          streamed = true;
+          yield update;
+        }
+        return;
+      } catch (error) {
+        if (transport === "ws" || streamed || signal?.aborted) throw error;
+        if (options.debug) {
+          console.log(`[streamSession] WebSocket unavailable, falling back to SSE: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+
+    if (transport === "auto" || transport === "sse") {
       let streamed = false;
       try {
         for await (const update of this.streamSessionEvents(sessionId, signal, options)) {
@@ -297,6 +323,133 @@ export class AgentClient {
     yield* this.pollSession(sessionId, signal, options);
   }
 
+  private async *streamSessionEventsWebSocket(
+    sessionId: string,
+    signal?: AbortSignal,
+    options: { initialCursor?: string; debug?: boolean; pollIntervalMs?: number; maxPolls?: number } = {},
+  ): AsyncGenerator<SessionStreamUpdate> {
+    const query = new URLSearchParams();
+    if (options.initialCursor) query.set("since", options.initialCursor);
+    query.set("includeMessages", "auto");
+
+    const path = `/v1/session/${sessionId}/events/ws?${query.toString()}`;
+    const wsUrl = this.buildWebSocketUrl(path);
+
+    if (!wsUrl.startsWith("wss://")) {
+      throw new Error(`Insecure WebSocket URL: ${wsUrl}. WSS (secure WebSocket) is required.`);
+    }
+
+    const ws = await this.openWebSocket(wsUrl, signal);
+    let lastSession: SessionResponse | undefined;
+
+    try {
+      for await (const raw of iterateWebSocketMessages(ws, signal)) {
+        if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
+        const parsed = safeJsonParse<SessionWebSocketMessage>(webSocketDataToString(raw));
+        if (!parsed) continue;
+        if (parsed.type === "heartbeat") continue;
+        if (parsed.type === "error") {
+          throw new Error(parsed.error ?? parsed.message ?? "Session WebSocket stream failed");
+        }
+        if (parsed.type !== "session") continue;
+
+        const session = parsed.session;
+        lastSession = session;
+        const newEvents = session.events;
+        const complete = isSessionStreamComplete(session);
+
+        if (options.debug) {
+          console.log(`[streamSession] ws status=${session.status} events=${newEvents.length} complete=${complete} cursor=${session.nextEventCursor}`);
+        }
+
+        yield { session, newEvents, complete };
+
+        if (complete) {
+          if (options.debug) {
+            console.log(`[streamSession] WebSocket complete - status=${session.status}`);
+          }
+          return;
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      if (!isWebSocketDisconnectError(error)) throw error;
+
+      if (lastSession && isSessionStreamComplete(lastSession)) {
+        if (options.debug) {
+          console.log(`[streamSession] WebSocket closed after completion - status=${lastSession.status}`);
+        }
+        return;
+      }
+
+      if (lastSession) {
+        if (options.debug) {
+          console.log(`[streamSession] WebSocket disconnected, resuming with polling from cursor=${lastSession.nextEventCursor}`);
+        }
+        yield* this.pollSession(sessionId, signal, {
+          initialCursor: lastSession.nextEventCursor,
+          pollIntervalMs: options.pollIntervalMs,
+          maxPolls: options.maxPolls,
+          debug: options.debug,
+        });
+        return;
+      }
+
+      throw error;
+    } finally {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
+    }
+
+    if (lastSession) {
+      if (options.debug) {
+        console.log(`[streamSession] WebSocket ended, resuming with polling from cursor=${lastSession.nextEventCursor}`);
+      }
+      yield* this.pollSession(sessionId, signal, {
+        initialCursor: lastSession.nextEventCursor,
+        pollIntervalMs: options.pollIntervalMs,
+        maxPolls: options.maxPolls,
+        debug: options.debug,
+      });
+      return;
+    }
+
+    throw new Error(`Session ${sessionId} WebSocket stream ended before completion`);
+  }
+
+  private openWebSocket(wsUrl: string, signal?: AbortSignal): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(wsUrl, {
+        headers: this.getHeaders(),
+      });
+
+      const cleanup = () => {
+        ws.off("open", onOpen);
+        ws.off("error", onError);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onOpen = () => {
+        cleanup();
+        resolve(ws);
+      };
+      const onError = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      const onAbort = () => {
+        cleanup();
+        ws.close();
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+
+      ws.once("open", onOpen);
+      ws.once("error", onError);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
   private async *pollSession(
     sessionId: string,
     signal?: AbortSignal,
@@ -304,6 +457,7 @@ export class AgentClient {
   ): AsyncGenerator<SessionStreamUpdate> {
     const pollIntervalMs = options.pollIntervalMs ?? 250;
     const maxPolls = options.maxPolls ?? 10000;
+    const startedAt = Date.now();
     let cursor: string | undefined = options.initialCursor;
 
     for (let poll = 0; poll < maxPolls; poll++) {
@@ -312,12 +466,7 @@ export class AgentClient {
       const session = await this.getSession(sessionId, cursor, { includeMessages: "auto" });
       
       const newEvents = session.events;
-      const sessionComplete = session.status === "idle" ||
-        session.status === "error" ||
-        session.status === "closed" ||
-        session.status === "expired";
-      const mayHaveMoreEvents = sessionComplete && newEvents.length >= SESSION_EVENT_PAGE_SIZE;
-      const complete = sessionComplete && !mayHaveMoreEvents;
+      const complete = isSessionStreamComplete(session);
       
       if (options.debug) {
         console.log(`[streamSession] poll=${poll} status=${session.status} events=${newEvents.length} complete=${complete} cursor=${cursor ?? "0"}`);
@@ -334,7 +483,11 @@ export class AgentClient {
         return;
       }
       
-      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      const elapsed = Date.now() - startedAt;
+      const delayMs = elapsed < FAST_POLL_WINDOW_MS
+        ? Math.min(pollIntervalMs, FAST_POLL_INTERVAL_MS)
+        : pollIntervalMs;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
     throw new Error(`Session ${sessionId} did not complete before polling timed out`);
@@ -383,12 +536,7 @@ export class AgentClient {
       if (!session) continue;
 
       const newEvents = session.events;
-      const sessionComplete = session.status === "idle" ||
-        session.status === "error" ||
-        session.status === "closed" ||
-        session.status === "expired";
-      const mayHaveMoreEvents = sessionComplete && newEvents.length >= SESSION_EVENT_PAGE_SIZE;
-      const complete = sessionComplete && !mayHaveMoreEvents;
+      const complete = isSessionStreamComplete(session);
 
       if (options.debug) {
         console.log(`[streamSession] sse status=${session.status} events=${newEvents.length} complete=${complete} cursor=${session.nextEventCursor}`);
@@ -597,6 +745,88 @@ function safeJsonParse<T>(value: string): T | null {
   } catch {
     return null;
   }
+}
+
+function isSessionStreamComplete(session: SessionResponse): boolean {
+  const sessionComplete = session.status === "idle" ||
+    session.status === "error" ||
+    session.status === "closed" ||
+    session.status === "expired";
+  const mayHaveMoreEvents = sessionComplete && session.events.length >= SESSION_EVENT_PAGE_SIZE;
+  return sessionComplete && !mayHaveMoreEvents;
+}
+
+function isWebSocketDisconnectError(error: unknown): boolean {
+  if (!error) return false;
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return normalized.includes("network connection lost") ||
+    normalized.includes("socket is closed") ||
+    normalized.includes("websocket is not open") ||
+    normalized.includes("websocket was closed") ||
+    normalized.includes("connection closed");
+}
+
+async function* iterateWebSocketMessages(ws: WebSocket, signal?: AbortSignal): AsyncGenerator<unknown> {
+  const queue: unknown[] = [];
+  let done = false;
+  let error: Error | undefined;
+  let wake: (() => void) | undefined;
+
+  const notify = () => {
+    wake?.();
+    wake = undefined;
+  };
+  const onMessage = (data: unknown) => {
+    queue.push(data);
+    notify();
+  };
+  const onClose = () => {
+    done = true;
+    notify();
+  };
+  const onError = (err: Error) => {
+    error = err;
+    done = true;
+    notify();
+  };
+  const onAbort = () => {
+    done = true;
+    ws.close();
+    notify();
+  };
+
+  ws.on("message", onMessage);
+  ws.on("close", onClose);
+  ws.on("error", onError);
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    while (true) {
+      if (queue.length > 0) {
+        yield queue.shift();
+        continue;
+      }
+      if (error) throw error;
+      if (done) return;
+      await new Promise<void>((resolve) => {
+        wake = resolve;
+      });
+    }
+  } finally {
+    ws.off("message", onMessage);
+    ws.off("close", onClose);
+    ws.off("error", onError);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+function webSocketDataToString(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Buffer.isBuffer(value)) return value.toString("utf8");
+  if (value instanceof ArrayBuffer) return Buffer.from(value).toString("utf8");
+  if (Array.isArray(value)) return Buffer.concat(value as Uint8Array[]).toString("utf8");
+  return String(value);
 }
 
 async function* parseServerSentEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<ParsedServerSentEvent> {

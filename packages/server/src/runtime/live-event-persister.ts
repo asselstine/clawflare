@@ -1,6 +1,7 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 
 export const LIVE_EVENT_UPDATE_FLUSH_THRESHOLD = 10;
+export const LIVE_EVENT_UPDATE_FLUSH_INTERVAL_MS = 120;
 
 type AppendAgentEvents = (events: AgentEvent[]) => Promise<void>;
 
@@ -14,10 +15,12 @@ export class LiveAgentEventPersister {
   private readonly handledEvents = new Set<AgentEvent>();
   private readonly pendingUpdates = new Map<string, AgentEvent>();
   private pendingUpdateCount = 0;
+  private lastUpdateFlushAt = Date.now();
 
   constructor(
     private readonly appendEvents: AppendAgentEvents,
     private readonly updateFlushThreshold = LIVE_EVENT_UPDATE_FLUSH_THRESHOLD,
+    private readonly updateFlushIntervalMs = LIVE_EVENT_UPDATE_FLUSH_INTERVAL_MS,
   ) {}
 
   hasHandled(event: AgentEvent): boolean {
@@ -31,8 +34,9 @@ export class LiveAgentEventPersister {
     if (updateKey) {
       this.pendingUpdates.set(updateKey, event);
       this.pendingUpdateCount += 1;
+      const elapsedSinceFlush = Date.now() - this.lastUpdateFlushAt;
 
-      if (this.pendingUpdateCount >= this.updateFlushThreshold) {
+      if (this.pendingUpdateCount >= this.updateFlushThreshold || elapsedSinceFlush >= this.updateFlushIntervalMs) {
         await this.flushUpdates();
       }
       return;
@@ -48,6 +52,7 @@ export class LiveAgentEventPersister {
     const events = [...this.pendingUpdates.values()];
     this.pendingUpdates.clear();
     this.pendingUpdateCount = 0;
+    this.lastUpdateFlushAt = Date.now();
     await this.appendEvents(events);
   }
 }

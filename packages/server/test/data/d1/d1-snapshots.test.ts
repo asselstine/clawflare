@@ -27,6 +27,8 @@ function allMigrationStatements(): string[] {
     "0001_initial_schema.sql",
     "007_encrypted_secrets.sql",
     "008_session_name.sql",
+    "012_workflow_waiting_at.sql",
+    "013_session_runtime_hot_context.sql",
   ].flatMap((file) => migrationStatements(file));
 }
 
@@ -115,6 +117,39 @@ describe("D1 Snapshot Repositories", () => {
       expect(second.written).toBe(false);
       expect(second.skippedUnchanged).toBe(true);
       expect(await repo.get("session-1")).toEqual(snapshot);
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("round-trips hot runtime context and skips unchanged writes", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new SessionRuntimeRepository(db);
+      const hotContext = {
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        resolvedModel: {
+          id: "model-1",
+          provider: "amazon-bedrock",
+          modelName: "moonshotai.kimi-k2.5",
+          secrets: { AWS_BEARER_TOKEN_BEDROCK: "secret" },
+          config: {},
+        },
+        toolRefs: ["code.eval"],
+        cachedAt: Date.now(),
+      };
+
+      const first = await repo.saveHotContext("session-1", hotContext);
+      const second = await repo.saveHotContext("session-1", hotContext);
+
+      expect(first.written).toBe(true);
+      expect(second.written).toBe(false);
+      expect(second.skippedUnchanged).toBe(true);
+      expect(await repo.getHotContext("session-1")).toEqual(hotContext);
+
+      await repo.clearHotContext("session-1");
+      expect(await repo.getHotContext("session-1")).toBeNull();
     } finally {
       await dispose();
     }

@@ -24,6 +24,11 @@
 			"binding": "SECRET_BROKER",
 			"service": "clawflare-runtime",
 			"entrypoint": "SecretBroker"
+		},
+		{
+			"binding": "TIMING_LOGGER",
+			"service": "clawflare-runtime",
+			"entrypoint": "TimingLogger"
 		}
 	],
 	"worker_loaders": [
@@ -95,6 +100,7 @@
 	],
 	"vars": {
 		"AI_PROVIDER": "amazon-bedrock",
-		"AI_MODEL": "minimax.minimax-m2.5"
+		"AI_MODEL": "minimax.minimax-m2.5",
+		"CLAWFLARE_DEBUG_TIMING": "1"
 	}
 }

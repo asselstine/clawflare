@@ -91,8 +91,21 @@ const slashCommands = [
   { name: "cf_debug", description: "Debug DO storage for current session [key]" },
 ];
 
+function getEventMessageRole(event: SessionEvent): string | undefined {
+  if (!("message" in event)) return undefined;
+  const message = event.message;
+  if (typeof message !== "object" || message === null || !("role" in message)) {
+    return undefined;
+  }
+  return typeof message.role === "string" ? message.role : undefined;
+}
+
+function shouldRenderForEvent(event: SessionEvent): boolean {
+  return event.type.startsWith("tool_execution_") || event.type.startsWith("message_");
+}
+
 // Helper to get display message from SessionEvent
-function getEventDisplayMessage(event: SessionEvent): string {
+export function getEventDisplayMessage(event: SessionEvent): string | null {
   switch (event.type) {
     case "tool_execution_start":
       return `Running ${event.toolName}`;
@@ -108,11 +121,16 @@ function getEventDisplayMessage(event: SessionEvent): string {
       return "Turn started";
     case "turn_end":
       return "Turn completed";
-    case "message_start":
+    case "message_start": {
+      if (getEventMessageRole(event) !== "assistant") return null;
       return "Generating response...";
+    }
     case "message_update":
+      if (getEventMessageRole(event) !== "assistant") return null;
+      return "Generating response...";
     case "message_end":
-      return "Response updated";
+      if (getEventMessageRole(event) !== "assistant") return null;
+      return "Response ready";
     default:
       return "Processing...";
   }
@@ -449,8 +467,13 @@ type DisplayMessage = {
   toolName?: string;
   isError?: boolean;
   details?: unknown;
+  streaming?: boolean;
   // For assistant messages with tool calls
   toolCalls?: ToolCallInfo[];
+};
+
+type AssistantPartialState = {
+  active: boolean;
 };
 
 type SessionSelectorState = {
@@ -470,6 +493,101 @@ function createUserBlock(content: string): Text {
   const bgFn = (text: string) => chalk.bgHex("#343541")(text);
   // paddingX: 1 (left/right), paddingY: 1 (top/bottom)
   return new Text(content, 1, 1, bgFn);
+}
+
+function getMessageContentValue(message: AgentMessage): string | Array<any> | undefined {
+  return "content" in message ? message.content : undefined;
+}
+
+function extractMessageTextContent(content: string | Array<any> | undefined): string {
+  if (!content) return "";
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("");
+  }
+  return "";
+}
+
+function extractMessageToolCalls(content: string | Array<any> | undefined): ToolCallInfo[] | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const toolCalls = content
+    .filter((c) => c.type === "toolCall")
+    .map((c) => ({
+      id: c.id || "",
+      name: c.name || "tool",
+      params: c.arguments || {},
+      status: "pending" as ToolCallStatus,
+    }));
+  return toolCalls.length ? toolCalls : undefined;
+}
+
+function eventMessageRole(message: AgentMessage): DisplayMessageRole {
+  if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
+    return message.role;
+  }
+  return "error";
+}
+
+export function applyAssistantPartialEvents(
+  messages: DisplayMessage[],
+  events: SessionEvent[],
+  state: AssistantPartialState = { active: false },
+): { messages: DisplayMessage[]; state: AssistantPartialState } {
+  let nextMessages = messages;
+  let nextState = { ...state };
+
+  const ensureAssistantMessage = (): number => {
+    const last = nextMessages[nextMessages.length - 1];
+    if (last?.role === "assistant") {
+      nextState = { active: true };
+      return nextMessages.length - 1;
+    }
+    nextMessages = [...nextMessages, { role: "assistant", content: "" }];
+    nextState = { active: true };
+    return nextMessages.length - 1;
+  };
+
+  const updateAssistantMessage = (message: AgentMessage): void => {
+    if (eventMessageRole(message) !== "assistant") return;
+
+    const content = getMessageContentValue(message);
+    const textContent = extractMessageTextContent(content);
+    const toolCalls = extractMessageToolCalls(content);
+    const index = ensureAssistantMessage();
+    const existing = nextMessages[index]!;
+
+    nextMessages = nextMessages.map((candidate, candidateIndex) => candidateIndex === index
+      ? {
+          ...existing,
+          content: textContent,
+          streaming: true,
+          toolCalls: toolCalls ?? existing.toolCalls,
+        }
+      : candidate);
+  };
+
+  for (const event of events) {
+    if (!("message" in event)) continue;
+    if (event.type === "message_start" || event.type === "message_update") {
+      updateAssistantMessage(event.message);
+    } else if (event.type === "message_end") {
+      updateAssistantMessage(event.message);
+      if (eventMessageRole(event.message) === "assistant") {
+        const index = nextMessages.length - 1;
+        if (nextMessages[index]?.role === "assistant") {
+          nextMessages = nextMessages.map((candidate, candidateIndex) => candidateIndex === index
+            ? { ...candidate, streaming: false }
+            : candidate);
+        }
+        nextState = { active: false };
+      }
+    }
+  }
+
+  return { messages: nextMessages, state: nextState };
 }
 
 export class ClawflareTUIApp {
@@ -507,6 +625,7 @@ export class ClawflareTUIApp {
   private pendingUserMessage: DisplayMessage | null = null;
   private pendingMessageCount = 0;  // Counter to detect new server messages
   private sawProcessingStatus = false; // Track if we've seen processing during this poll
+  private assistantPartialState: AssistantPartialState = { active: false };
 
   // Estimate tokens using Pi's approach: chars/4 (conservative overestimate)
   private estimateTokens(text: string): number {
@@ -892,7 +1011,7 @@ export class ClawflareTUIApp {
           // Show assistant text content if present
           if (msg.content) {
             const contentLines = getLineCount(msg.content);
-            const shouldCollapse = contentLines > termHeight;
+            const shouldCollapse = !msg.streaming && contentLines > termHeight;
             
             if (shouldCollapse && !msg.expanded) {
               // Show collapsed to 10 lines
@@ -1179,12 +1298,23 @@ export class ClawflareTUIApp {
     // Update tool call statuses based on events
     this.updateToolCallStatuses(events);
 
-    this.renderMessages();
+    if (events.some(shouldRenderForEvent)) {
+      this.renderMessages();
+    }
 
-    const lastEvent = events.at(-1);
+    let lastEvent: SessionEvent | undefined;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]!;
+      if (getEventDisplayMessage(event) !== null) {
+        lastEvent = event;
+        break;
+      }
+    }
     if (lastEvent) {
       const statusText = getEventDisplayMessage(lastEvent);
-      this.setStatus(statusText, "yellow");
+      if (statusText) {
+        this.setStatus(statusText, "yellow");
+      }
     }
   }
 
@@ -1234,6 +1364,7 @@ export class ClawflareTUIApp {
     this.isLoading = true;
     this.error = null;
     this.agentEvents = [];
+    this.assistantPartialState = { active: false };
     this.renderMessages();
     this.setStatus("Submitting... (Esc to abort)", "yellow");
 
@@ -1274,6 +1405,7 @@ export class ClawflareTUIApp {
       this.sawProcessingStatus = false;
       this.abortController = null;
       this.agentEvents = [];
+      this.assistantPartialState = { active: false };
       this.renderMessages();
     });
   }
@@ -1314,6 +1446,9 @@ export class ClawflareTUIApp {
       
       // Update events for progress display
       if (update.newEvents.length > 0) {
+        const partial = applyAssistantPartialEvents(this.messages, update.newEvents, this.assistantPartialState);
+        this.messages = partial.messages;
+        this.assistantPartialState = partial.state;
         this.updateAgentEvents(update.newEvents);
       }
       
@@ -1419,6 +1554,7 @@ export class ClawflareTUIApp {
     this.sessionName = session.name || "new";
     this.messages = (session.messages ?? []).map((message) => this.formatMessageForDisplay(message));
     this.agentEvents = session.events;
+    this.assistantPartialState = { active: false };
     this.pendingUserMessage = null;
     this.lastUsage = null;
     this.error = null;
@@ -1436,6 +1572,7 @@ export class ClawflareTUIApp {
     this.pendingMessageCount = 0;
     this.sawProcessingStatus = false;
     this.agentEvents = [];
+    this.assistantPartialState = { active: false };
   }
 
   private formatKilledSession(killed: KillSessionResponse): string {

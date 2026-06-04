@@ -30,22 +30,27 @@ function resolveBuiltinToolRef(ref: string): RuntimeTool | undefined {
   return builtinToolsByRef.get(ref);
 }
 
-export async function loadSessionTools(env: Env, sessionId?: string): Promise<RuntimeTool[]> {
+export function loadBuiltinToolsByRefs(toolRefs: string[]): RuntimeTool[] {
+  return toolRefs.flatMap((toolRef) => {
+    const tool = resolveBuiltinToolRef(toolRef);
+    return tool ? [tool] : [];
+  });
+}
+
+export async function loadSessionBuiltinToolRefs(env: Env, sessionId?: string): Promise<string[]> {
   if (!sessionId) {
     throw new Error("Tool loading requires a session");
   }
 
   const sessionTools = new SessionToolRepository(env.DB);
   const records = await sessionTools.list(sessionId, { enabledOnly: true });
+  return records
+    .filter((record) => record.toolRefType === "builtin")
+    .map((record) => record.toolRef);
+}
 
-  return records.flatMap((record) => {
-    if (record.toolRefType !== "builtin") {
-      return [];
-    }
-
-    const tool = resolveBuiltinToolRef(record.toolRef);
-    return tool ? [tool] : [];
-  });
+export async function loadSessionTools(env: Env, sessionId?: string): Promise<RuntimeTool[]> {
+  return loadBuiltinToolsByRefs(await loadSessionBuiltinToolRefs(env, sessionId));
 }
 
 export function listToolGroups(): ToolGroup[] {

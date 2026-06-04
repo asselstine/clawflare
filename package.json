@@ -11,6 +11,7 @@
     "dev": "pnpm --filter @clawflare/server dev",
     "logs": "pnpm --filter @clawflare/server logs",
     "test": "pnpm -r test",
+    "migrate": "pnpm --filter @clawflare/server db:migrations:apply:remote",
     "test:unit": "pnpm -r --filter=!@clawflare/e2e test",
     "test:e2e": "cd packages/e2e && node --import=tsx src/index.ts",
     "test:e2e:ui": "cd packages/e2e && node --import=tsx src/index.ts --ui",

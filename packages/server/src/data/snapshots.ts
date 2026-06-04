@@ -78,10 +78,71 @@ export class SessionRuntimeRepository {
 
     await this.db
       .insert(sessionRuntime)
-      .values({ sessionId, active: active ? 1 : 0, updatedAt: now })
+      .values({
+        sessionId,
+        active: active ? 1 : 0,
+        workflowWaitingAt: active ? undefined : null,
+        updatedAt: now,
+      })
       .onConflictDoUpdate({
         target: sessionRuntime.sessionId,
-        set: { active: active ? 1 : 0, updatedAt: now },
+        set: {
+          active: active ? 1 : 0,
+          ...(active ? {} : { workflowWaitingAt: null }),
+          updatedAt: now,
+        },
+      });
+  }
+
+  async getWorkflowWaitingAt(sessionId: string): Promise<number | null> {
+    const row = await this.db.query.sessionRuntime.findFirst({
+      columns: { workflowWaitingAt: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+
+    return row?.workflowWaitingAt ?? null;
+  }
+
+  async markWorkflowWaiting(sessionId: string): Promise<number> {
+    const now = Date.now();
+
+    await this.db
+      .insert(sessionRuntime)
+      .values({
+        sessionId,
+        active: 1,
+        workflowWaitingAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: sessionRuntime.sessionId,
+        set: {
+          active: 1,
+          workflowWaitingAt: now,
+          updatedAt: now,
+        },
+      });
+
+    return now;
+  }
+
+  async clearWorkflowWaiting(sessionId: string): Promise<void> {
+    const now = Date.now();
+
+    await this.db
+      .insert(sessionRuntime)
+      .values({
+        sessionId,
+        active: 1,
+        workflowWaitingAt: null,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: sessionRuntime.sessionId,
+        set: {
+          workflowWaitingAt: null,
+          updatedAt: now,
+        },
       });
   }
 
@@ -94,6 +155,49 @@ export class SessionRuntimeRepository {
     return row?.workflowSessionJson
       ? (JSON.parse(row.workflowSessionJson) as unknown)
       : null;
+  }
+
+  async getHotContext(sessionId: string): Promise<unknown | null> {
+    const row = await this.db.query.sessionRuntime.findFirst({
+      columns: { hotContextJson: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+
+    return row?.hotContextJson
+      ? (JSON.parse(row.hotContextJson) as unknown)
+      : null;
+  }
+
+  async saveHotContext(
+    sessionId: string,
+    hotContext: unknown
+  ): Promise<SerializedSaveResult> {
+    const now = Date.now();
+
+    const hotContextJson = JSON.stringify(hotContext);
+    const existing = await this.db.query.sessionRuntime.findFirst({
+      columns: { hotContextJson: true },
+      where: eq(sessionRuntime.sessionId, sessionId),
+    });
+    if (existing?.hotContextJson === hotContextJson) {
+      return unchangedSave(hotContextJson);
+    }
+
+    await this.db
+      .insert(sessionRuntime)
+      .values({ sessionId, hotContextJson, updatedAt: now })
+      .onConflictDoUpdate({
+        target: sessionRuntime.sessionId,
+        set: { hotContextJson, updatedAt: now },
+      });
+    return writtenSave(hotContextJson);
+  }
+
+  async clearHotContext(sessionId: string): Promise<void> {
+    await this.db
+      .update(sessionRuntime)
+      .set({ hotContextJson: null, updatedAt: Date.now() })
+      .where(eq(sessionRuntime.sessionId, sessionId));
   }
 
   async saveWorkflowSession(

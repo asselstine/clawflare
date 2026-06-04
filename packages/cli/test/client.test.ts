@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { AgentClient } from "../src/client.js";
 
 describe("AgentClient", () => {
@@ -106,7 +107,7 @@ describe("AgentClient", () => {
       const client = new AgentClient("https://localhost", "test-token");
       const updates: unknown[] = [];
 
-      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0" })) {
+      for await (const update of client.streamSession("session-id", undefined, { initialCursor: "0", transport: "sse" })) {
         updates.push(update);
       }
 
@@ -158,6 +159,72 @@ describe("AgentClient", () => {
       expect(mockFetch).toHaveBeenNthCalledWith(
         2,
         "https://localhost/v1/session/session-id?since=0&includeMessages=auto",
+        expect.any(Object)
+      );
+    });
+
+    it("resumes with polling when a WebSocket disconnects after streaming", async () => {
+      const processingSession = {
+        id: "session-id",
+        workspaceId: "workspace-id",
+        status: "processing",
+        messages: [],
+        events: [{
+          type: "message_start",
+          timestamp: Date.now(),
+          sequence: 1,
+        }],
+        nextEventCursor: "1",
+      };
+      const completedSession = {
+        id: "session-id",
+        workspaceId: "workspace-id",
+        status: "idle",
+        messages: [{ role: "assistant", content: "done" }],
+        events: [{
+          type: "message_end",
+          timestamp: Date.now(),
+          sequence: 2,
+        }],
+        nextEventCursor: "2",
+      };
+      const mockFetch = vi.fn().mockResolvedValue(createMockResponse(completedSession));
+
+      global.fetch = mockFetch;
+
+      const ws = new EventEmitter() as EventEmitter & {
+        readyState: number;
+        close: ReturnType<typeof vi.fn>;
+      };
+      ws.readyState = 1;
+      ws.close = vi.fn(() => {
+        ws.readyState = 3;
+      });
+
+      const client = new AgentClient("https://localhost", "test-token");
+      vi.spyOn(client as never, "openWebSocket").mockImplementation(async () => {
+        setTimeout(() => {
+          ws.emit("message", JSON.stringify({ type: "session", session: processingSession }));
+          ws.emit("error", new Error("Network connection lost"));
+        }, 0);
+        return ws;
+      });
+
+      const updates: unknown[] = [];
+
+      for await (const update of client.streamSession("session-id", undefined, {
+        initialCursor: "0",
+        pollIntervalMs: 1,
+        transport: "ws",
+      })) {
+        updates.push(update);
+      }
+
+      expect(updates).toHaveLength(2);
+      expect((updates[0] as { complete: boolean }).complete).toBe(false);
+      expect((updates[1] as { complete: boolean }).complete).toBe(true);
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://localhost/v1/session/session-id?since=1&includeMessages=auto",
         expect.any(Object)
       );
     });

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ClawflareTUIApp,
+  applyAssistantPartialEvents,
+  getEventDisplayMessage,
   getPersistedToolResultIsError,
   getToolCallVisualState,
   shouldShowTrailingThinking,
@@ -55,6 +57,83 @@ describe("shouldShowTrailingThinking", () => {
       { role: "assistant", toolCalls: [{}] },
       { role: "toolResult" },
     ])).toBe(false);
+  });
+});
+
+describe("getEventDisplayMessage", () => {
+  it("does not describe user prompt message events as response updates", () => {
+    expect(getEventDisplayMessage({
+      type: "message_end",
+      message: { role: "user", content: "hello" },
+    } as never)).toBeNull();
+  });
+
+  it("keeps assistant message status stable while streaming", () => {
+    expect(getEventDisplayMessage({
+      type: "message_start",
+      message: { role: "assistant", content: "" },
+    } as never)).toBe("Generating response...");
+    expect(getEventDisplayMessage({
+      type: "message_update",
+      message: { role: "assistant", content: "hel" },
+    } as never)).toBe("Generating response...");
+    expect(getEventDisplayMessage({
+      type: "message_end",
+      message: { role: "assistant", content: "hello" },
+    } as never)).toBe("Response ready");
+  });
+});
+
+describe("applyAssistantPartialEvents", () => {
+  it("adds and updates an in-progress assistant message from stream events", () => {
+    const result = applyAssistantPartialEvents([
+      { role: "user", content: "hello" },
+    ], [
+      {
+        type: "message_start",
+        message: { role: "assistant", content: [{ type: "text", text: "" }] },
+        timestamp: Date.now(),
+        sequence: 1,
+      },
+      {
+        type: "message_update",
+        message: { role: "assistant", content: [{ type: "text", text: "streaming" }] },
+        timestamp: Date.now(),
+        sequence: 2,
+      },
+    ] as never);
+
+    expect(result.messages).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "streaming", streaming: true, toolCalls: undefined },
+    ]);
+    expect(result.state.active).toBe(true);
+  });
+
+  it("reuses a trailing completed assistant message instead of duplicating it", () => {
+    const result = applyAssistantPartialEvents([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "final" },
+    ], [
+      {
+        type: "message_start",
+        message: { role: "assistant", content: [{ type: "text", text: "" }] },
+        timestamp: Date.now(),
+        sequence: 1,
+      },
+      {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "final" }] },
+        timestamp: Date.now(),
+        sequence: 2,
+      },
+    ] as never);
+
+    expect(result.messages).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "final", streaming: false, toolCalls: undefined },
+    ]);
+    expect(result.state.active).toBe(false);
   });
 });
 

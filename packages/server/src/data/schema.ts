@@ -173,6 +173,8 @@ export const sessionRuntime = sqliteTable("session_runtime", {
   active: integer("active").notNull().default(0),
   workflowSessionJson: text("workflow_session_json"),
   snapshotJson: text("snapshot_json"),
+  workflowWaitingAt: integer("workflow_waiting_at"),
+  hotContextJson: text("hot_context_json"),
   updatedAt: integer("updated_at").notNull(),
 });
 

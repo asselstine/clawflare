@@ -6,6 +6,8 @@ import type { Env } from "../../../src/internal-types/index.js";
 const mocks = vi.hoisted(() => ({
   findByIdInWorkspace: vi.fn(),
   save: vi.fn(),
+  markProcessing: vi.fn(),
+  getWorkflowWaitingAt: vi.fn(),
   enqueue: vi.fn(),
   latestCursor: vi.fn(),
   resolveModelConnectionForNewSession: vi.fn(),
@@ -18,6 +20,10 @@ vi.mock("../../../src/data/index.js", () => ({
   SessionRepository: vi.fn().mockImplementation(() => ({
     findByIdInWorkspace: mocks.findByIdInWorkspace,
     save: mocks.save,
+    markProcessing: mocks.markProcessing,
+  })),
+  SessionRuntimeRepository: vi.fn().mockImplementation(() => ({
+    getWorkflowWaitingAt: mocks.getWorkflowWaitingAt,
   })),
   InputQueueRepository: vi.fn().mockImplementation(() => ({
     enqueue: mocks.enqueue,
@@ -75,6 +81,8 @@ describe("handleChat timing", () => {
       modelName: "gpt-5",
     });
     mocks.createWorkflowInstance.mockResolvedValue(undefined);
+    mocks.markProcessing.mockResolvedValue(undefined);
+    mocks.getWorkflowWaitingAt.mockResolvedValue(Date.now());
     mocks.seedDefaults.mockResolvedValue(undefined);
     mocks.withWorkflowInstance.mockImplementation(async (
       _workflow: unknown,
@@ -108,9 +116,7 @@ describe("handleChat timing", () => {
         "chat.auth.context_created",
         "chat.model.resolved",
         "chat.session.created",
-        "chat.input.enqueued",
         "chat.workflow.created",
-        "chat.workflow.woke",
         "chat.response.serialized",
         "chat.route.response",
       ]));
@@ -122,6 +128,130 @@ describe("handleChat timing", () => {
       expect(logs.find((entry) => entry.phase === "chat.response.serialized")?.responseBytes).toEqual(
         expect.any(Number),
       );
+      expect(mocks.createWorkflowInstance).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({
+          id: expect.any(String),
+          params: {
+            sessionId: "session-1",
+            initialInput: expect.objectContaining({
+              type: "prompt",
+              content: "hello",
+              apiReceivedAt: expect.any(Number),
+              apiRequestId: expect.any(String),
+            }),
+          },
+        }),
+      );
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("creates a workflow with initial input for an existing session without a workflow", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "",
+      status: "idle",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+      idleTimeout: "7 days",
+      modelConnectionId: "model-1",
+      modelProvider: "openai",
+      modelName: "gpt-5",
+    });
+
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const response = await handleChat(
+        new Request("https://example.com/v1/chat", {
+          method: "POST",
+          body: JSON.stringify({ sessionId: "session-1", content: "hello" }),
+        }),
+        { CLAWFLARE_DEBUG_TIMING: "true" } as Env,
+        createRequestContext(),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mocks.markProcessing).toHaveBeenCalledWith("session-1", expect.any(String));
+      expect(mocks.createWorkflowInstance).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({
+          id: expect.any(String),
+          params: {
+            sessionId: "session-1",
+            initialInput: expect.objectContaining({
+              type: "prompt",
+              content: "hello",
+              apiReceivedAt: expect.any(Number),
+              apiRequestId: expect.any(String),
+            }),
+          },
+        }),
+      );
+      expect(mocks.withWorkflowInstance).not.toHaveBeenCalled();
+
+      const phases = timingLogs(consoleSpy).map((entry) => entry.phase);
+      expect(phases).toEqual(expect.arrayContaining([
+        "chat.session.processing_saved",
+        "chat.workflow.created",
+        "chat.event_cursor.reused",
+      ]));
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("recreates with initial input when a stored prewarm workflow is not waiting", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "stale-workflow",
+      status: "idle",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+      idleTimeout: "7 days",
+      modelConnectionId: "model-1",
+      modelProvider: "openai",
+      modelName: "gpt-5",
+    });
+    mocks.getWorkflowWaitingAt.mockResolvedValue(null);
+
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const response = await handleChat(
+        new Request("https://example.com/v1/chat", {
+          method: "POST",
+          body: JSON.stringify({ sessionId: "session-1", content: "hello" }),
+        }),
+        { CLAWFLARE_DEBUG_TIMING: "true" } as Env,
+        createRequestContext(),
+      );
+
+      expect(response.status).toBe(200);
+      expect(mocks.markProcessing).toHaveBeenCalledWith("session-1", expect.not.stringMatching(/^stale-workflow$/));
+      expect(mocks.createWorkflowInstance).toHaveBeenCalledWith(
+        undefined,
+        expect.objectContaining({
+          id: expect.not.stringMatching(/^stale-workflow$/),
+          params: {
+            sessionId: "session-1",
+            initialInput: expect.objectContaining({
+              type: "prompt",
+              content: "hello",
+              apiReceivedAt: expect.any(Number),
+              apiRequestId: expect.any(String),
+            }),
+          },
+        }),
+      );
+      expect(mocks.withWorkflowInstance).not.toHaveBeenCalled();
+
+      const phases = timingLogs(consoleSpy).map((entry) => entry.phase);
+      expect(phases).toContain("chat.workflow.prewarm_not_ready");
     } finally {
       consoleSpy.mockRestore();
     }

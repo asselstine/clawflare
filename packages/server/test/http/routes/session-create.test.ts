@@ -8,10 +8,15 @@ import type { Workspace } from "../../../src/data/index.js";
 function createMockEnv(): Env {
   return {
     DB: {
-      prepare: () => ({
+      prepare: (query: string) => ({
         bind: () => ({
           run: () => Promise.resolve({}),
-          first: () => Promise.resolve(null),
+          first: () =>
+            Promise.resolve(
+              query.includes("workflow_waiting_at")
+                ? { workflow_waiting_at: Date.now() }
+                : null
+            ),
           all: () => Promise.resolve({ results: [] }),
         }),
       }),
@@ -66,7 +71,7 @@ describe("handleCreateSession", () => {
       body: JSON.stringify({}),
     });
 
-    const response = await handleCreateSession(request, env, requestContext);
+    const response = await handleCreateSession(request, env, requestContext, 0);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);
@@ -86,7 +91,7 @@ describe("handleCreateSession", () => {
       body: JSON.stringify({ sessionId: customId }),
     });
 
-    const response = await handleCreateSession(request, env, requestContext);
+    const response = await handleCreateSession(request, env, requestContext, 0);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);
@@ -101,7 +106,7 @@ describe("handleCreateSession", () => {
       body: "",
     });
 
-    const response = await handleCreateSession(request, env, requestContext);
+    const response = await handleCreateSession(request, env, requestContext, 0);
     const data = await response.json() as CreateSessionResponse;
 
     expect(response.status).toBe(200);

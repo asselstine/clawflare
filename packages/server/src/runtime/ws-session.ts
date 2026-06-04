@@ -3,7 +3,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Env, SessionMetadataState,} from "../internal-types/index.js";
 import type { ChatRequest } from "../types.js";
 import {
-  InputQueueRepository,
   SessionRepository,
   SessionRuntimeRepository,
   type SessionInputEvent,
@@ -100,7 +99,6 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
     const sessionId = data.sessionId || crypto.randomUUID();
     let workflowId: string;
     const sessions = new SessionRepository(this.env.DB);
-    const inputQueue = new InputQueueRepository(this.env.DB);
     const existingSession = data.sessionId ? await sessions.findById(data.sessionId) : null;
 
     if (existingSession) {
@@ -130,30 +128,25 @@ export class ClawflareWebSocketSession extends DurableObject<Env> {
       await sessions.save(initialState);
     }
 
-    const enqueueResult = await inputQueue.enqueue(sessionId, {
+    const inputEvent: SessionInputEvent = {
       type: "prompt",
       content: promptContent,
       maxTurns: data.maxTurns,
-    } as SessionInputEvent);
-
-    if (!enqueueResult.ok) {
-      ws.send(JSON.stringify({ type: "error", content: enqueueResult.error || "Queue full" }));
-      return;
-    }
+    };
 
     if (!existingSession) {
       await createWorkflowInstance(this.env.AGENT_WORKFLOW, {
         id: workflowId,
-        params: { sessionId },
+        params: { sessionId, initialInput: inputEvent },
+      });
+    } else {
+      await withWorkflowInstance(this.env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
+        return workflowInstance.sendEvent({
+          type: "session-input",
+          payload: inputEvent,
+        });
       });
     }
-
-    await withWorkflowInstance(this.env.AGENT_WORKFLOW, workflowId, (workflowInstance) => {
-      return workflowInstance.sendEvent({
-        type: "session-input",
-        payload: { type: "wake" },
-      });
-    });
 
     ws.send(JSON.stringify({
       type: "session_started",

@@ -4,11 +4,9 @@ import { requireAuth } from "../../middleware/auth.js";
 import type { Env } from "../../internal-types/index.js";
 import {
   ContainerContextRepository,
-  InputQueueRepository,
   SessionEventRepository,
   SessionRepository,
   SessionRuntimeRepository,
-  type SessionInputEvent,
   type SessionListFilter,
   type SessionMetadataState,
 } from "../../data/index.js";
@@ -26,9 +24,15 @@ import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../to
 export const sessionRoutes = new Hono<AppBindings>();
 export const sessionsRoutes = new Hono<AppBindings>();
 
+const WORKFLOW_PREWARM_READY_WAIT_MS = 5000;
+const WORKFLOW_PREWARM_READY_POLL_MS = 100;
+
 sessionRoutes.use("*", requireAuth);
 sessionRoutes.post("/", (c) =>
   handleCreateSession(c.req.raw, c.env, c.get("requestContext")!)
+);
+sessionRoutes.get("/:id/events/ws", (c) =>
+  handleStreamSessionEventsWebSocket(c.req.param("id"), new URL(c.req.url), c.req.raw, c.env, c.get("requestContext")!, c.executionCtx)
 );
 sessionRoutes.get("/:id/events", (c) =>
   handleStreamSessionEvents(c.req.param("id"), new URL(c.req.url), c.req.raw, c.env, c.get("requestContext")!)
@@ -55,8 +59,8 @@ sessionsRoutes.get("/", (c) =>
 );
 
 // Session Create Route Handler - POST /v1/session
-// Creates a new session and workflow without enqueuing any prompts
-// Used for warming up the workflow before user interaction
+// Creates a new empty session and waits for its workflow to reach the input listener.
+// This shifts workflow startup latency out of the first prompt path.
 
 /**
  * Create an immediate authorization context from the request context
@@ -75,13 +79,14 @@ function createAuthSession(ctx: RequestContext) {
 }
 
 /**
- * Create a new empty session with workflow
- * Returns session ID immediately; workflow is created but idle
+ * Create a new empty session.
+ * Returns once the workflow is ready for input or the readiness wait times out.
  */
 export async function handleCreateSession(
   request: Request,
   env: Env,
-  requestContext: RequestContext
+  requestContext: RequestContext,
+  prewarmReadyWaitMs = WORKFLOW_PREWARM_READY_WAIT_MS,
 ): Promise<Response> {
   try {
     const body = (await request.json().catch(() => ({}))) as {
@@ -95,6 +100,7 @@ export async function handleCreateSession(
 
     const sessions = new SessionRepository(env.DB);
     const events = new SessionEventRepository(env.DB);
+    const runtime = new SessionRuntimeRepository(env.DB);
 
     // Create authorization context for this request
     const auth = createAuthSession(requestContext);
@@ -118,7 +124,7 @@ export async function handleCreateSession(
     const initialState: SessionMetadataState = {
       id: sessionId,
       workspaceId,
-      workflowId,
+      workflowId: "",
       status: "idle" as const,
       nextEventCursor: await events.latestCursor(sessionId),
       updatedAt: Date.now(),
@@ -131,11 +137,35 @@ export async function handleCreateSession(
     await sessions.save(initialState);
     await seedDefaultSessionTools(env, sessionId);
 
-    // Create persistent workflow (initially idle)
-    await createWorkflowInstance(env.AGENT_WORKFLOW, {
-      id: workflowId,
-      params: { sessionId },
-    });
+    const prewarmWorkflow = async () => {
+      const prewarmStart = timingStart();
+      try {
+        // Prewarm exists specifically to hide Cloudflare Workflow creation/startup latency from
+        // the first prompt. We only call it ready once the Workflow has actually reached
+        // waitForEvent; createWorkflowInstance() can return before the Workflow has started.
+        await createWorkflowInstance(env.AGENT_WORKFLOW, {
+          id: workflowId,
+          params: { sessionId },
+        });
+        const waitingAt = await waitForWorkflowWaiting(runtime, sessionId, prewarmReadyWaitMs);
+        if (waitingAt) {
+          await runtime.saveWorkflowId(sessionId, workflowId);
+        }
+        logTiming(env, sessionId, waitingAt ? "session.workflow.prewarmed" : "session.workflow.prewarm_timeout", prewarmStart, {
+          workspaceId,
+          workflowId,
+          ready: Boolean(waitingAt),
+          waitingAt,
+        });
+      } catch (error) {
+        logger.error("Workflow prewarm failed", error, {
+          sessionId,
+          workspaceId,
+          workflowId,
+        });
+      }
+    };
+    await prewarmWorkflow();
 
     return json({
       id: sessionId,
@@ -194,6 +224,8 @@ export async function handleListSessionTools(
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const SESSION_EVENT_PAGE_SIZE = 100;
 const SESSION_EVENT_STREAM_POLL_MS = 100;
+const SESSION_EVENT_STREAM_FAST_POLL_MS = 50;
+const SESSION_EVENT_STREAM_FAST_POLL_WINDOW_MS = 1500;
 const SESSION_EVENT_STREAM_HEARTBEAT_MS = 15000;
 const SESSION_EVENT_STREAM_MAX_IDLE_MS = 30 * 60 * 1000;
 
@@ -203,6 +235,20 @@ function isSessionStreamTerminal(status: SessionStatus): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForWorkflowWaiting(
+  runtime: SessionRuntimeRepository,
+  sessionId: string,
+  timeoutMs: number,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const waitingAt = await runtime.getWorkflowWaitingAt(sessionId);
+    if (waitingAt !== null) return waitingAt;
+    await delay(WORKFLOW_PREWARM_READY_POLL_MS);
+  }
+  return runtime.getWorkflowWaitingAt(sessionId);
 }
 
 interface BuiltSessionResponse {
@@ -445,7 +491,13 @@ export async function handleStreamSessionEvents(
             }
 
             if (!hasFullPage) {
-              await delay(SESSION_EVENT_STREAM_POLL_MS);
+              // Poll a bit faster right after the client submits a prompt so newly appended
+              // workflow events are visible quickly, then settle back to reduce D1 traffic.
+              const elapsed = Date.now() - startedAt;
+              const pollDelay = elapsed < SESSION_EVENT_STREAM_FAST_POLL_WINDOW_MS
+                ? SESSION_EVENT_STREAM_FAST_POLL_MS
+                : SESSION_EVENT_STREAM_POLL_MS;
+              await delay(pollDelay);
             }
 
             const nextUrl = new URL(url);
@@ -499,6 +551,166 @@ export async function handleStreamSessionEvents(
 }
 
 /**
+ * Stream session state updates over WebSocket.
+ *
+ * Each "session" message contains a full SessionResponse, including the newly
+ * appended events and messages when includeMessages=auto decides they are needed.
+ * That lets the CLI update directly from the socket without issuing a follow-up poll.
+ */
+export async function handleStreamSessionEventsWebSocket(
+  sessionId: string,
+  url: URL,
+  request: Request,
+  env: Env,
+  requestContext: RequestContext,
+  executionCtx?: ExecutionContext,
+): Promise<Response> {
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  if (request.headers.get("Upgrade") !== "websocket") {
+    return badRequest("Expected WebSocket upgrade");
+  }
+
+  try {
+    const initial = await buildSessionResponse(sessionId, url, env, requestContext);
+    if (initial instanceof Response) return initial;
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+
+    let closed = false;
+    server.addEventListener("close", () => {
+      closed = true;
+    });
+    server.addEventListener("error", () => {
+      closed = true;
+    });
+
+    const run = async () => {
+      let cursor = url.searchParams.get("since") || undefined;
+      let lastStatus: SessionStatus | undefined;
+      let lastSentAt = Date.now();
+
+      const send = (message: unknown): boolean => {
+        if (closed) return false;
+        try {
+          server.send(JSON.stringify(message));
+        } catch (error) {
+          // The CLI closes the socket as soon as a turn is complete or when a user aborts.
+          // Cloudflare reports a send after that close as "Network connection lost"; treat it
+          // as a normal disconnect rather than surfacing a noisy Worker exception.
+          closed = true;
+          if (!isWebSocketDisconnectError(error)) {
+            logger.error("Session WebSocket send failed", error, {
+              handler: "handleStreamSessionEventsWebSocket",
+              route: "GET /v1/session/:id/events/ws",
+              sessionId,
+              workspaceId: effectiveWorkspaceId,
+            });
+          }
+          return false;
+        }
+        lastSentAt = Date.now();
+        return true;
+      };
+
+      try {
+        let next = initial.response;
+        const startedAt = Date.now();
+
+        while (!closed) {
+          const hasNewEvents = next.events.length > 0;
+          const statusChanged = next.status !== lastStatus;
+          const terminal = isSessionStreamTerminal(next.status);
+          const hasFullPage = next.events.length >= SESSION_EVENT_PAGE_SIZE;
+
+          if (hasNewEvents || statusChanged || terminal) {
+            if (!send({ type: "session", session: next })) break;
+            cursor = next.nextEventCursor;
+            lastStatus = next.status;
+          } else if (Date.now() - lastSentAt >= SESSION_EVENT_STREAM_HEARTBEAT_MS) {
+            if (!send({ type: "heartbeat" })) break;
+          }
+
+          if (terminal && !hasFullPage) {
+            break;
+          }
+
+          if (Date.now() - startedAt >= SESSION_EVENT_STREAM_MAX_IDLE_MS) {
+            break;
+          }
+
+          if (!hasFullPage) {
+            // Keep the WebSocket responsive around submit time without forcing the CLI
+            // to poll. This is intentionally a thin bridge over the existing D1-backed
+            // session log rather than a separate in-memory notification system.
+            const elapsed = Date.now() - startedAt;
+            const pollDelay = elapsed < SESSION_EVENT_STREAM_FAST_POLL_WINDOW_MS
+              ? SESSION_EVENT_STREAM_FAST_POLL_MS
+              : SESSION_EVENT_STREAM_POLL_MS;
+            await delay(pollDelay);
+          }
+
+          const nextUrl = new URL(url);
+          if (cursor) nextUrl.searchParams.set("since", cursor);
+          const built = await buildSessionResponse(sessionId, nextUrl, env, requestContext);
+          if (built instanceof Response) {
+            send({ type: "error", error: "Session is no longer available" });
+            break;
+          }
+          next = built.response;
+        }
+      } catch (error) {
+        if (!isWebSocketDisconnectError(error)) {
+          logger.error("Session WebSocket event stream failed", error, {
+            handler: "handleStreamSessionEventsWebSocket",
+            route: "GET /v1/session/:id/events/ws",
+            sessionId,
+            workspaceId: effectiveWorkspaceId,
+          });
+        }
+        send({ type: "error", error: error instanceof Error ? error.message : "Unknown error" });
+      } finally {
+        if (!closed) {
+          closed = true;
+          try {
+            server.close();
+          } catch {
+            // Already closed.
+          }
+        }
+      }
+    };
+
+    if (executionCtx) {
+      executionCtx.waitUntil(run());
+    } else {
+      void run();
+    }
+
+    return new Response(null, { status: 101, webSocket: client });
+  } catch (error) {
+    logger.error("Session WebSocket event stream failed", error, {
+      handler: "handleStreamSessionEventsWebSocket",
+      route: "GET /v1/session/:id/events/ws",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+function isWebSocketDisconnectError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("network connection lost") ||
+    message.includes("websocket is not open") ||
+    message.includes("socket is closed");
+}
+
+/**
  * Rename a session.
  */
 export async function handleRenameSession(
@@ -547,7 +759,6 @@ export async function handleCloseSession(
   requestContext: RequestContext
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
-  const inputQueue = new InputQueueRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
   // Use workspace from request context
   const effectiveWorkspaceId = requestContext.workspace.id;
@@ -564,20 +775,15 @@ export async function handleCloseSession(
       return badRequest("Session already closed");
     }
 
-    if (!session.workflowId) {
-      return serverError("Session has no associated workflow");
-    }
-
-    const inputEvent = { type: "close" } as SessionInputEvent;
-    await inputQueue.enqueue(sessionId, inputEvent);
-
-    // Get workflow instance and wake it to consume the queued close event
-    await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, (workflowInstance) => {
-      return workflowInstance.sendEvent({
-        type: "session-input",
-        payload: { type: "wake" },
+    if (session.workflowId) {
+      // Get workflow instance and send the close event directly.
+      await withWorkflowInstance(env.AGENT_WORKFLOW, session.workflowId, (workflowInstance) => {
+        return workflowInstance.sendEvent({
+          type: "session-input",
+          payload: { type: "close" },
+        });
       });
-    });
+    }
 
     // Mark session as closed immediately for UI feedback
     await sessions.markClosed(sessionId, "user");

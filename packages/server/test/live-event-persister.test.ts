@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { LiveAgentEventPersister } from "../src/runtime/live-event-persister.js";
 
@@ -81,6 +81,29 @@ describe("LiveAgentEventPersister", () => {
     await persister.onEvent(third);
 
     expect(appended).toEqual([[third]]);
+  });
+
+  it("flushes the latest coalesced update after the update interval", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    try {
+      const appended: AgentEvent[][] = [];
+      const first = messageUpdate("h");
+      const second = messageUpdate("hi");
+      const persister = new LiveAgentEventPersister(async (events) => {
+        appended.push(events);
+      }, 10, 100);
+
+      await persister.onEvent(first);
+      expect(appended).toEqual([]);
+
+      vi.setSystemTime(150);
+      await persister.onEvent(second);
+
+      expect(appended).toEqual([[second]]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("coalesces tool updates independently by tool call", async () => {

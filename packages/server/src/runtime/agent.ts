@@ -233,6 +233,28 @@ export class Agent {
     this.convertToLlm = config.convertToLlm ?? defaultConvertToLlm;
   }
 
+  static enqueuePrompt(session: AgentSessionState, prompt: string | AgentMessage): AgentStepResult {
+    const message = typeof prompt === "string" ? textMessage(prompt) : prompt;
+    const turn = createEmptyTurn(nextTurnIndex(session));
+    const events: AgentEvent[] = [
+      { type: "agent_start" },
+      { type: "turn_start" },
+      { type: "message_start", message },
+      { type: "message_end", message },
+    ];
+
+    return {
+      session: {
+        ...session,
+        status: "running",
+        updatedAt: now(),
+        messages: [...session.messages, message],
+        turns: [...session.turns, turn],
+      },
+      events,
+    };
+  }
+
   static completeTurn(session: AgentSessionState): CompleteTurnResult {
     const turn = latestTurn(session);
     if (!turn) throw new Error("Cannot complete turn without active turn");
@@ -400,25 +422,7 @@ export class Agent {
   }
 
   enqueuePrompt(session: AgentSessionState, prompt: string | AgentMessage): AgentStepResult {
-    const message = typeof prompt === "string" ? textMessage(prompt) : prompt;
-    const turn = createEmptyTurn(nextTurnIndex(session));
-    const events: AgentEvent[] = [
-      { type: "agent_start" },
-      { type: "turn_start" },
-      { type: "message_start", message },
-      { type: "message_end", message },
-    ];
-
-    return {
-      session: {
-        ...session,
-        status: "running",
-        updatedAt: now(),
-        messages: [...session.messages, message],
-        turns: [...session.turns, turn],
-      },
-      events,
-    };
+    return Agent.enqueuePrompt(session, prompt);
   }
 
   enqueueSteering(session: AgentSessionState, message: string | AgentMessage): AgentSessionState {

@@ -5,6 +5,7 @@ import { HttpGateway } from "./egress/gateway.js";
 import { PersistentSessionWorkflow } from "./runtime/workflow.js";
 import { ClawflareWebSocketSession } from "./runtime/ws-session.js";
 import { CodingContainer, ContainerProxy } from "./modules/tools/container/coding-container.js";
+import TimingLogger from "./modules/timing/timing-logger.worker.js";
 import app from "./http/app.js";
 
 // Export types for clients (public types only)
@@ -55,6 +56,7 @@ export {
   ClawflareWebSocketSession,
   CodingContainer,
   ContainerProxy,
+  TimingLogger,
 };
 
 // Export Secret Broker as separate entrypoint
