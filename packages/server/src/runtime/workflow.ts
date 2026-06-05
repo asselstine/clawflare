@@ -538,6 +538,21 @@ async function markPromptError(
   await saveSessionMetadata(env, sessions, runtime, events, sessionId, "error", message, timing);
 }
 
+async function markPromptCancelled(
+  env: Env,
+  sessionId: string,
+  timing?: WorkflowTimingLog,
+): Promise<void> {
+  const runtime = new SessionRuntimeRepository(env.DB);
+  const events = new SessionEventRepository(env.DB);
+  const sessions = new SessionRepository(env.DB);
+  await appendSessionStatusEvent(events, sessionId, {
+    type: "session.status_changed",
+    status: "idle",
+  });
+  await saveSessionMetadata(env, sessions, runtime, events, sessionId, "idle", undefined, timing);
+}
+
 export interface RunSessionRunOptions {
   budgetMs?: number;
   leaseMs?: number;
@@ -593,6 +608,7 @@ class SessionRunCheckpointContext {
 
     const stepStart = timingStart();
     const result = await callback();
+    await this.assertCanContinue();
     await this.repo.completeStep(this.run.id, name, this.run.attempt, serializeForWorkflow(result));
     this.timing("workflow.step.completed", stepStart, { stepName: name });
     return result;
@@ -652,6 +668,7 @@ export async function runSessionRun(
       await repo.cancel(runId);
       const runtime = new SessionRuntimeRepository(env.DB);
       await runtime.setActive(sessionId, false);
+      await markPromptCancelled(env, sessionId, timing);
       timing("workflow.run.cancelled", undefined, { runId });
       return;
     }
@@ -877,6 +894,7 @@ async function processPrompt(
             nextStepId: result.nextStep?.stepId,
             sessionStatus: result.session.status,
           });
+          await checkpoints.assertCanContinue();
 
           const saveStart = timingStart();
           const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);

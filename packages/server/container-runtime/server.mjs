@@ -317,6 +317,11 @@ async function grepOp(pattern, searchPath = ".", includePattern, maxMatches = 10
   };
 }
 
+function globPatternToRegExp(pattern) {
+  const escaped = pattern.replace(/[|\\{}()[\]^$+.\-]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
+}
+
 // Find files
 async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 200) {
   const resolvedPath = sanitizePath(searchPath);
@@ -344,9 +349,7 @@ async function findOp(searchPath = ".", namePattern, type = "any", maxResults = 
       let matchesName = true;
       if (namePattern) {
         // Simple glob matching
-        const regex = new RegExp(
-          "^" + namePattern.replace(/\./g, "\\.").replace(/\*/g, ".*").replace(/\?/g, ".") + "$"
-        );
+        const regex = globPatternToRegExp(namePattern);
         matchesName = regex.test(entry.name);
       }
 

@@ -21,6 +21,7 @@ import {
   Monitor,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Plus,
   Power,
   RefreshCw,
@@ -35,6 +36,7 @@ import {
 } from "lucide-react";
 import type {
   EgressHandlerInfo,
+  ContainerSummary,
   Model,
   ProviderInfo,
   ProviderModelInfo,
@@ -104,6 +106,11 @@ interface ContainerFindResult {
   mtime: string | null;
 }
 
+interface QuickPromptFileResult extends ContainerFindResult {
+  sessionId: string;
+  containerId: string;
+}
+
 interface ContainerFindDetails {
   ok: boolean;
   path: string;
@@ -130,21 +137,14 @@ interface ContainerBashDetails {
   killed?: boolean;
 }
 
-interface TerminalEntry {
-  id: string;
-  command: string;
-  cwd: string;
-  output: string;
-  details?: ContainerBashDetails;
-  isError?: boolean;
-}
-
 type QuickPromptItem =
   | {
       id: string;
       kind: "file";
       label: string;
       detail: string;
+      sessionId: string;
+      containerId: string;
       path: string;
       fileType: "file" | "directory";
     }
@@ -169,6 +169,14 @@ type QuickPromptItem =
       label: string;
       detail: string;
       prompt: string;
+    }
+  | {
+      id: string;
+      kind: "command";
+      label: string;
+      detail: string;
+      command: "rename-session";
+      name: string;
     };
 
 const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", "account", "data"];
@@ -176,6 +184,20 @@ const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", 
 function sessionIdFromLocation(): string | null {
   const match = window.location.pathname.match(/^\/session\/([^/]+)$/);
   return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
+
+type ContainerRouteEntry = { containerId: string; path: string; fileType: "file" | "directory" };
+
+function containerEntryFromLocation(): ContainerRouteEntry | null {
+  const match = window.location.pathname.match(/^\/containers\/([^/]+)\/(files|directories)(?:\/(.*))?$/);
+  if (!match?.[1]) return null;
+  const fileType = match[2] === "directories" ? "directory" : "file";
+  const path = normalizeQuickFilePath(decodeURIComponent(match[3] ?? ""));
+  return {
+    containerId: decodeURIComponent(match[1]),
+    fileType,
+    path: path || (fileType === "directory" ? "." : ""),
+  };
 }
 
 function settingsSectionFromLocation(): SettingsSection | null {
@@ -190,6 +212,20 @@ function updateBrowserSessionPath(sessionId: string, mode: "push" | "replace" = 
   const path = `/session/${encodeURIComponent(sessionId)}`;
   if (window.location.pathname === path) return;
   window.history[mode === "replace" ? "replaceState" : "pushState"]({ sessionId }, "", path);
+}
+
+function updateBrowserContainerEntryPath(
+  containerId: string,
+  path: string,
+  fileType: "file" | "directory",
+  mode: "push" | "replace" = "push",
+): void {
+  const normalizedPath = normalizeQuickFilePath(path);
+  const encodedPath = normalizedPath.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  const entryType = fileType === "directory" ? "directories" : "files";
+  const urlPath = `/containers/${encodeURIComponent(containerId)}/${entryType}${encodedPath ? `/${encodedPath}` : ""}`;
+  if (window.location.pathname === urlPath) return;
+  window.history[mode === "replace" ? "replaceState" : "pushState"]({ containerId, path: normalizedPath, fileType }, "", urlPath);
 }
 
 function updateBrowserSettingsPath(section: SettingsSection | null = null, mode: "push" | "replace" = "push"): void {
@@ -235,6 +271,7 @@ function App(): JSX.Element {
   const [statusText, setStatusText] = useState("Disconnected");
   const [isRunning, setIsRunning] = useState(false);
   const [serverProcessingSessionId, setServerProcessingSessionId] = useState<string | null>(null);
+  const [stoppingSessionId, setStoppingSessionId] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -245,10 +282,6 @@ function App(): JSX.Element {
   const [selectedContainer, setSelectedContainer] = useState<SelectedContainer | null>(null);
   const [containerPath, setContainerPath] = useState(".");
   const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
-  const [terminalCommand, setTerminalCommand] = useState("");
-  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
-  const [terminalRunning, setTerminalRunning] = useState(false);
-  const [quickFileSelectedIndex, setQuickFileSelectedIndex] = useState(0);
   const [quickPromptOpen, setQuickPromptOpen] = useState(false);
   const [quickPromptQuery, setQuickPromptQuery] = useState("");
   const [quickPromptSelectedIndex, setQuickPromptSelectedIndex] = useState(0);
@@ -265,8 +298,8 @@ function App(): JSX.Element {
   const [composerRows, setComposerRows] = useState(2);
   const abortController = useRef<AbortController | null>(null);
   const runningSessionIdRef = useRef<string | null>(null);
+  const abortingSessionIdRef = useRef<string | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
-  const terminalInputRef = useRef<HTMLInputElement | null>(null);
   const quickPromptInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
@@ -365,34 +398,75 @@ function App(): JSX.Element {
     enabled: isConfigured && Boolean(selectedContainer && selectedFilePath),
   });
 
-  const quickFileMode = selectedContainer !== null && terminalCommand.startsWith("/");
-  const quickFileQuery = quickFileMode ? terminalCommand.slice(1).trim() : "";
+  const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
+  const currentContainerIds = useMemo(
+    () => (
+      sessionId
+        ? mergeContainers(
+            currentSession ? activeSessionContainerIds(currentSession) : [],
+            inferContainerIds(sessionId, messages),
+          )
+        : []
+    ),
+    [currentSession, messages, sessionId],
+  );
+  const quickPromptContainers = useMemo(
+    () => (sessionId ? currentContainerIds.map((containerId) => ({ sessionId, containerId })) : []),
+    [currentContainerIds, sessionId],
+  );
+  const quickFileSearchQuery = quickPromptOpen ? quickPromptFileSearchQuery(quickPromptQuery) : "";
+  const debouncedQuickFileSearchQuery = useDebouncedValue(quickFileSearchQuery, 150);
   const quickFiles = useQuery({
-    queryKey: ["container-find-paths", settings.serverUrl, settings.token, selectedContainer?.sessionId, selectedContainer?.containerId],
-    queryFn: async (): Promise<ContainerFindResult[]> => {
-      if (!selectedContainer) throw new Error("No container selected");
-      const response = await client.invokeTool<ContainerFindDetails>(selectedContainer.sessionId, "container_find", {
-        containerId: selectedContainer.containerId,
-        path: ".",
-        type: "any",
-        maxResults: 1000,
-      });
-      return response.result.details?.results ?? [];
+    queryKey: [
+      "container-find-paths",
+      settings.serverUrl,
+      settings.token,
+      sessionId,
+      currentContainerIds,
+      debouncedQuickFileSearchQuery,
+    ],
+    queryFn: async (): Promise<QuickPromptFileResult[]> => {
+      if (quickPromptContainers.length === 0) throw new Error("No containers selected");
+      const search = containerFindSearchInput(debouncedQuickFileSearchQuery);
+      const results = await Promise.all(
+        quickPromptContainers.map(async (container) => {
+          try {
+            const response = await client.invokeTool<ContainerFindDetails>(container.sessionId, "container_find", {
+              containerId: container.containerId,
+              path: search.path,
+              ...(search.name ? { name: search.name } : {}),
+              type: "any",
+              maxResults: 1000,
+            });
+            return (response.result.details?.results ?? []).map((file) => ({
+              ...file,
+              sessionId: container.sessionId,
+              containerId: container.containerId,
+            }));
+          } catch {
+            return [];
+          }
+        }),
+      );
+      return results.flat();
     },
-    enabled: isConfigured && Boolean(selectedContainer) && (quickFileMode || quickPromptOpen),
+    enabled: isConfigured && quickPromptContainers.length > 0,
+    placeholderData: (previous) => previous ?? [],
+    refetchOnWindowFocus: false,
   });
   const quickFileMatches = useMemo(
-    () => filterQuickFiles(quickFiles.data ?? [], quickFileQuery),
-    [quickFiles.data, quickFileQuery],
+    () => filterQuickFiles(quickFiles.data ?? [], debouncedQuickFileSearchQuery),
+    [debouncedQuickFileSearchQuery, quickFiles.data],
   );
   const quickPromptItems = useMemo(
     () => buildQuickPromptItems({
       query: quickPromptQuery,
       sessions: sessions.data?.sessions ?? [],
-      selectedContainer,
-      files: quickFiles.data ?? [],
+      currentSessionId: sessionId,
+      containers: quickPromptContainers,
+      files: quickFileMatches,
     }),
-    [quickFiles.data, quickPromptQuery, selectedContainer, sessions.data?.sessions],
+    [quickFileMatches, quickPromptContainers, quickPromptQuery, sessionId, sessions.data?.sessions],
   );
 
   const providers = useQuery({
@@ -573,14 +647,8 @@ function App(): JSX.Element {
     onError: showError,
   });
 
-  const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
-  const currentContainerIds = sessionId
-    ? mergeContainers(
-        currentSession ? sessionContainers(currentSession) : [defaultContainerId(sessionId)],
-        inferContainerIds(sessionId, messages),
-      )
-    : [];
   const activeSessionIsProcessing = currentSession?.status === "processing" || serverProcessingSessionId === sessionId;
+  const activeSessionIsStopping = Boolean(stoppingSessionId && stoppingSessionId === sessionId && activeSessionIsProcessing);
   const composerBusy = isRunning || activeSessionIsProcessing;
 
   useEffect(() => {
@@ -600,11 +668,27 @@ function App(): JSX.Element {
 
   useEffect(() => {
     if (!isConfigured) return;
+    const pathContainerEntry = containerEntryFromLocation();
+    if (pathContainerEntry) {
+      if (!sessions.data) return;
+      if (
+        selectedContainer?.containerId === pathContainerEntry.containerId
+        && (
+          pathContainerEntry.fileType === "file"
+            ? selectedFilePath === pathContainerEntry.path
+            : !selectedFilePath && containerPath === pathContainerEntry.path
+        )
+      ) {
+        return;
+      }
+      openContainerEntryRoute(pathContainerEntry, { history: "replace" });
+      return;
+    }
     const pathSessionId = sessionIdFromLocation();
     if (!pathSessionId || pathSessionId === sessionId || initialPathSessionRef.current === pathSessionId) return;
     initialPathSessionRef.current = pathSessionId;
     void openSession(pathSessionId, { history: "replace" });
-  }, [isConfigured, settings.serverUrl, settings.token]);
+  }, [containerPath, isConfigured, selectedContainer?.containerId, selectedFilePath, sessions.data, settings.serverUrl, settings.token]);
 
   useEffect(() => {
     const onPopState = (): void => {
@@ -612,6 +696,11 @@ function App(): JSX.Element {
       if (pathSettingsSection) {
         setAppPage("settings");
         setSettingsSection(pathSettingsSection);
+        return;
+      }
+      const pathContainerEntry = containerEntryFromLocation();
+      if (pathContainerEntry) {
+        openContainerEntryRoute(pathContainerEntry, { history: "replace" });
         return;
       }
       const pathSessionId = sessionIdFromLocation();
@@ -647,38 +736,11 @@ function App(): JSX.Element {
     if (currentSession && currentSession.id === serverProcessingSessionId && currentSession.status !== "processing") {
       setServerProcessingSessionId(null);
     }
-  }, [currentSession, serverProcessingSessionId]);
-
-  useEffect(() => {
-    if (!selectedContainer || appPage !== "chat") return;
-
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (isTextEntryElement(document.activeElement)) return;
-
-      event.preventDefault();
-      setTerminalCommand("/");
-      setSelectedFilePath(null);
-      focusTerminalPrompt();
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [appPage, selectedContainer]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
-      if (quickPromptOpen) return;
-      if (isTextEntryElement(document.activeElement)) return;
-
-      event.preventDefault();
-      focusVisiblePrompt();
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [appPage, quickPromptOpen, selectedContainer]);
+    if (currentSession && currentSession.id === stoppingSessionId && currentSession.status !== "processing") {
+      setStoppingSessionId(null);
+      if (abortingSessionIdRef.current === currentSession.id) abortingSessionIdRef.current = null;
+    }
+  }, [currentSession, serverProcessingSessionId, stoppingSessionId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -694,23 +756,13 @@ function App(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    setQuickFileSelectedIndex(0);
-  }, [quickFileQuery, selectedContainer?.containerId]);
-
-  useEffect(() => {
     setQuickPromptSelectedIndex(0);
   }, [quickPromptQuery, quickPromptOpen, selectedContainer?.containerId, sessions.data]);
 
   useEffect(() => {
-    if (quickFileSelectedIndex >= quickFileMatches.length) {
-      setQuickFileSelectedIndex(Math.max(0, quickFileMatches.length - 1));
-    }
-  }, [quickFileMatches.length, quickFileSelectedIndex]);
-
-  useEffect(() => {
-    const cause = containerListing.error ?? selectedFile.error;
+    const cause = containerListing.error ?? selectedFile.error ?? quickFiles.error;
     if (cause) showError(cause);
-  }, [containerListing.error, selectedFile.error]);
+  }, [containerListing.error, quickFiles.error, selectedFile.error]);
 
   useEffect(() => {
     if (!isConfigured || !sessionId || appPage !== "chat" || isRunning || !activeSessionIsProcessing) return;
@@ -751,25 +803,6 @@ function App(): JSX.Element {
     window.requestAnimationFrame(() => {
       promptInputRef.current?.focus();
     });
-  }
-
-  function focusTerminalPrompt(): void {
-    window.requestAnimationFrame(() => {
-      terminalInputRef.current?.focus();
-    });
-  }
-
-  function focusVisiblePrompt(): void {
-    if (appPage !== "chat") {
-      setAppPage("chat");
-      window.requestAnimationFrame(() => promptInputRef.current?.focus());
-      return;
-    }
-    if (selectedContainer) {
-      focusTerminalPrompt();
-      return;
-    }
-    focusPrompt();
   }
 
   function openQuickPrompt(): void {
@@ -819,107 +852,87 @@ function App(): JSX.Element {
     updateBrowserSettingsPath(section);
   }
 
-  function openContainerWorkspace(next: SelectedContainer): void {
+  function openContainerWorkspace(
+    next: SelectedContainer,
+    options: { history?: "push" | "replace" | false } = {},
+  ): void {
+    setSessionId(next.sessionId);
     setSelectedContainer(next);
     setContainerPath(".");
     setSelectedFilePath(null);
     setMobileSessionsOpen(false);
+    setError(null);
     setStatusText(`Viewing ${next.containerId.slice(0, 12)}`);
-  }
-
-  function openContainerDirectory(path: string): void {
-    setContainerPath(path || ".");
-    setSelectedFilePath(null);
+    if (options.history !== false) {
+      updateBrowserContainerEntryPath(next.containerId, ".", "directory", options.history ?? "push");
+    }
   }
 
   function closeContainerWorkspace(): void {
     setSelectedContainer(null);
     setContainerPath(".");
     setSelectedFilePath(null);
-    setTerminalCommand("");
-    setTerminalEntries([]);
   }
 
-  async function submitTerminalCommand(): Promise<void> {
-    const command = terminalCommand.trim();
-    if (quickFileMode) {
-      openQuickFile();
+  function resolveContainerSessionId(containerId: string): string | null {
+    const matchedSession = sessions.data?.sessions.find((session) => allSessionContainers(session).some((container) => container.id === containerId));
+    if (matchedSession) return matchedSession.id;
+    return null;
+  }
+
+  function openContainerPath(
+    container: SelectedContainer,
+    path: string,
+    fileType: "file" | "directory",
+    options: { history?: "push" | "replace" | false } = {},
+  ): void {
+    const normalizedPath = normalizeQuickFilePath(path);
+    if (!normalizedPath && fileType !== "directory") return;
+    const nextPath = normalizedPath || ".";
+
+    setAppPage("chat");
+    setMobileSessionsOpen(false);
+    setSessionId(container.sessionId);
+    setSelectedContainer(container);
+    setError(null);
+    if (fileType === "directory" || nextPath.endsWith("/")) {
+      setContainerPath(nextPath);
+      setSelectedFilePath(null);
+    } else {
+      setContainerPath(parentContainerPath(nextPath));
+      setSelectedFilePath(nextPath);
+    }
+    setStatusText(`${fileType === "directory" ? "Opened directory" : "Opened"} ${nextPath}`);
+    if (options.history !== false) {
+      updateBrowserContainerEntryPath(container.containerId, nextPath, fileType, options.history ?? "push");
+    }
+  }
+
+  function openContainerEntryRoute(
+    target: ContainerRouteEntry,
+    options: { history?: "push" | "replace" | false } = {},
+  ): void {
+    const sessionIdForContainer = resolveContainerSessionId(target.containerId);
+    if (!sessionIdForContainer) {
+      showError(new Error(`No session found for container ${target.containerId}`));
       return;
     }
-    if (!selectedContainer || !command || terminalRunning) return;
-
-    const cwd = containerPath === "." ? "." : containerPath;
-    setTerminalCommand("");
-    setTerminalRunning(true);
-    setStatusText(`Running ${command}`);
-
-    try {
-      const response = await client.invokeTool<ContainerBashDetails>(selectedContainer.sessionId, "container_bash", {
-        containerId: selectedContainer.containerId,
-        command,
-        cwd,
-        maxOutputChars: 120_000,
-      });
-      const output = response.result.content?.find((part) => part.type === "text")?.text ?? "";
-      setTerminalEntries((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          command,
-          cwd,
-          output,
-          details: response.result.details,
-          isError: response.result.details?.ok === false || Boolean(response.result.details?.exitCode),
-        },
-      ]);
-      setStatusText("Command complete");
-      void containerListing.refetch();
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      setTerminalEntries((current) => [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          command,
-          cwd,
-          output: message,
-          isError: true,
-        },
-      ]);
-      showError(cause);
-    } finally {
-      setTerminalRunning(false);
-    }
-  }
-
-  function openQuickFile(path?: string): void {
-    const selectedMatch = path
-      ? quickFileMatches.find((match) => match.path === path)
-      : quickFileMatches[quickFileSelectedIndex];
-    const selectedPath = path ?? selectedMatch?.path ?? quickFileQuery;
-    const normalizedPath = normalizeQuickFilePath(selectedPath);
-    if (!normalizedPath) return;
-    if (selectedMatch?.type === "directory" || selectedPath.endsWith("/")) {
-      openContainerDirectory(normalizedPath);
-    } else {
-      setSelectedFilePath(normalizedPath);
-    }
-    setTerminalCommand("");
-    setStatusText(`${selectedMatch?.type === "directory" ? "Opened directory" : "Opened"} ${normalizedPath}`);
+    openContainerPath(
+      { sessionId: sessionIdForContainer, containerId: target.containerId },
+      target.path,
+      target.fileType,
+      options,
+    );
   }
 
   function openContainerFileLink(link: ContainerFileLink): void {
     const normalizedPath = normalizeQuickFilePath(link.path);
     if (!normalizedPath) return;
-    openContainerWorkspace({ sessionId, containerId: link.containerId });
-    if (normalizedPath.endsWith("/")) {
-      openContainerDirectory(normalizedPath);
-      setStatusText(`Opened directory ${normalizedPath}`);
-      return;
-    }
-    setContainerPath(parentContainerPath(normalizedPath));
-    setSelectedFilePath(normalizedPath);
-    setStatusText(`Opened ${normalizedPath}`);
+    openContainerPath(
+      { sessionId, containerId: link.containerId },
+      normalizedPath,
+      normalizedPath.endsWith("/") ? "directory" : "file",
+    );
   }
 
   function executeQuickPromptItem(item: QuickPromptItem | undefined): void {
@@ -928,12 +941,11 @@ function App(): JSX.Element {
 
     switch (item.kind) {
       case "file":
-        if (item.fileType === "directory") {
-          openContainerDirectory(item.path);
-        } else {
-          setSelectedFilePath(item.path);
-        }
-        setStatusText(`${item.fileType === "directory" ? "Opened directory" : "Opened"} ${item.path}`);
+        openContainerPath(
+          { sessionId: item.sessionId, containerId: item.containerId },
+          item.path,
+          item.fileType,
+        );
         return;
       case "container":
         openContainerWorkspace({ sessionId: item.sessionId, containerId: item.containerId });
@@ -948,6 +960,14 @@ function App(): JSX.Element {
         focusPrompt();
         void submitPromptContent(item.prompt);
         return;
+      case "command":
+        if (item.command === "rename-session") {
+          setAppPage("chat");
+          setMobileSessionsOpen(false);
+          closeContainerWorkspace();
+          renameSession.mutate(item.name);
+        }
+        return;
     }
   }
 
@@ -961,6 +981,7 @@ function App(): JSX.Element {
         ...current,
         sessions: current.sessions.map((session) => {
           if (session.id !== targetSessionId) return session;
+          if (session.containerDetails?.length) return session;
           return {
             ...session,
             containers: mergeContainers(session.containers ?? [], containers),
@@ -1196,8 +1217,13 @@ function App(): JSX.Element {
       rememberSessionContainers(targetSessionId, attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay)));
       setPromptHistory(finalSession.promptHistory ?? null);
       setServerProcessingSessionId(null);
+      if (stoppingSessionId === targetSessionId) {
+        setStoppingSessionId(null);
+        if (abortingSessionIdRef.current === targetSessionId) abortingSessionIdRef.current = null;
+      }
       setStatusText(finalSession.status === "error" ? "Error" : "Complete");
       setError(finalSession.status === "error" ? finalSession.errorMessage ?? "Session failed" : null);
+      await queryClient.invalidateQueries({ queryKey: ["container-find-paths"] });
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (cause) {
       if (controller.signal.aborted || sessionId !== targetSessionId) return;
@@ -1235,8 +1261,9 @@ function App(): JSX.Element {
         void handleDelete(args);
         return true;
       case "name":
+      case "rename":
         if (args) renameSession.mutate(args);
-        else showError(new Error("Usage: /name <session-name>"));
+        else showError(new Error(`Usage: /${command} <session-name>`));
         return true;
       case "models":
         openSettingsSection("models");
@@ -1407,11 +1434,22 @@ function App(): JSX.Element {
       setPromptHistory(finalSession.promptHistory ?? null);
       setStatusText("Complete");
       setServerProcessingSessionId(null);
+      if (stoppingSessionId === submitted.sessionId) {
+        setStoppingSessionId(null);
+        if (abortingSessionIdRef.current === submitted.sessionId) abortingSessionIdRef.current = null;
+      }
+      await queryClient.invalidateQueries({ queryKey: ["container-find-paths"] });
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (cause) {
       if (controller.signal.aborted) {
-        setStatusText("Aborted");
-        setMessages((current) => [...current, { role: "assistant", content: "Operation aborted." }]);
+        const abortedSessionId = abortingSessionIdRef.current;
+        if (abortedSessionId) {
+          setStoppingSessionId(abortedSessionId);
+          setServerProcessingSessionId(abortedSessionId);
+          setStatusText("Stopping agent");
+        } else {
+          setStatusText("Aborted");
+        }
       } else {
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(message);
@@ -1434,6 +1472,10 @@ function App(): JSX.Element {
   function abortRun(): void {
     const targetSessionId = runningSessionIdRef.current || sessionId || serverProcessingSessionId;
     if (targetSessionId) {
+      abortingSessionIdRef.current = targetSessionId;
+      setStoppingSessionId(targetSessionId);
+      setServerProcessingSessionId(targetSessionId);
+      setStatusText("Stopping agent");
       void client.abortSession(targetSessionId)
         .then(() => queryClient.invalidateQueries({ queryKey: ["sessions"] }))
         .catch(showError);
@@ -1484,7 +1526,7 @@ function App(): JSX.Element {
           query={quickPromptQuery}
           items={quickPromptItems}
           selectedIndex={quickPromptSelectedIndex}
-          loadingFiles={quickFiles.isFetching && Boolean(selectedContainer)}
+          loadingFiles={quickFiles.isFetching && quickPromptContainers.length > 0}
           onQueryChange={setQuickPromptQuery}
           onSelectedIndexChange={setQuickPromptSelectedIndex}
           onClose={closeQuickPrompt}
@@ -1628,13 +1670,19 @@ function App(): JSX.Element {
                 filePath={selectedFilePath}
                 file={selectedFile.data}
                 fileLoading={selectedFile.isFetching}
-                terminalEntries={terminalEntries}
-                terminalRunning={terminalRunning}
                 error={error}
                 onDismissError={() => setError(null)}
-                onClose={closeContainerWorkspace}
-                onOpenDirectory={openContainerDirectory}
-                onOpenFile={setSelectedFilePath}
+                onClose={() => {
+                  closeContainerWorkspace();
+                  if (sessionId) updateBrowserSessionPath(sessionId);
+                  else updateBrowserRootPath();
+                }}
+                onOpenDirectory={(path) => {
+                  if (selectedContainer) openContainerPath(selectedContainer, path, "directory");
+                }}
+                onOpenFile={(path) => {
+                  if (selectedContainer) openContainerPath(selectedContainer, path, "file");
+                }}
                 onRefresh={() => void containerListing.refetch()}
               />
             ) : (
@@ -1685,92 +1733,23 @@ function App(): JSX.Element {
                       ))}
                     </>
                   )}
-                  {composerBusy ? <Thinking /> : null}
+                  {composerBusy && !activeSessionIsStopping ? <Thinking /> : null}
                   {error ? <ErrorBanner message={error} onDismiss={() => setError(null)} /> : null}
                   <div ref={messageEndRef} />
                 </div>
               </section>
             )}
 
+            {!selectedContainer ? (
             <footer className="border-t border-shell-700 bg-shell-900/95 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className="mx-auto max-w-4xl">
-                {selectedContainer ? (
-                  <div className="relative flex items-center gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
-                    {quickFileMode ? (
-                      <QuickFilePopup
-                        query={quickFileQuery}
-                        matches={quickFileMatches}
-                        selectedIndex={quickFileSelectedIndex}
-                        loading={quickFiles.isFetching}
-                        onSelect={(path) => openQuickFile(path)}
-                      />
-                    ) : null}
-                    <div className="hidden shrink-0 items-center gap-2 rounded-md bg-shell-900 px-2 py-2 font-mono text-xs text-slate-500 sm:flex">
-                      <Terminal className="h-4 w-4 text-accent-500" />
-                      /workspace/{containerPath === "." ? "" : containerPath}
-                    </div>
-                    <input
-                      ref={terminalInputRef}
-                      className="h-10 min-w-0 flex-1 border-0 bg-transparent px-2 font-mono text-sm text-slate-100 outline-none placeholder:text-slate-500"
-                      value={terminalCommand}
-                      placeholder={terminalRunning ? "Command running..." : "Run command in container"}
-                      disabled={terminalRunning}
-                      onChange={(event) => setTerminalCommand(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (quickFileMode && event.key === "ArrowDown") {
-                          event.preventDefault();
-                          setQuickFileSelectedIndex((current) => Math.min(current + 1, Math.max(0, quickFileMatches.length - 1)));
-                          return;
-                        }
-                        if (quickFileMode && event.key === "ArrowUp") {
-                          event.preventDefault();
-                          setQuickFileSelectedIndex((current) => Math.max(0, current - 1));
-                          return;
-                        }
-                        if (quickFileMode && event.key === "Escape") {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          setTerminalCommand("");
-                          blurTextEntryElement(event.currentTarget);
-                          return;
-                        }
-                        if (event.key === "Escape") {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          blurTextEntryElement(event.currentTarget);
-                          return;
-                        }
-                        if (quickFileMode && event.key === "Tab") {
-                          event.preventDefault();
-                          const selectedMatch = quickFileMatches[quickFileSelectedIndex];
-                          if (selectedMatch) {
-                            setTerminalCommand(`/${selectedMatch.path}${selectedMatch.type === "directory" ? "/" : ""}`);
-                          }
-                          return;
-                        }
-                        if (event.key === "Enter") {
-                          event.preventDefault();
-                          void submitTerminalCommand();
-                        }
-                      }}
-                    />
-                    <button
-                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-600 text-white transition hover:bg-accent-500 disabled:bg-shell-700"
-                      disabled={!terminalCommand.trim() || terminalRunning}
-                      title={quickFileMode ? "Open file" : "Run"}
-                      onClick={() => void submitTerminalCommand()}
-                    >
-                      {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex items-end gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
+                <div className="flex items-end gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
                   <textarea
                     ref={promptInputRef}
                     className="scrollbar min-h-11 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                     rows={composerRows}
                     value={prompt}
-                    placeholder={composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
+                    placeholder={activeSessionIsStopping ? "Stopping agent..." : composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
                     disabled={!isConfigured}
                     onChange={(event) => {
                       setPrompt(event.target.value);
@@ -1791,7 +1770,7 @@ function App(): JSX.Element {
                   />
                   {composerBusy ? (
                     <IconButton title="Abort" onClick={abortRun}>
-                      <Square className="h-4 w-4" />
+                      {activeSessionIsStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}
                     </IconButton>
                   ) : (
                     <button
@@ -1803,10 +1782,10 @@ function App(): JSX.Element {
                       <Send className="h-4 w-4" />
                     </button>
                   )}
-                  </div>
-                )}
+                </div>
               </div>
             </footer>
+            ) : null}
           </>
         )}
       </main>
@@ -1861,7 +1840,7 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
       ) : null}
       <div className={`scrollbar min-h-0 flex-1 overflow-y-auto ${props.collapsed ? "p-1" : "p-2"}`}>
         {props.sessions.map((session) => {
-          const containerIds = sessionContainers(session);
+          const sessionContainers = allSessionContainers(session);
           return (
             <div
               key={session.id}
@@ -1889,32 +1868,35 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
               </button>
               {props.collapsed ? (
                 <div className="mb-1 flex flex-col items-center gap-1">
-                  {containerIds.map((containerId) => (
+                  {sessionContainers.map((container) => (
                     <button
-                      key={containerId}
+                      key={container.id}
                       className={`flex h-8 w-8 items-center justify-center rounded-md transition hover:bg-shell-800 ${
-                        props.selectedContainer?.containerId === containerId ? "bg-accent-600/15 text-accent-300" : "text-slate-500"
+                        props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id ? "bg-accent-600/15 text-accent-300" : container.status === "destroyed" ? "text-slate-700" : "text-slate-500"
                       }`}
-                      title={containerId}
-                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId })}
+                      title={container.status === "destroyed" ? `${container.id} (removed)` : container.id}
+                      disabled={container.status === "destroyed"}
+                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId: container.id })}
                     >
-                      <FileText className="h-4 w-4" />
+                      {container.status === "destroyed" ? <Trash2 className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
                     </button>
                   ))}
                 </div>
               ) : (
                 <div className="mb-1 flex flex-col gap-0.5">
-                  {containerIds.map((containerId) => (
+                  {sessionContainers.map((container) => (
                     <button
-                      key={containerId}
+                      key={container.id}
                       className={`flex h-9 min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition hover:bg-shell-850 ${
-                        props.selectedContainer?.containerId === containerId ? "bg-accent-600/15 text-accent-200" : "text-slate-400"
+                        props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id ? "bg-accent-600/15 text-accent-200" : container.status === "destroyed" ? "text-slate-600" : "text-slate-400"
                       }`}
-                      title={containerId}
-                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId })}
+                      title={container.status === "destroyed" ? `${container.id} (removed)` : container.id}
+                      disabled={container.status === "destroyed"}
+                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId: container.id })}
                     >
-                      <Folder className="h-4 w-4 shrink-0" />
-                      <span className="truncate">{containerId}</span>
+                      {container.status === "destroyed" ? <Trash2 className="h-4 w-4 shrink-0" /> : <Folder className="h-4 w-4 shrink-0" />}
+                      <span className="truncate">{container.id}</span>
+                      {container.status === "destroyed" ? <span className="ml-auto shrink-0 text-xs">removed</span> : null}
                     </button>
                   ))}
                 </div>
@@ -1950,8 +1932,6 @@ function ContainerWorkspaceView(props: {
   filePath: string | null;
   file?: ContainerFile;
   fileLoading: boolean;
-  terminalEntries: TerminalEntry[];
-  terminalRunning: boolean;
   error: string | null;
   onDismissError: () => void;
   onClose: () => void;
@@ -1971,12 +1951,6 @@ function ContainerWorkspaceView(props: {
             <h2 className="truncate font-mono text-sm font-semibold text-slate-100">/workspace/{props.path === "." ? "" : props.path}</h2>
           </div>
           <div className="flex items-center gap-2">
-            {props.terminalRunning ? (
-              <div className="flex items-center gap-2 text-xs text-slate-500">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Running
-              </div>
-            ) : null}
             <IconButton title="Close container view" onClick={props.onClose}>
               <X className="h-4 w-4" />
             </IconButton>
@@ -1995,7 +1969,6 @@ function ContainerWorkspaceView(props: {
               onOpenFile={props.onOpenFile}
               onRefresh={props.onRefresh}
             />
-            {props.terminalEntries.length ? <TerminalOutput entries={props.terminalEntries} /> : null}
           </>
         )}
       </div>
@@ -2133,34 +2106,6 @@ function InlineFileViewer({ file, path, loading, onOpenDirectory }: { file?: Con
   );
 }
 
-function TerminalOutput({ entries }: { entries: TerminalEntry[] }): JSX.Element {
-  if (entries.length === 0) {
-    return (
-      <EmptyState
-        icon={<Terminal className="h-7 w-7" />}
-        title="Container terminal"
-        body="Run commands from the terminal below. Select a file in the sidebar to view it here."
-      />
-    );
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      {entries.map((entry) => (
-        <section key={entry.id} className="rounded-md border border-shell-700 bg-shell-900">
-          <div className="border-b border-shell-700 px-3 py-2 font-mono text-xs text-slate-500">
-            <span className="text-accent-300">$</span> <span className="text-slate-300">{entry.command}</span>
-            <span className="ml-2">/workspace/{entry.cwd === "." ? "" : entry.cwd}</span>
-          </div>
-          <pre className={`scrollbar max-h-96 overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-5 ${entry.isError ? "text-red-200" : "text-slate-300"}`}>
-            {entry.output || "Command executed successfully."}
-          </pre>
-        </section>
-      ))}
-    </div>
-  );
-}
-
 function QuickPromptPalette(props: {
   inputRef: Ref<HTMLInputElement>;
   query: string;
@@ -2185,7 +2130,7 @@ function QuickPromptPalette(props: {
             ref={props.inputRef}
             className="h-11 w-full border-0 bg-transparent px-3 text-sm text-slate-100 outline-none placeholder:text-slate-500"
             value={props.query}
-            placeholder="Open File: /path, Open Container: id, Enter Prompt: ask..., Open Session: name"
+            placeholder="Open File: /path, Open Container: id, Rename Session: name, Open Session: name"
             onChange={(event) => props.onQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -2201,6 +2146,29 @@ function QuickPromptPalette(props: {
               if (event.key === "ArrowUp") {
                 event.preventDefault();
                 props.onSelectedIndexChange(Math.max(0, selectedIndex - 1));
+                return;
+              }
+              if (event.key === "Tab") {
+                const input = event.currentTarget;
+                const completion = quickPromptCommandCompletion(props.query, props.items[selectedIndex]);
+                if (completion) {
+                  event.preventDefault();
+                  props.onQueryChange(completion.query);
+                  window.requestAnimationFrame(() => {
+                    input.setSelectionRange(completion.selectionStart, completion.selectionEnd);
+                  });
+                }
+                return;
+              }
+              if ((event.key === "Backspace" || event.key === "Delete") && quickPromptCommandSelection(event.currentTarget)) {
+                const input = event.currentTarget;
+                const cursor = input.selectionStart ?? 0;
+                event.preventDefault();
+                const nextQuery = input.value.slice(0, cursor) + input.value.slice(input.selectionEnd ?? 0);
+                props.onQueryChange(nextQuery);
+                window.requestAnimationFrame(() => {
+                  input.setSelectionRange(cursor, cursor);
+                });
                 return;
               }
               if (event.key === "Enter") {
@@ -2257,54 +2225,8 @@ function QuickPromptIcon({ item }: { item: QuickPromptItem }): JSX.Element {
   }
   if (item.kind === "container") return <Terminal className="h-4 w-4 shrink-0 text-accent-400" />;
   if (item.kind === "session") return <MessageSquare className="h-4 w-4 shrink-0 text-slate-500" />;
+  if (item.kind === "command") return <Pencil className="h-4 w-4 shrink-0 text-accent-400" />;
   return <Send className="h-4 w-4 shrink-0 text-accent-400" />;
-}
-
-function QuickFilePopup(props: {
-  query: string;
-  matches: ContainerFindResult[];
-  selectedIndex: number;
-  loading: boolean;
-  onSelect: (path: string) => void;
-}): JSX.Element {
-  return (
-    <div className="absolute inset-x-0 bottom-[calc(100%+0.5rem)] z-20 overflow-hidden rounded-md border border-shell-600 bg-shell-900 shadow-panel">
-      <div className="flex items-center justify-between border-b border-shell-700 px-3 py-2 text-xs text-slate-500">
-        <span>Quick open</span>
-        {props.loading ? (
-          <span className="flex items-center gap-1">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Searching
-          </span>
-        ) : (
-          <span>{props.matches.length} match{props.matches.length === 1 ? "" : "es"}</span>
-        )}
-      </div>
-      <div className="scrollbar max-h-72 overflow-y-auto p-1">
-        {props.matches.map((match, index) => (
-          <button
-            key={match.path}
-            className={`flex h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition ${
-              index === props.selectedIndex ? "bg-accent-600/15 text-accent-200" : "text-slate-300 hover:bg-shell-850"
-            }`}
-            onMouseDown={(event) => {
-              event.preventDefault();
-              props.onSelect(match.path);
-            }}
-          >
-            {match.type === "directory" ? <Folder className="h-4 w-4 shrink-0 text-accent-400" /> : <FileText className="h-4 w-4 shrink-0 text-slate-500" />}
-            <span className="truncate font-mono">{match.path}</span>
-            <span className="ml-auto shrink-0 text-xs text-slate-600">{match.type === "directory" ? "dir" : formatBytes(match.size)}</span>
-          </button>
-        ))}
-        {!props.loading && props.matches.length === 0 ? (
-          <div className="px-3 py-6 text-sm text-slate-500">
-            {props.query ? `Press Enter to try opening "${props.query}".` : "No files found."}
-          </div>
-        ) : null}
-      </div>
-    </div>
-  );
 }
 
 function CodeViewer({ code, language }: { code: string; language: string }): JSX.Element {
@@ -2436,14 +2358,15 @@ function formatBytes(bytes: number): string {
   return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
-function inferContainerIds(sessionId: string, displayMessages: DisplayMessage[]): string[] {
+function inferContainerIds(_sessionId: string, displayMessages: DisplayMessage[]): string[] {
   const containers = new Set<string>();
   for (const message of displayMessages) {
     for (const toolCall of message.toolCalls ?? []) {
       if (!toolCall.name.startsWith("container_")) continue;
       const explicitId = stringValue(toolCall.params.containerId);
       const detailsId = detailsContainerId(toolCall.result?.details);
-      containers.add(explicitId ?? detailsId ?? defaultContainerId(sessionId));
+      const containerId = detailsId ?? explicitId;
+      if (containerId) containers.add(containerId);
     }
   }
   return [...containers];
@@ -2459,12 +2382,20 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function defaultContainerId(sessionId: string): string {
-  return `session-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64)}`;
+function allSessionContainers(session: SessionSummary): ContainerSummary[] {
+  if (session.containerDetails?.length) return session.containerDetails;
+  return (session.containers ?? []).map((id) => ({
+    id,
+    status: "active",
+    createdAt: 0,
+    updatedAt: 0,
+  }));
 }
 
-function sessionContainers(session: SessionSummary): string[] {
-  return mergeContainers([defaultContainerId(session.id)], session.containers ?? []);
+function activeSessionContainerIds(session: SessionSummary): string[] {
+  return allSessionContainers(session)
+    .filter((container) => container.status === "active" && container.deletedAt === undefined)
+    .map((container) => container.id);
 }
 
 function mergeContainers(current: string[], next: string[]): string[] {
@@ -2481,15 +2412,39 @@ function blurTextEntryElement(element: HTMLInputElement | HTMLTextAreaElement): 
   element.blur();
 }
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return debounced;
+}
+
 function buildQuickPromptItems(input: {
   query: string;
   sessions: SessionSummary[];
-  selectedContainer: SelectedContainer | null;
-  files: ContainerFindResult[];
+  currentSessionId: string;
+  containers: SelectedContainer[];
+  files: QuickPromptFileResult[];
 }): QuickPromptItem[] {
   const query = input.query.trim();
   const promptText = quickPromptEnteredPrompt(query);
+  const renameSessionName = quickPromptEnteredSessionName(query);
   const items: QuickPromptItem[] = [];
+
+  if (input.currentSessionId && renameSessionName) {
+    items.push({
+      id: `command:rename-session:${renameSessionName}`,
+      kind: "command",
+      label: `Rename Session: ${renameSessionName}`,
+      detail: `Current session ${input.currentSessionId.slice(0, 8)}`,
+      command: "rename-session",
+      name: renameSessionName,
+    });
+  }
 
   if (promptText) {
     items.push({
@@ -2501,26 +2456,32 @@ function buildQuickPromptItems(input: {
     });
   }
 
-  if (input.selectedContainer) {
+  if (input.containers.length > 0) {
     const directPath = quickPromptEnteredPath(query, "open file");
     if (directPath) {
-      items.push({
-        id: `file-direct:${input.selectedContainer.containerId}:${directPath}`,
-        kind: "file",
-        label: `Open File: ${directPath}`,
-        detail: `${input.selectedContainer.containerId} / try exact path`,
-        path: directPath,
-        fileType: "file",
-      });
+      for (const container of input.containers) {
+        items.push({
+          id: `file-direct:${container.containerId}:${directPath}`,
+          kind: "file",
+          label: `Open File: ${directPath}`,
+          detail: `${container.containerId} / try exact path`,
+          sessionId: container.sessionId,
+          containerId: container.containerId,
+          path: directPath,
+          fileType: "file",
+        });
+      }
     }
 
     for (const file of input.files) {
       const action = file.type === "directory" ? "Open Directory" : "Open File";
       items.push({
-        id: `file:${input.selectedContainer.containerId}:${file.path}`,
+        id: `file:${file.containerId}:${file.path}`,
         kind: "file",
         label: `${action}: ${file.path}`,
-        detail: `${input.selectedContainer.containerId} / ${file.type === "directory" ? "directory" : formatBytes(file.size)}`,
+        detail: `${file.containerId} / ${file.type === "directory" ? "directory" : formatBytes(file.size)}`,
+        sessionId: file.sessionId,
+        containerId: file.containerId,
         path: file.path,
         fileType: file.type,
       });
@@ -2529,7 +2490,7 @@ function buildQuickPromptItems(input: {
 
   for (const session of input.sessions) {
     const sessionTitle = formatSessionTitle(session);
-    for (const containerId of sessionContainers(session)) {
+    for (const containerId of activeSessionContainerIds(session)) {
       items.push({
         id: `container:${session.id}:${containerId}`,
         kind: "container",
@@ -2606,17 +2567,108 @@ function normalizeSearchText(value: string): string {
     .replace(/[\\/_:-]+/g, " ");
 }
 
+function quickPromptCommandCompletion(query: string, item: QuickPromptItem | undefined): { query: string; selectionStart: number; selectionEnd: number } | null {
+  const command = quickPromptItemCommandPrefix(item) ?? quickPromptMatchedCommandPrefix(query);
+  if (!command) return null;
+
+  const argument = quickPromptCommandArgument(query, command);
+  const completedQuery = `${command}${argument}`;
+  return {
+    query: completedQuery,
+    selectionStart: 0,
+    selectionEnd: command.length,
+  };
+}
+
+function quickPromptCommandSelection(input: HTMLInputElement): boolean {
+  const selectionStart = input.selectionStart ?? 0;
+  const selectionEnd = input.selectionEnd ?? 0;
+  if (selectionStart !== 0 || selectionEnd <= 0) return false;
+  return quickPromptCommandPrefixes().some((command) => input.value.startsWith(command) && selectionEnd === command.length);
+}
+
+function quickPromptCommandArgument(query: string, command: string): string {
+  const trimmedStart = query.trimStart();
+  const matchedCommand = quickPromptMatchedCommandPrefix(trimmedStart);
+  if (matchedCommand) return trimmedStart.slice(matchedCommand.length).trimStart();
+
+  const commandWords = normalizeSearchText(command).split(/\s+/).filter(Boolean);
+  const queryWords = normalizeSearchText(trimmedStart).split(/\s+/).filter(Boolean);
+  if (!queryWords.length) return "";
+
+  const partialCommandWordCount = queryWords.findIndex((word, index) => {
+    const commandWord = commandWords[index];
+    return !commandWord || (!commandWord.startsWith(word) && word !== commandWord);
+  });
+  if (partialCommandWordCount < 0) return "";
+  if (partialCommandWordCount === 0) return trimmedStart;
+
+  return trimmedStart.split(/\s+/).slice(partialCommandWordCount).join(" ");
+}
+
+function quickPromptMatchedCommandPrefix(query: string): string | null {
+  const normalizedQuery = normalizeSearchText(query).trim();
+  if (!normalizedQuery) return null;
+  const matchingPrefix = quickPromptCommandPrefixes()
+    .map((command) => ({ command, normalized: normalizeSearchText(command).trim() }))
+    .find(({ normalized }) => normalized === normalizedQuery || normalized.startsWith(normalizedQuery) || normalizedQuery.startsWith(`${normalized} `));
+  return matchingPrefix?.command ?? null;
+}
+
+function quickPromptItemCommandPrefix(item: QuickPromptItem | undefined): string | null {
+  if (!item) return null;
+  if (item.kind === "file") return item.fileType === "directory" ? "Open Directory: " : "Open File: ";
+  if (item.kind === "container") return "Open Container: ";
+  if (item.kind === "session") return "Open Session: ";
+  if (item.kind === "prompt") return "Enter Prompt: ";
+  if (item.kind === "command" && item.command === "rename-session") return "Rename Session: ";
+  return null;
+}
+
+function quickPromptCommandPrefixes(): string[] {
+  return ["Open File: ", "Open Directory: ", "Open Container: ", "Open Session: ", "Rename Session: ", "Enter Prompt: "];
+}
+
 function quickPromptEnteredPrompt(query: string): string {
   return query.replace(/^enter\s+prompt\s*:\s*/i, "").trim();
 }
 
 function quickPromptEnteredPath(query: string, action: string): string {
   const normalizedAction = action.replace(/\s+/g, "\\s+");
-  const match = query.match(new RegExp(`^${normalizedAction}\\s*:\\s*(.+)$`, "i"));
+  const match = query.match(new RegExp(`^${normalizedAction}(?:\\s*:\\s*|\\s+)(.+)$`, "i"));
   return match?.[1] ? normalizeQuickFilePath(match[1]) : "";
 }
 
-function filterQuickFiles(files: ContainerFindResult[], query: string): ContainerFindResult[] {
+function quickPromptFileSearchQuery(query: string): string {
+  const directPath = quickPromptEnteredPath(query, "open file") || quickPromptEnteredPath(query, "open directory");
+  if (directPath) return directPath;
+  if (/^(?:open\s+file|open\s+directory)\s*:?\s*$/i.test(query)) return "";
+  if (/^(?:rename(?:\s+session)?|name)(?:\s*:|\s+|\s*$)/i.test(query)) return "";
+  if (/^enter\s+prompt\s*:/i.test(query)) return "";
+  return query.trim();
+}
+
+function quickPromptEnteredSessionName(query: string): string {
+  const match = query.match(/^(?:rename(?:\s+session)?|name)(?:\s*:\s*|\s+)(.+)$/i);
+  return match?.[1]?.trim() ?? "";
+}
+
+function containerFindSearchInput(query: string): { path: string; name?: string } {
+  const normalized = normalizeQuickFilePath(query);
+  if (!normalized) return { path: "." };
+
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length === 0) return { path: "." };
+
+  const queryEndsAtDirectory = normalized.endsWith("/");
+  const pathSegments = queryEndsAtDirectory ? segments : segments.slice(0, -1);
+  const path = pathSegments.length ? pathSegments.join("/") : ".";
+  const lastSegment = queryEndsAtDirectory ? "" : segments.at(-1)?.trim() ?? "";
+
+  return lastSegment ? { path, name: `*${lastSegment}*` } : { path };
+}
+
+function filterQuickFiles(files: QuickPromptFileResult[], query: string): QuickPromptFileResult[] {
   const normalizedQuery = normalizeQuickFilePath(query).toLowerCase();
   const matches = normalizedQuery
     ? files.filter((file) => quickFileMatches(file.path, normalizedQuery))
@@ -3382,6 +3434,7 @@ const helpText = `Commands:
 /kill [session-id|all] - Terminate session workflows and containers
 /delete [session-id|all] - Delete sessions after cleanup
 /name <name> - Name the current session
+/rename <name> - Rename the current session
 /models - Show models
 /clear - Clear chat history
 /help - Show this help message`;

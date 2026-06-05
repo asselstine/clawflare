@@ -14,7 +14,7 @@ export const metadata = {
 
 interface CloudflareEnv {
   CLOUDFLARE_API_TOKEN: string;
-  MOCK_AI?: string;
+  MOCK_EGRESS?: string;
 }
 
 export const cloudflareHandler = defineHttpEgressHandler<CloudflareEnv>({

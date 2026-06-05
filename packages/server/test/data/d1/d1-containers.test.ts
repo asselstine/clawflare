@@ -47,6 +47,14 @@ async function seedWorkspaceAndSession(db: D1Database): Promise<void> {
     )
     .bind("session-1", "workflow-1", "workspace-1", "idle", 0, now, 100)
     .run();
+  await db
+    .prepare(
+      `INSERT INTO sessions (
+        id, workflow_id, workspace_id, status, next_event_cursor, updated_at, max_queue_size
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind("session-2", "workflow-2", "workspace-1", "idle", 0, now + 1, 100)
+    .run();
 }
 
 describe("ContainerRepository", () => {
@@ -72,7 +80,7 @@ describe("ContainerRepository", () => {
         workspaceId: "workspace-1",
         sessionId: "session-1",
         containerId: "container-1",
-        role: "default",
+        role: "attached",
       });
 
       expect(container.id).toBe("container-1");
@@ -84,10 +92,45 @@ describe("ContainerRepository", () => {
       expect(sessionContainers.map((item) => item.id)).toEqual(["container-1"]);
 
       await containers.markDestroyed("workspace-1", "container-1");
-      await containers.unlinkSession("workspace-1", "session-1", "container-1");
 
-      expect(await containers.get("workspace-1", "container-1")).toBeNull();
-      expect(await containers.listForSession("workspace-1", "session-1")).toEqual([]);
+      expect((await containers.get("workspace-1", "container-1"))?.status).toBe("destroyed");
+      expect((await containers.listForSession("workspace-1", "session-1")).map((item) => item.id)).toEqual(["container-1"]);
+    } finally {
+      await mf.dispose();
+    }
+  });
+
+  it("returns the newest session link first for container-scoped outbound context", async () => {
+    const mf = new Miniflare({
+      script: "export default { fetch() { return new Response('ok'); } }",
+      modules: true,
+      d1Databases: ["DB"],
+    });
+
+    try {
+      const db = await mf.getD1Database("DB");
+      await applyMigrations(db);
+      await seedWorkspaceAndSession(db);
+
+      const containers = new ContainerRepository(db);
+      await containers.create({
+        id: "container-1",
+        workspaceId: "workspace-1",
+      });
+      await containers.linkSession({
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        containerId: "container-1",
+      });
+      await containers.linkSession({
+        workspaceId: "workspace-1",
+        sessionId: "session-2",
+        containerId: "container-1",
+      });
+
+      const links = await containers.listLinksForContainerId("container-1");
+
+      expect(links.map((link) => link.sessionId)).toEqual(["session-2", "session-1"]);
     } finally {
       await mf.dispose();
     }

@@ -17,7 +17,7 @@ interface GithubEnv {
   GITHUB_TOKEN?: string;
   GITHUB_USERNAME?: string;
   GITHUB_SMART_HTTP_EGRESS?: string;
-  MOCK_AI?: string;
+  MOCK_EGRESS?: string;
 }
 
 export type GithubTrafficKind =
@@ -126,7 +126,7 @@ export const githubHandler = {
       url: request.url,
     });
 
-    if (handlerEnv.MOCK_AI === "true" && kind !== "git-smart-http") {
+    if (handlerEnv.MOCK_EGRESS === "true" && kind !== "git-smart-http") {
       return Response.json({ ok: true, handler: metadata.name, url: request.url });
     }
 

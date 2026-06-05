@@ -108,6 +108,5 @@ export async function destroyContainerModel(
   if (!container) throw new Error("Container not found");
   if (signal?.aborted) throw new Error("Container destroy aborted");
   await destroyContainer(env, id);
-  await repository.unlinkAllSessions(workspaceId, id);
   await repository.markDestroyed(workspaceId, id);
 }

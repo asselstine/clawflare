@@ -53,7 +53,7 @@ describe("routeOutboundRequest", () => {
       const response = await routeOutboundRequest(
         {
           DB: db,
-          MOCK_AI: "true",
+          MOCK_EGRESS: "true",
           CLOUDFLARE_API_TOKEN: "test-token",
         } as unknown as Env,
         new Request("https://api.cloudflare.com/client/v4/accounts"),

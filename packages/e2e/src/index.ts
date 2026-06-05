@@ -32,10 +32,11 @@ interface TestResult {
   duration: number;
 }
 
-// Track created containers for cleanup
+// Track reserved container IDs for cleanup, including containers mid-create.
 const createdContainers: Array<{ containerId: string; sessionId: string }> = [];
 let activeDeployment: RemoteDeployment | null = null;
 let activeKeepAlive = false;
+let activeAuthToken: string | null = null;
 let cleanupStarted = false;
 
 class TestRunner {
@@ -127,12 +128,24 @@ async function createToolSession(client: AgentClient): Promise<string> {
   return (await client.createSession()).id;
 }
 
-async function destroyTestContainer(url: string, token: string, containerId: string, sessionId: string): Promise<void> {
-  // Track for potential cleanup later
+function trackTestContainer(containerId: string, sessionId: string): void {
   if (!createdContainers.some((container) => container.containerId === containerId && container.sessionId === sessionId)) {
     createdContainers.push({ containerId, sessionId });
   }
-  
+}
+
+function untrackTestContainer(containerId: string, sessionId: string): void {
+  const index = createdContainers.findIndex((container) => (
+    container.containerId === containerId &&
+    container.sessionId === sessionId
+  ));
+  if (index !== -1) createdContainers.splice(index, 1);
+}
+
+async function destroyTestContainer(url: string, token: string, containerId: string, sessionId: string): Promise<void> {
+  // Track before destroy so global teardown can retry if this call fails.
+  trackTestContainer(containerId, sessionId);
+
   try {
     const data = await invokeTool<{ ok?: boolean }>(
       url,
@@ -143,7 +156,9 @@ async function destroyTestContainer(url: string, token: string, containerId: str
     );
     if (!data.result.details.ok) {
       console.error(`Failed to destroy container ${containerId}: ${JSON.stringify(data)}`);
+      return;
     }
+    untrackTestContainer(containerId, sessionId);
   } catch (error) {
     console.error(`Failed to destroy container ${containerId}:`, error instanceof Error ? error.message : String(error));
   }
@@ -164,6 +179,7 @@ async function cleanupAllContainers(url: string, token: string): Promise<void> {
       );
       if (data.result.details.ok) {
         console.log(`     ✓ Destroyed container: ${containerId.slice(0, 30)}...`);
+        untrackTestContainer(containerId, sessionId);
       }
     } catch {
       // Container might already be destroyed or Worker might be unreachable
@@ -171,7 +187,6 @@ async function cleanupAllContainers(url: string, token: string): Promise<void> {
   });
   
   await Promise.all(cleanupPromises);
-  createdContainers.length = 0; // Clear the array
 }
 
 function runWrangler(args: string[], options: { capture?: boolean } = {}): Promise<string> {
@@ -282,6 +297,7 @@ async function writeTestConfig(workerName: string, d1Name: string, d1DatabaseId:
       AI_PROVIDER: "amazon-bedrock",
       AI_MODEL: "minimax.minimax-m2.5",
       MOCK_AI: "true",
+      MOCK_EGRESS: "true",
       // CLAWFLARE_API_TOKEN removed - tests now use login-based auth
       CLOUDFLARE_API_TOKEN: "e2e-mock-token",
       CLAWFLARE_TEST_RUN: "true",
@@ -445,6 +461,7 @@ async function runTests(url: string): Promise<void> {
   if (!token) {
     throw new Error("Failed to get access token after polling");
   }
+  activeAuthToken = token;
   
   console.log(`   User ID: ${userId?.slice(0, 16)}...`);
   console.log(`   Token: ${token.slice(0, 16)}...\n`);
@@ -771,6 +788,7 @@ async function runTests(url: string): Promise<void> {
   await runner.runTest("Container: create and run ls command", async () => {
     const containerId = `e2e-container-${Date.now()}`;
     const sessionId = await createToolSession(client);
+    trackTestContainer(containerId, sessionId);
 
     try {
       const createData = await invokeTool<{ status?: string }>(
@@ -808,6 +826,7 @@ async function runTests(url: string): Promise<void> {
   await runner.runTest("Container: git clone works through GitHub egress", async () => {
     const containerId = `e2e-github-clone-${Date.now()}`;
     const sessionId = await createToolSession(client);
+    trackTestContainer(containerId, sessionId);
 
     try {
       const createData = await invokeTool<{ status?: string }>(
@@ -1027,9 +1046,11 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
 
   console.log("\n🧹 Tearing down remote E2E resources...");
 
-  // Note: Container cleanup requires authentication. Since we're tearing down
-  // the Worker anyway, the containers will be terminated automatically.
-  // We skip explicit container cleanup here to avoid needing a token.
+  if (deployment.url && activeAuthToken) {
+    await cleanupAllContainers(deployment.url, activeAuthToken);
+  } else if (createdContainers.length > 0) {
+    console.log(`   Note: Skipping ${createdContainers.length} tracked container cleanup without Worker URL or auth token`);
+  }
 
   try {
     await runWrangler(["delete", deployment.workerName, "--force"]);
@@ -1127,6 +1148,7 @@ async function main(): Promise<void> {
     if (ui) {
       // For manual testing, we still need to get a token
       const token = await authenticateForManualTesting(deployment.url);
+      activeAuthToken = token;
       await runManualTesting(deployment.url, token);
     } else {
       await runTests(deployment.url);

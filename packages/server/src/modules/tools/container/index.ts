@@ -16,7 +16,7 @@ export {
   callContainerRuntime,
 } from "./client.js";
 export { createContainerTools } from "./tools.js";
-export { deriveContainerId, validateContainerId, sanitizeContainerId, getDefaultContainerId } from "./ids.js";
+export { generateContainerId, requireContainerId, validateContainerId, sanitizeContainerId } from "./ids.js";
 export { normalizeWorkspacePath, validateWorkspacePath } from "./paths.js";
 export { tailToolOutput, getEffectiveOutputLimit, formatContainerResult, formatContainerError } from "./output.js";
 export type {

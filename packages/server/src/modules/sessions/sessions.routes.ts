@@ -785,7 +785,7 @@ export async function handleCloseSession(
 }
 
 /**
- * Ask the active durable run to stop between steps without closing the session.
+ * Cancel the active durable run without closing the session.
  */
 export async function handleAbortSession(
   sessionId: string,
@@ -793,6 +793,7 @@ export async function handleAbortSession(
   requestContext: RequestContext
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
+  const runtime = new SessionRuntimeRepository(env.DB);
   const runs = new SessionRunRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -812,8 +813,15 @@ export async function handleAbortSession(
       return json({ ok: true, sessionId, status: session.status, aborted: false, workspaceId: effectiveWorkspaceId });
     }
 
-    await runs.requestCancel(activeRun.id);
-    return json({ ok: true, sessionId, status: session.status, aborted: true, workspaceId: effectiveWorkspaceId });
+    await runs.cancel(activeRun.id);
+    await sessions.save({
+      ...session,
+      status: "idle",
+      updatedAt: Date.now(),
+      errorMessage: undefined,
+    });
+    await runtime.setActive(sessionId, false);
+    return json({ ok: true, sessionId, status: "idle", aborted: true, workspaceId: effectiveWorkspaceId });
   } catch (error) {
     logger.error("Session abort failed", error, {
       handler: "handleAbortSession",
@@ -856,11 +864,12 @@ async function killSessionResources(
   for (const container of ownedContainers) {
     const linksBeforeUnlink = await containers.listLinksForContainer(effectiveWorkspaceId, container.id);
     try {
-      await containers.unlinkSession(effectiveWorkspaceId, sessionId, container.id);
       if (linksBeforeUnlink.length <= 1) {
         await destroyContainer(env, container.id);
         await containers.markDestroyed(effectiveWorkspaceId, container.id);
         destroyedContainers.push(container.id);
+      } else {
+        await containers.unlinkSession(effectiveWorkspaceId, sessionId, container.id);
       }
     } catch (error) {
       errors.push(
@@ -1075,6 +1084,7 @@ export async function handleListSessions(
           updatedAt: state.updatedAt,
           isActive,
           containers: sessionContainers.map((container) => container.id),
+          containerDetails: sessionContainers,
         };
 
         const response: SessionListResponse = { sessions: [summary], total: 1 };
@@ -1092,10 +1102,14 @@ export async function handleListSessions(
       offset,
     };
     
-    const sessions = await Promise.all((await sessionsRepo.list(filter)).map(async (session) => ({
-      ...session,
-      containers: (await containers.listForSession(effectiveWorkspaceId, session.id)).map((container) => container.id),
-    })));
+    const sessions = await Promise.all((await sessionsRepo.list(filter)).map(async (session) => {
+      const sessionContainers = await containers.listForSession(effectiveWorkspaceId, session.id);
+      return {
+        ...session,
+        containers: sessionContainers.map((container) => container.id),
+        containerDetails: sessionContainers,
+      };
+    }));
     const total = await sessionsRepo.count(filter);
 
     const response: SessionListResponse = { sessions, total };

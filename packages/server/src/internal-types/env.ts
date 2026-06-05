@@ -75,6 +75,9 @@ export interface Env {
   // Test mode flag - enables mock AI responses when no model is configured
   MOCK_AI?: string;
 
+  // Test mode flag - enables mocked egress handler responses
+  MOCK_EGRESS?: string;
+
   // Debug settings
   CLAWFLARE_DEBUG_TIMING?: string;
 

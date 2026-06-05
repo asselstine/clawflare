@@ -5,13 +5,6 @@
 // Conservative container ID pattern
 const VALID_CONTAINER_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
-// Default container ID for a session
-export function getDefaultContainerId(sessionId: string): string {
-  // Sanitize session ID to be a valid container ID
-  const sanitized = sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-  return `session-${sanitized}`;
-}
-
 // Validate container ID format
 export function validateContainerId(id: string): void {
   if (!id || typeof id !== "string") {
@@ -29,11 +22,14 @@ export function sanitizeContainerId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 }
 
-// Generate or derive container ID from session
-export function deriveContainerId(sessionId: string, explicitId?: string): string {
-  if (explicitId) {
-    validateContainerId(explicitId);
-    return explicitId;
+export function generateContainerId(): string {
+  return crypto.randomUUID();
+}
+
+export function requireContainerId(explicitId?: string): string {
+  if (!explicitId) {
+    throw new Error("containerId is required. Create a container first with container_create, then pass its containerId to container tools.");
   }
-  return getDefaultContainerId(sessionId);
+  validateContainerId(explicitId);
+  return explicitId;
 }

@@ -30,21 +30,37 @@ const codingContainerOutbound = async (
   const containerId = params?.containerId ?? ctx?.containerId;
   const requestId = containerId ? `container:${containerId}` : "container:unknown";
   if (!containerId) {
-    return routeOutboundRequest(env, request, requestId);
+    return new Response("Container outbound request is missing a container ID.", {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 
   const containers = new ContainerRepository(env.DB);
   const container = await containers.getById(containerId);
   if (!container) {
-    return routeOutboundRequest(env, request, requestId);
+    return new Response(`Container outbound request has no D1 record for ${containerId}.`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+  if (container.status !== "active" || container.deletedAt !== undefined) {
+    return new Response(`Container outbound request is for removed container ${containerId}.`, {
+      status: 410,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
   const [sessionLink] = await containers.listLinksForContainerId(containerId);
+  if (!sessionLink) {
+    return new Response(`Container outbound request has no session link for ${containerId}.`, {
+      status: 500,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
 
   return routeOutboundRequest(env, request, requestId, {
     workspaceId: container.workspaceId,
-    auth: sessionLink
-      ? { type: "session", sessionId: sessionLink.sessionId }
-      : undefined,
+    auth: { type: "session", sessionId: sessionLink.sessionId },
   });
 };
 
@@ -76,5 +92,10 @@ export class CodingContainer extends Container<Env> {
     REQUESTS_CA_CERTS: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
     SSL_CERT_FILE: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
     GIT_SSL_CAINFO: "/etc/cloudflare/certs/cloudflare-containers-ca.crt",
+    // Git/libcurl can report GnuTLS premature-termination errors when smart HTTP
+    // negotiates HTTP/2 through Cloudflare's intercepted HTTPS path.
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.version",
+    GIT_CONFIG_VALUE_0: "HTTP/1.1",
   };
 }

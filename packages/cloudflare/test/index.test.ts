@@ -8,7 +8,7 @@ import { EgressRegistry, type EgressContext, type EgressLogger } from "@clawflar
 describe("cloudflare egress handler", () => {
   interface MockEnv {
     CLOUDFLARE_API_TOKEN: string;
-    MOCK_AI?: string;
+    MOCK_EGRESS?: string;
   }
 
   const createRegistry = () => new EgressRegistry<MockEnv>();
@@ -74,7 +74,7 @@ describe("cloudflare egress handler", () => {
       const handler = registry.get("cloudflare")!;
 
       const request = new Request("https://api.cloudflare.com/client/v4/zones");
-      const context = createContext({ CLOUDFLARE_API_TOKEN: "test", MOCK_AI: "true" });
+      const context = createContext({ CLOUDFLARE_API_TOKEN: "test", MOCK_EGRESS: "true" });
 
       const response = await handler.fetch!(request, context);
       const data = await response.json() as { ok: boolean; handler: string; url: string };

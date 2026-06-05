@@ -58,7 +58,7 @@ export interface DefineHttpEgressHandlerConfig<Env = unknown> {
   description: string;
   domains: string[];
   /**
-   * Mock mode handler - called when env.MOCK_AI === "true"
+   * Mock mode handler - called when env.MOCK_EGRESS === "true"
    */
   mock?: (request: Request, context: HttpEgressHandlerContext<Env>) => Response | Promise<Response>;
   /**
@@ -71,7 +71,7 @@ export interface DefineHttpEgressHandlerConfig<Env = unknown> {
  * Context for HTTP egress handlers created with defineHttpEgressHandler
  */
 export interface HttpEgressHandlerContext<Env = unknown> {
-  env: Env & { MOCK_AI?: string };
+  env: Env & { MOCK_EGRESS?: string };
   handlerConfig?: unknown;
   logger: EgressLogger;
   requestId?: string;
@@ -96,7 +96,7 @@ export function defineHttpEgressHandler<Env = unknown>(
 
     async fetch(request: Request, context: HttpEgressHandlerContext<Env>): Promise<Response> {
       // Mock mode support
-      if (context.env.MOCK_AI === "true") {
+      if (context.env.MOCK_EGRESS === "true") {
         if (config.mock) {
           return config.mock(request, context);
         }

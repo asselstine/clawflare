@@ -28,7 +28,7 @@ import {
   destroyContainer,
   getContainerHealth,
 } from "./client.js";
-import { deriveContainerId } from "./ids.js";
+import { generateContainerId, requireContainerId } from "./ids.js";
 import { tailToolOutput, getEffectiveOutputLimit } from "./output.js";
 
 // Tool execution context
@@ -45,7 +45,7 @@ interface ContainerCreateParams {
 
 // Container bash parameters
 interface ContainerBashParams {
-  containerId?: string;
+  containerId: string;
   command: string;
   cwd?: string;
   timeoutMs?: number;
@@ -54,7 +54,7 @@ interface ContainerBashParams {
 
 // Container read parameters
 interface ContainerReadParams {
-  containerId?: string;
+  containerId: string;
   path: string;
   startLine?: number;
   endLine?: number;
@@ -63,7 +63,7 @@ interface ContainerReadParams {
 
 // Container write parameters
 interface ContainerWriteParams {
-  containerId?: string;
+  containerId: string;
   path: string;
   content: string;
   append?: boolean;
@@ -72,7 +72,7 @@ interface ContainerWriteParams {
 
 // Container edit parameters
 interface ContainerEditParams {
-  containerId?: string;
+  containerId: string;
   path: string;
   oldString: string;
   newString: string;
@@ -81,7 +81,7 @@ interface ContainerEditParams {
 
 // Container grep parameters
 interface ContainerGrepParams {
-  containerId?: string;
+  containerId: string;
   pattern: string;
   path?: string;
   include?: string;
@@ -90,7 +90,7 @@ interface ContainerGrepParams {
 
 // Container find parameters
 interface ContainerFindParams {
-  containerId?: string;
+  containerId: string;
   path?: string;
   name?: string;
   type?: "file" | "directory" | "any";
@@ -99,14 +99,14 @@ interface ContainerFindParams {
 
 // Container ls parameters
 interface ContainerLsParams {
-  containerId?: string;
+  containerId: string;
   path?: string;
   recursive?: boolean;
   maxResults?: number;
 }
 
 interface ContainerDestroyParams {
-  containerId?: string;
+  containerId: string;
 }
 
 // Format bash result for the agent
@@ -270,8 +270,29 @@ async function registerSessionContainer(
     containerId,
     workspaceId: ctx.workspaceId,
     sessionId: ctx.sessionId,
-    role: "default",
+    role: "attached",
   });
+}
+
+async function requireActiveSessionContainer(
+  env: Env,
+  ctx: ContainerToolContext,
+  containerId: string,
+): Promise<void> {
+  if (!ctx.workspaceId) return;
+  const containers = new ContainerRepository(env.DB);
+  const container = await containers.get(ctx.workspaceId, containerId);
+  if (!container) {
+    throw new Error(`Container not found: ${containerId}`);
+  }
+  if (container.status !== "active" || container.deletedAt !== undefined) {
+    throw new Error(`Container removed: ${containerId}`);
+  }
+  const link = await containers.getSessionLink(ctx.workspaceId, ctx.sessionId, containerId);
+  if (!link) {
+    throw new Error(`Container ${containerId} is not attached to session ${ctx.sessionId}`);
+  }
+  await containers.touch(ctx.workspaceId, containerId);
 }
 
 function requireContainerRuntime(context: ToolRuntimeContext): BuiltinToolRuntimeContext {
@@ -301,7 +322,7 @@ export function createContainerCreateTool(
     label: "Create Container",
     parameters: Type.Object({
       containerId: Type.Optional(Type.String({
-        description: "Optional custom container ID. If not provided, uses session ID.",
+        description: "Optional custom container ID. If not provided, a unique container ID is generated.",
       })),
       description: Type.Optional(Type.String({
         description: "Optional description of the container's purpose",
@@ -316,7 +337,7 @@ export function createContainerCreateTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerCreateParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
+      const containerId = p.containerId ? requireContainerId(p.containerId) : generateContainerId();
       await registerSessionContainer(runtime.env, ctx, containerId, p.description);
       
       // Get or start container
@@ -357,9 +378,9 @@ export function createContainerBashTool(
       "Commands have access to git, ripgrep, curl, and other development tools.",
     label: "Container Bash",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       command: Type.String({
         description: "Shell command to execute",
       }),
@@ -386,8 +407,8 @@ export function createContainerBashTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerBashParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerBash(
         runtime.env,
@@ -429,9 +450,9 @@ export function createContainerReadTool(
       "Only UTF-8 text files are supported.",
     label: "Container Read",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       path: Type.String({
         description: "File path relative to /workspace",
       }),
@@ -457,8 +478,8 @@ export function createContainerReadTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerReadParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerRead(
         runtime.env,
@@ -499,9 +520,9 @@ export function createContainerWriteTool(
       "Use append=true to add to an existing file.",
     label: "Container Write",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       path: Type.String({
         description: "File path relative to /workspace",
       }),
@@ -524,8 +545,8 @@ export function createContainerWriteTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerWriteParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerWrite(
         runtime.env,
@@ -559,9 +580,9 @@ export function createContainerEditTool(
       "This is the preferred way to modify files when making changes.",
     label: "Container Edit",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       path: Type.String({
         description: "File path relative to /workspace",
       }),
@@ -584,8 +605,8 @@ export function createContainerEditTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerEditParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerEdit(
         runtime.env,
@@ -622,9 +643,9 @@ export function createContainerGrepTool(
       "Returns file path, line number, and matched text for each match.",
     label: "Container Grep",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       pattern: Type.String({
         description: "Pattern to search for",
       }),
@@ -649,8 +670,8 @@ export function createContainerGrepTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerGrepParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerGrep(
         runtime.env,
@@ -682,9 +703,9 @@ export function createContainerFindTool(
       "Returns file type, size, and modification time.",
     label: "Container Find",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       path: Type.Optional(Type.String({
         description: "Starting path (default: .)",
       })),
@@ -711,8 +732,8 @@ export function createContainerFindTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerFindParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerFind(
         runtime.env,
@@ -744,9 +765,9 @@ export function createContainerLsTool(
       "Shows file/directory name, type, size, and modification time.",
     label: "Container List",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
       path: Type.Optional(Type.String({
         description: "Directory path (default: .)",
       })),
@@ -768,8 +789,8 @@ export function createContainerLsTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerLsParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerLs(
         runtime.env,
@@ -800,9 +821,9 @@ export function createContainerDestroyTool(
       "This releases the container instance and its ephemeral runtime state.",
     label: "Destroy Container",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Container ID. Uses session's default container if not specified.",
-      })),
+      containerId: Type.String({
+        description: "Container ID returned by container_create.",
+      }),
     }) as TSchema,
     execute: async (
       context: ToolRuntimeContext,
@@ -813,14 +834,13 @@ export function createContainerDestroyTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerDestroyParams;
       const ctx = containerToolContext(runtime);
-      const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerSessionContainer(runtime.env, ctx, containerId);
+      const containerId = requireContainerId(p.containerId);
+      await requireActiveSessionContainer(runtime.env, ctx, containerId);
       if (signal?.aborted) {
         throw new Error("Container destroy aborted");
       }
       await destroyContainer(runtime.env, containerId);
       const containers = new ContainerRepository(runtime.env.DB);
-      await containers.unlinkSession(runtime.workspaceId, runtime.sessionId, containerId);
       await containers.markDestroyed(runtime.workspaceId, containerId);
 
       return {

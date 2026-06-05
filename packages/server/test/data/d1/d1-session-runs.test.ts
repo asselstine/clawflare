@@ -102,6 +102,31 @@ describe("D1 SessionRunRepository", () => {
     }
   });
 
+  it("does not claim a run after cancellation has been requested", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new SessionRunRepository(db);
+      await repo.create({
+        id: "run-1",
+        sessionId: "session-1",
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        input: { type: "prompt", content: "hello" },
+      });
+
+      await repo.requestCancel("run-1");
+
+      const claimed = await repo.claim({ runId: "run-1", workerId: "worker-1", leaseMs: 30_000 });
+      const cancelledRun = await repo.find("run-1");
+
+      expect(claimed).toBeNull();
+      expect(cancelledRun?.status).toBe("cancel_requested");
+      expect(cancelledRun?.leaseOwner).toBeUndefined();
+    } finally {
+      await dispose();
+    }
+  });
+
   it("replays completed step results without overwriting them", async () => {
     const { db, dispose } = await createDb();
     try {

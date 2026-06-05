@@ -1,10 +1,10 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { createDb, type Db } from "./db.js";
 import { containers, sessionContainer, sessions } from "./schema.js";
 import { DataLayerError } from "./errors.js";
 
 export type ContainerStatus = "active" | "destroyed";
-export type SessionContainerRole = "default" | "attached";
+export type SessionContainerRole = "attached";
 
 export interface ContainerRecord {
   id: string;
@@ -107,21 +107,21 @@ export class ContainerRepository {
 
   async get(workspaceId: string, id: string): Promise<ContainerRecord | null> {
     const row = await this.db.query.containers.findFirst({
-      where: and(eq(containers.workspaceId, workspaceId), eq(containers.id, id), isNull(containers.deletedAt)),
+      where: and(eq(containers.workspaceId, workspaceId), eq(containers.id, id)),
     });
     return row ? mapContainer(row) : null;
   }
 
   async getById(id: string): Promise<ContainerRecord | null> {
     const row = await this.db.query.containers.findFirst({
-      where: and(eq(containers.id, id), isNull(containers.deletedAt)),
+      where: eq(containers.id, id),
     });
     return row ? mapContainer(row) : null;
   }
 
   async list(workspaceId: string): Promise<ContainerRecord[]> {
     const rows = await this.db.query.containers.findMany({
-      where: and(eq(containers.workspaceId, workspaceId), isNull(containers.deletedAt)),
+      where: eq(containers.workspaceId, workspaceId),
       orderBy: desc(containers.updatedAt),
     });
     return rows.map(mapContainer);
@@ -159,6 +159,9 @@ export class ContainerRepository {
     if (!container) {
       throw new DataLayerError("Container not found", "CONTAINER_NOT_FOUND");
     }
+    if (container.status !== "active" || container.deletedAt !== undefined) {
+      throw new DataLayerError("Container has been removed", "CONTAINER_REMOVED");
+    }
 
     const now = Date.now();
     await this.db
@@ -174,7 +177,7 @@ export class ContainerRepository {
       .onConflictDoUpdate({
         target: [sessionContainer.sessionId, sessionContainer.containerId],
         set: {
-          role: params.role ?? "attached",
+          role: "attached",
           updatedAt: now,
         },
       });
@@ -215,8 +218,7 @@ export class ContainerRepository {
       .where(
         and(
           eq(sessionContainer.workspaceId, workspaceId),
-          eq(sessionContainer.sessionId, sessionId),
-          isNull(containers.deletedAt)
+          eq(sessionContainer.sessionId, sessionId)
         )
       )
       .orderBy(desc(sessionContainer.updatedAt));
@@ -237,6 +239,7 @@ export class ContainerRepository {
   async listLinksForContainerId(containerId: string): Promise<SessionContainerLink[]> {
     const rows = await this.db.query.sessionContainer.findMany({
       where: eq(sessionContainer.containerId, containerId),
+      orderBy: desc(sessionContainer.updatedAt),
     });
     return rows.map(mapSessionContainer);
   }

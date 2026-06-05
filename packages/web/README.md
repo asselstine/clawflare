@@ -48,6 +48,7 @@ The values are stored in browser local storage and sent directly from the browse
   - `/open [session-id]`
   - `/kill [session-id|all]`
   - `/name <name>`
+  - `/rename <name>`
   - `/tools`
   - `/models`
   - `/cf_debug [key]`

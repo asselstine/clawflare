@@ -63,6 +63,17 @@ export type SessionStatus =
   | "closed"
   | "expired";
 
+export type ContainerStatus = "active" | "destroyed";
+
+export interface ContainerSummary {
+  id: string;
+  status: ContainerStatus;
+  description?: string;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt?: number;
+}
+
 export interface ChatRequest {
   content: string;
   sessionId?: string;
@@ -110,6 +121,7 @@ export interface SessionSummary {
   isActive: boolean;
   modelId?: string;
   containers?: string[];
+  containerDetails?: ContainerSummary[];
 }
 
 export interface SessionListResponse {

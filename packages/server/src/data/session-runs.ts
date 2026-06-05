@@ -142,7 +142,6 @@ export class SessionRunRepository {
         WHERE id = ?
           AND (
             status = 'runnable'
-            OR status = 'cancel_requested'
             OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
           )
       `

@@ -14,7 +14,7 @@ describe("github egress handler", () => {
     GITHUB_TOKEN?: string;
     GITHUB_USERNAME?: string;
     GITHUB_SMART_HTTP_EGRESS?: string;
-    MOCK_AI?: string;
+    MOCK_EGRESS?: string;
   }
 
   const createRegistry = () => new EgressRegistry<MockEnv>();
@@ -188,7 +188,7 @@ describe("github egress handler", () => {
       const handler = registry.get("github")!;
 
       const request = new Request("https://api.github.com/user");
-      const context = createContext({ MOCK_AI: "true" });
+      const context = createContext({ MOCK_EGRESS: "true" });
 
       const response = await handler.fetch!(request, context);
       const data = await response.json() as { ok: boolean; handler: string; url: string };
