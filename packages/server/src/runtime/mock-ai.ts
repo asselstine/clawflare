@@ -16,7 +16,7 @@ import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 
 /**
  * Mock AI provider and model for testing
- * Used when no real model connection is configured
+ * Used when no real model is configured
  */
 export const MOCK_AI_PROVIDER = "amazon-bedrock";
 export const MOCK_AI_MODEL = "minimax.minimax-m2.5";

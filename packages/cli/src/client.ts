@@ -10,16 +10,17 @@
 import WebSocket from "ws";
 import type { 
   AgentMessage,
+  Message,
   SessionEvent,
   SessionResponse,
   ChatSubmittedResponse,
   ChatRequest,
   SessionListResponse,
   SessionSummary,
-  ModelConnection,
-  ModelConnectionListResponse,
-  CreateModelConnectionRequest,
-  UpdateModelConnectionRequest,
+  Model,
+  ModelListResponse,
+  CreateModelRequest,
+  UpdateModelRequest,
   CreateSessionRequest,
   CreateSessionResponse,
   KillSessionResponse,
@@ -37,16 +38,17 @@ import type {
 
 export type {
   AgentMessage,
+  Message,
   SessionEvent,
   SessionResponse,
   ChatSubmittedResponse,
   ChatRequest,
   SessionListResponse,
   SessionSummary,
-  ModelConnection,
-  ModelConnectionListResponse,
-  CreateModelConnectionRequest,
-  UpdateModelConnectionRequest,
+  Model,
+  ModelListResponse,
+  CreateModelRequest,
+  UpdateModelRequest,
   CreateSessionRequest,
   CreateSessionResponse,
   KillSessionResponse,
@@ -91,10 +93,10 @@ export interface ToolInfo {
 
 export interface ServerInfo {
   contextWindow: number;
-  supportsWorkspaceModelConnections: boolean;
+  supportsWorkspaceModels: boolean;
   supportedProviders: string[];
   workspace?: {
-    hasModelConnections: boolean;
+    hasModels: boolean;
   };
 }
 
@@ -222,6 +224,13 @@ export class AgentClient {
   async closeSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string }> {
     return this.requestJson<{ ok: boolean; sessionId: string; status: string }>(
       `/v1/session/${sessionId}/close`,
+      { method: "POST" }
+    );
+  }
+
+  async abortSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string; aborted: boolean }> {
+    return this.requestJson<{ ok: boolean; sessionId: string; status: string; aborted: boolean }>(
+      `/v1/session/${sessionId}/abort`,
       { method: "POST" }
     );
   }
@@ -589,7 +598,7 @@ export class AgentClient {
   async forkSession(input: {
     parentSessionId: string;
     parentMessageId: string;
-    modelConnectionId?: string;
+    modelId?: string;
   }): Promise<CreateSessionResponse> {
     return this.createSession(input);
   }
@@ -705,48 +714,48 @@ export class AgentClient {
     return this.requestJson<unknown>(path);
   }
 
-  // Model Connection API
-  async listModelConnections(): Promise<ModelConnectionListResponse> {
-    return this.requestJson<ModelConnectionListResponse>("/v1/model-connections");
+  // Model API
+  async listModels(): Promise<ModelListResponse> {
+    return this.requestJson<ModelListResponse>("/v1/models");
   }
 
-  async createModelConnection(input: CreateModelConnectionRequest): Promise<ModelConnection> {
-    const data = await this.requestJson<{ modelConnection: ModelConnection }>("/v1/model-connections", {
+  async createModel(input: CreateModelRequest): Promise<Model> {
+    const data = await this.requestJson<{ model: Model }>("/v1/models", {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return data.modelConnection;
+    return data.model;
   }
 
-  async updateModelConnection(
+  async updateModel(
     id: string,
-    input: UpdateModelConnectionRequest
-  ): Promise<ModelConnection> {
-    const data = await this.requestJson<{ modelConnection: ModelConnection }>(
-      `/v1/model-connections/${id}`,
+    input: UpdateModelRequest
+  ): Promise<Model> {
+    const data = await this.requestJson<{ model: Model }>(
+      `/v1/models/${id}`,
       {
         method: "PATCH",
         body: JSON.stringify(input),
       }
     );
-    return data.modelConnection;
+    return data.model;
   }
 
-  async deleteModelConnection(id: string): Promise<{ ok: boolean }> {
-    return this.requestJson<{ ok: boolean }>(`/v1/model-connections/${id}`, {
+  async deleteModel(id: string): Promise<{ ok: boolean }> {
+    return this.requestJson<{ ok: boolean }>(`/v1/models/${id}`, {
       method: "DELETE",
     });
   }
 
-  async setDefaultModelConnection(id: string | null): Promise<{
+  async setDefaultModel(id: string | null): Promise<{
     ok: boolean;
-    defaultModelConnectionId?: string;
+    defaultModelId?: string;
   }> {
-    return this.requestJson<{ ok: boolean; defaultModelConnectionId?: string }>(
-      "/v1/workspace/default-model-connection",
+    return this.requestJson<{ ok: boolean; defaultModelId?: string }>(
+      "/v1/workspace/default-model",
       {
         method: "PUT",
-        body: JSON.stringify({ modelConnectionId: id }),
+        body: JSON.stringify({ modelId: id }),
       }
     );
   }

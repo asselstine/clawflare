@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { handleListProviderModels, handleListProviders } from "../src/modules/providers/providers.routes.js";
-import { validateModelConnectionInput } from "../src/modules/model-connections/model-connections.validation.js";
+import { validateModelInput } from "../src/modules/models/models.validation.js";
 
 describe("providers routes", () => {
   it("lists providers with server-defined secrets", async () => {
@@ -30,7 +30,7 @@ describe("providers routes", () => {
   });
 
   it("rejects unknown models for a provider", () => {
-    const result = validateModelConnectionInput({
+    const result = validateModelInput({
       provider: "amazon-bedrock",
       modelName: "not-a-real-bedrock-model",
       secrets: {

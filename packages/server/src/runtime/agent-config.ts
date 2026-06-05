@@ -2,7 +2,7 @@ import { getModel, streamSimple, type Model, setBedrockProviderModule } from "@e
 import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { RuntimeTool } from "../modules/tools/types.js";
-import type { ResolvedModelConnection } from "../modules/model-connections/model-connections.service.js";
+import type { ResolvedModel } from "../modules/models/models.service.js";
 import { MOCK_AI_PROVIDER, MOCK_AI_MODEL } from "./mock-ai.js";
 
 // Eagerly register the bedrock provider module to prevent dynamic import issues in Workers
@@ -17,7 +17,7 @@ export interface BuildAgentComponentsResult {
 
 /**
  * Build agent components from environment.
- * DEPRECATED: Use buildAgentComponentsFromResolved with a model connection instead.
+ * DEPRECATED: Use buildAgentComponentsFromResolved with a model instead.
  * This function only works if env vars are set, which is no longer the default.
  * @deprecated
  */
@@ -25,7 +25,7 @@ export async function buildAgentComponents(): Promise<BuildAgentComponentsResult
   const provider = MOCK_AI_PROVIDER;
   const modelId = MOCK_AI_MODEL;
 
-  // Create getApiKey function - only returns mock key, real keys must come from model connections
+  // Create getApiKey function - only returns mock key, real keys must come from models
   const getApiKey = async () => {
     return "mock-key";
   };
@@ -57,11 +57,11 @@ export async function buildAgentComponents(): Promise<BuildAgentComponentsResult
 }
 
 /**
- * Build agent components from a resolved model connection.
- * Uses the model connection's provider, model, and secrets.
+ * Build agent components from a resolved model.
+ * Uses the model's provider, model, and secrets.
  */
 export async function buildAgentComponentsFromResolved(
-  resolved: ResolvedModelConnection
+  resolved: ResolvedModel
 ): Promise<BuildAgentComponentsResult> {
   const provider = resolved.provider;
   const modelId = resolved.modelName;
@@ -89,7 +89,7 @@ export async function buildAgentComponentsFromResolved(
         options?.bearerToken || options?.apiKey || getApiKeySync(resolved) || undefined
       );
       if (!bearerToken) {
-        throw new Error("Missing required secret AWS_BEARER_TOKEN_BEDROCK for amazon-bedrock model connection");
+        throw new Error("Missing required secret AWS_BEARER_TOKEN_BEDROCK for amazon-bedrock model");
       }
       return bedrockProviderModule.streamBedrock(requestModel as Model<"bedrock-converse-stream">, context, {
         ...options,
@@ -113,7 +113,7 @@ export async function buildAgentComponentsFromResolved(
  * This is a temporary workaround - proper implementation would
  * handle async secret resolution differently.
  */
-function getApiKeySync(resolved: ResolvedModelConnection): string | undefined {
+function getApiKeySync(resolved: ResolvedModel): string | undefined {
   if (resolved.provider === "amazon-bedrock") {
     return normalizeBedrockBearerToken(resolved.secrets["AWS_BEARER_TOKEN_BEDROCK"]);
   }
@@ -155,7 +155,7 @@ export function normalizeBedrockBearerToken(token: string | undefined): string |
 
 /**
  * Create streaming function for Bedrock.
- * DEPRECATED: Use buildAgentComponentsFromResolved with a model connection instead.
+ * DEPRECATED: Use buildAgentComponentsFromResolved with a model instead.
  * @deprecated
  */
 export async function createBedrockStreaming(): Promise<typeof streamSimple> {

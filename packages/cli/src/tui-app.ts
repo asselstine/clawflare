@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse, DeleteSessionResponse, DeleteSessionsResponse } from "./client.js";
+import type { AgentClient, AgentMessage, Message, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse, DeleteSessionResponse, DeleteSessionsResponse } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -93,45 +93,30 @@ const slashCommands = [
 ];
 
 function getEventMessageRole(event: SessionEvent): string | undefined {
-  if (!("message" in event)) return undefined;
-  const message = event.message;
-  if (typeof message !== "object" || message === null || !("role" in message)) {
-    return undefined;
-  }
-  return typeof message.role === "string" ? message.role : undefined;
+  return "message" in event && typeof event.message.role === "string" ? event.message.role : undefined;
 }
 
 function shouldRenderForEvent(event: SessionEvent): boolean {
-  return event.type.startsWith("tool_execution_") || event.type.startsWith("message_");
+  return event.type.startsWith("message.") || event.type.startsWith("session.");
 }
 
 // Helper to get display message from SessionEvent
 export function getEventDisplayMessage(event: SessionEvent): string | null {
   switch (event.type) {
-    case "tool_execution_start":
-      return `Running ${event.toolName}`;
-    case "tool_execution_end":
-      return `${event.toolName} ${event.isError ? "failed" : "completed"}`;
-    case "tool_execution_update":
-      return `${event.toolName} updating...`;
-    case "agent_start":
-      return "Agent started";
-    case "agent_end":
-      return "Complete";
-    case "turn_start":
-      return "Turn started";
-    case "turn_end":
-      return "Turn completed";
-    case "message_start": {
+    case "message.created":
+    case "message.updated": {
       if (getEventMessageRole(event) !== "assistant") return null;
+      const runningTool = event.message.content.find((block) => block.type === "tool_call" && block.status === "running");
+      if (runningTool?.type === "tool_call") return `Running ${runningTool.name}`;
       return "Generating response...";
     }
-    case "message_update":
-      if (getEventMessageRole(event) !== "assistant") return null;
-      return "Generating response...";
-    case "message_end":
+    case "message.completed":
       if (getEventMessageRole(event) !== "assistant") return null;
       return "Response ready";
+    case "message.errored":
+      return "Message failed";
+    case "session.status_changed":
+      return event.status === "idle" ? "Complete" : event.status;
     default:
       return "Processing...";
   }
@@ -363,20 +348,23 @@ export function updateToolCallStatusesFromEvents(
   events: SessionEvent[]
 ): void {
   for (const event of events) {
-    if (!("toolCallId" in event) || !event.toolCallId) continue;
-
-    const toolCall = toolCalls.find((tc) => tc.id === event.toolCallId);
-    if (!toolCall) continue;
-
-    if (event.type === "tool_execution_start") {
-      toolCall.status = "running";
-    } else if (event.type === "tool_execution_update" && "status" in event) {
-      const status = event.status;
-      if (status === "running" || status === "complete" || status === "error") {
-        toolCall.status = status;
+    if (!("message" in event)) continue;
+    for (const block of event.message.content) {
+      if (block.type !== "tool_call") continue;
+      const toolCall = toolCalls.find((tc) => tc.id === block.id);
+      if (!toolCall) continue;
+      if (block.status === "running" || block.status === "complete" || block.status === "error") {
+        toolCall.status = block.status;
       }
-    } else if (event.type === "tool_execution_end") {
-      toolCall.status = event.isError ? "error" : "complete";
+      if (block.result) {
+        toolCall.result = {
+          role: "toolResult",
+          toolName: block.name,
+          isError: block.result.isError,
+          details: block.result.output,
+          content: block.result.text || JSON.stringify(block.result.output),
+        };
+      }
     }
   }
 }
@@ -432,7 +420,7 @@ export interface ToolCallInfo {
   name: string;
   params: Record<string, unknown>;
   status: ToolCallStatus;
-  result?: string;
+  result?: DisplayMessage;
   isError?: boolean;
   expanded?: boolean; // For UI expand/collapse
 }
@@ -490,12 +478,9 @@ function formatSessionSummary(session: SessionSummary, currentSessionId: string)
   const current = session.id === currentSessionId ? " [current]" : "";
   const active = session.isActive ? " active" : "";
   const name = session.name ? ` ${session.name}` : "";
-  const model = session.modelProvider && session.modelName
-    ? ` ${session.modelProvider}/${session.modelName}`
-    : "";
   const countLabel = session.messageCount === 1 ? "event" : "events";
 
-  return `- ${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}${model}`;
+  return `- ${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}`;
 }
 
 function formatSessionList(sessions: SessionSummary[], total: number, currentSessionId: string, filter: string): string {
@@ -549,7 +534,9 @@ function createUserBlock(content: string): Text {
   return new Text(content, 1, 1, bgFn);
 }
 
-function getMessageContentValue(message: AgentMessage): string | Array<any> | undefined {
+type DisplaySourceMessage = AgentMessage | Message;
+
+function getMessageContentValue(message: DisplaySourceMessage): string | Array<any> | undefined {
   return "content" in message ? message.content : undefined;
 }
 
@@ -568,17 +555,26 @@ function extractMessageTextContent(content: string | Array<any> | undefined): st
 function extractMessageToolCalls(content: string | Array<any> | undefined): ToolCallInfo[] | undefined {
   if (!Array.isArray(content)) return undefined;
   const toolCalls = content
-    .filter((c) => c.type === "toolCall")
+    .filter((c) => c.type === "toolCall" || c.type === "tool_call")
     .map((c) => ({
       id: c.id || "",
       name: c.name || "tool",
-      params: c.arguments || {},
-      status: "pending" as ToolCallStatus,
+      params: c.arguments || c.input || {},
+      status: (c.status === "running" || c.status === "complete" || c.status === "error" ? c.status : "pending") as ToolCallStatus,
+      result: c.result
+        ? {
+            role: "toolResult" as const,
+            toolName: c.name || "tool",
+            isError: Boolean(c.result.isError),
+            details: c.result.output,
+            content: c.result.text || JSON.stringify(c.result.output),
+          }
+        : undefined,
     }));
   return toolCalls.length ? toolCalls : undefined;
 }
 
-function eventMessageRole(message: AgentMessage): DisplayMessageRole {
+function eventMessageRole(message: DisplaySourceMessage): DisplayMessageRole {
   if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
     return message.role;
   }
@@ -604,7 +600,7 @@ export function applyAssistantPartialEvents(
     return nextMessages.length - 1;
   };
 
-  const updateAssistantMessage = (message: AgentMessage): void => {
+  const updateAssistantMessage = (message: Message): void => {
     if (eventMessageRole(message) !== "assistant") return;
 
     const content = getMessageContentValue(message);
@@ -625,9 +621,9 @@ export function applyAssistantPartialEvents(
 
   for (const event of events) {
     if (!("message" in event)) continue;
-    if (event.type === "message_start" || event.type === "message_update") {
+    if (event.type === "message.created" || event.type === "message.updated") {
       updateAssistantMessage(event.message);
-    } else if (event.type === "message_end") {
+    } else if (event.type === "message.completed") {
       updateAssistantMessage(event.message);
       if (eventMessageRole(event.message) === "assistant") {
         const index = nextMessages.length - 1;
@@ -666,7 +662,7 @@ export class ClawflareTUIApp {
     url: string;
     contextTotal?: number;
     supportedProviders?: string[];
-    supportsWorkspaceModelConnections?: boolean;
+    supportsWorkspaceModels?: boolean;
   } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
@@ -834,12 +830,12 @@ export class ClawflareTUIApp {
       const serverInfo = await this.client.getServerInfo();
       this.serverInfo.contextTotal = serverInfo.contextWindow;
       this.serverInfo.supportedProviders = serverInfo.supportedProviders;
-      this.serverInfo.supportsWorkspaceModelConnections = serverInfo.supportsWorkspaceModelConnections;
+      this.serverInfo.supportsWorkspaceModels = serverInfo.supportsWorkspaceModels;
 
-      // Check if workspace has model connections configured
-      const hasModelConnections = serverInfo.workspace?.hasModelConnections ?? true;
+      // Check if workspace has models configured
+      const hasModels = serverInfo.workspace?.hasModels ?? true;
 
-      if (!hasModelConnections) {
+      if (!hasModels) {
         // Show helpful message when no models configured
         this.messages.push({
           role: "assistant",
@@ -885,7 +881,7 @@ export class ClawflareTUIApp {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private hasToolCalls(content: string | Array<any>): boolean {
     if (!Array.isArray(content)) return false;
-    return content.some((c) => c.type === "toolCall");
+    return content.some((c) => c.type === "toolCall" || c.type === "tool_call");
   }
 
   // Get tool call names from message content
@@ -893,7 +889,7 @@ export class ClawflareTUIApp {
   private getToolCallNames(content: string | Array<any>): string[] {
     if (!Array.isArray(content)) return [];
     return content
-      .filter((c) => c.type === "toolCall")
+      .filter((c) => c.type === "toolCall" || c.type === "tool_call")
       .map((c) => c.name || "tool")
       .filter((name, index, arr) => arr.indexOf(name) === index); // dedupe
   }
@@ -903,12 +899,21 @@ export class ClawflareTUIApp {
   private extractToolCalls(content: string | Array<any>): ToolCallInfo[] {
     if (!Array.isArray(content)) return [];
     return content
-      .filter((c) => c.type === "toolCall")
+      .filter((c) => c.type === "toolCall" || c.type === "tool_call")
       .map((c) => ({
         id: c.id || "",
         name: c.name || "tool",
-        params: c.arguments || {}, // ToolCall uses "arguments", not "args"
-        status: "pending" as ToolCallStatus,
+        params: c.arguments || c.input || {},
+        status: (c.status === "running" || c.status === "complete" || c.status === "error" ? c.status : "pending") as ToolCallStatus,
+        result: c.result
+          ? {
+              role: "toolResult" as const,
+              toolName: c.name || "tool",
+              isError: Boolean(c.result.isError),
+              details: c.result.output,
+              content: c.result.text || JSON.stringify(c.result.output),
+            }
+          : undefined,
       }));
   }
 
@@ -932,11 +937,11 @@ export class ClawflareTUIApp {
     return "error";
   }
 
-  private getMessageContent(message: AgentMessage): string | Array<any> | undefined {
+  private getMessageContent(message: DisplaySourceMessage): string | Array<any> | undefined {
     return "content" in message ? message.content : undefined;
   }
 
-  private formatMessageForDisplay(message: AgentMessage): DisplayMessage {
+  private formatMessageForDisplay(message: DisplaySourceMessage): DisplayMessage {
     const role = this.toDisplayRole(message.role);
     const messageContent = this.getMessageContent(message);
 
@@ -1136,11 +1141,8 @@ export class ClawflareTUIApp {
       const name = session.name ? ` ${session.name}` : "";
       const current = session.id === this.sessionId ? " [current]" : "";
       const active = session.isActive ? " active" : "";
-      const model = session.modelProvider && session.modelName
-        ? ` ${session.modelProvider}/${session.modelName}`
-        : "";
       const countLabel = session.messageCount === 1 ? "event" : "events";
-      const line = `${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}${model}`;
+      const line = `${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}`;
       box.addChild(createText(prefix + (selected ? chalk.bold(line) : line)));
     }
 
@@ -1432,6 +1434,7 @@ export class ClawflareTUIApp {
       });
       
       this.sessionId = submitted.sessionId;
+      if (submitted.name) this.sessionName = submitted.name;
       this.updateHeader();
       this.setStatus(`Session ${submitted.sessionId.slice(0, 8)}: processing...`, "yellow");
       
@@ -1745,6 +1748,12 @@ export class ClawflareTUIApp {
 
   private abortCurrentOperation(): void {
     if (this.abortController && this.isLoading) {
+      const activeSessionId = this.sessionId;
+      if (activeSessionId) {
+        void this.client.abortSession(activeSessionId).catch((error) => {
+          this.setStatus(`Abort request failed: ${error instanceof Error ? error.message : String(error)}`, "red");
+        });
+      }
       this.abortController.abort();
       this.messages.push({ role: "assistant", content: "⚠ Operation aborted by user" });
       this.isLoading = false;
@@ -2018,14 +2027,14 @@ export class ClawflareTUIApp {
           break;
 
         case "models":
-          this.setStatus("Loading model connections...", "yellow");
+          this.setStatus("Loading models...", "yellow");
           try {
-            const { modelConnections, defaultModelConnectionId } = await this.client.listModelConnections();
+            const { models, defaultModelId } = await this.client.listModels();
             
-            if (modelConnections.length === 0) {
+            if (models.length === 0) {
               this.messages.push({
                 role: "assistant",
-                content: "No model connections configured. Use `clawflare providers add` to add a provider.",
+                content: "No models configured. Use `clawflare providers add` to add a provider.",
               });
               this.renderMessages();
               this.setStatus("No models available", "yellow");
@@ -2033,20 +2042,20 @@ export class ClawflareTUIApp {
             }
 
             // Build model list message
-            const modelList = modelConnections.map((m) => {
-              const isDefault = m.id === defaultModelConnectionId;
+            const modelLines = models.map((m) => {
+              const isDefault = m.id === defaultModelId;
               const displayName = m.displayName || `${m.provider} - ${m.modelName}`;
               return `- ${displayName}${isDefault ? " [DEFAULT]" : ""}`;
             }).join("\n");
 
             this.messages.push({
               role: "assistant",
-              content: `Available model connections:\n${modelList}\n\nTo inspect configured models, use the CLI: clawflare models list`,
+              content: `Available models:\n${modelLines}\n\nTo inspect configured models, use the CLI: clawflare models list`,
             });
             this.renderMessages();
             this.setStatus("Ready", "green");
           } catch (e) {
-            this.error = e instanceof Error ? e.message : "Failed to load model connections";
+            this.error = e instanceof Error ? e.message : "Failed to load models";
             this.renderMessages();
             this.setStatus(`Error: ${this.error}`, "red");
           }
@@ -2070,7 +2079,7 @@ export class ClawflareTUIApp {
 /delete [session-id|all] - Delete sessions after cleanup
 /name <name> - Name the current session
 /tools - List available tools
-/models - Show available model connections
+/models - Show available models
 /skill:<name> [args] - Invoke a local Agent Skill
 /cf_debug [key] - Debug DO storage for current session
 /clear - Clear chat history

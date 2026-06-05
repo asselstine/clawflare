@@ -23,6 +23,13 @@ export {
   SessionEventRepository,
   SessionRepository,
 } from "./sessions.js";
+export type {
+  MessageListOptions,
+} from "./messages.js";
+export {
+  applySessionEventProjection,
+  SessionMessageRepository,
+} from "./messages.js";
 
 // =============================================================================
 // Workspaces
@@ -60,16 +67,19 @@ export type {
 export { EgressHandlerRepository } from "./egress-handlers.js";
 
 // =============================================================================
-// Model Connections
+// Providers and Models
 // =============================================================================
 
 export type {
-  ModelConnection,
+  Provider,
+  Model,
   ModelProvider,
-  CreateModelConnectionParams,
-  UpdateModelConnectionParams,
-} from "./model-connections.js";
-export { ModelConnectionRepository } from "./model-connections.js";
+  CreateProviderParams,
+  UpdateProviderParams,
+  CreateModelParams,
+  UpdateModelParams,
+} from "./models.js";
+export { ProviderRepository, ModelRepository } from "./models.js";
 
 // =============================================================================
 // Encrypted Secrets

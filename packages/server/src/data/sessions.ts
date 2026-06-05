@@ -4,7 +4,6 @@
  * Domain types for session management.
  */
 
-import type { ModelProvider } from "@clawflare/types";
 import type { SessionEvent, SessionStatus } from "../types.js";
 
 // Re-export from types for convenience
@@ -22,9 +21,7 @@ export interface SessionMetadataState {
   errorMessage?: string;
   maxQueueSize?: number;
   idleTimeout?: string;
-  modelConnectionId?: string;
-  modelProvider?: ModelProvider;
-  modelName?: string;
+  modelId?: string;
 }
 
 export interface SessionSummary {
@@ -36,9 +33,8 @@ export interface SessionSummary {
   messageCount: number;
   updatedAt: number;
   isActive: boolean;
-  modelConnectionId?: string;
-  modelProvider?: ModelProvider;
-  modelName?: string;
+  modelId?: string;
+  containers?: string[];
 }
 
 export interface SessionListFilter {
@@ -85,12 +81,13 @@ export interface DequeueResult {
 
 // Drizzle-backed session repository implementation.
 
-import { and, asc, count, desc, eq, gt, inArray, max, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, inArray, lt, max, sql } from "drizzle-orm";
 import { createDb, type Db } from "./db.js";
 import {
   sessionCounters,
   sessionEvents,
   sessionInputQueue,
+  sessionMessages,
   sessionRuntime,
   sessions,
 } from "./schema.js";
@@ -107,9 +104,7 @@ function mapSession(row: typeof sessions.$inferSelect): SessionMetadataState {
     errorMessage: row.errorMessage ?? undefined,
     maxQueueSize: row.maxQueueSize,
     idleTimeout: row.idleTimeout ?? undefined,
-    modelConnectionId: row.modelConnectionId ?? undefined,
-    modelProvider: row.modelProvider as ModelProvider | undefined,
-    modelName: row.modelName ?? undefined,
+    modelId: row.modelId ?? undefined,
   };
 }
 
@@ -122,9 +117,7 @@ function mapSessionSummary(row: {
   updatedAt: number;
   eventCount: number;
   active: number;
-  modelConnectionId: string | null;
-  modelProvider: string | null;
-  modelName: string | null;
+  modelId: string | null;
 }): SessionSummary {
   return {
     id: row.id,
@@ -135,9 +128,7 @@ function mapSessionSummary(row: {
     messageCount: row.eventCount,
     updatedAt: row.updatedAt,
     isActive: Boolean(row.active),
-    modelConnectionId: row.modelConnectionId ?? undefined,
-    modelProvider: row.modelProvider as ModelProvider | undefined,
-    modelName: row.modelName ?? undefined,
+    modelId: row.modelId ?? undefined,
   };
 }
 
@@ -164,9 +155,7 @@ export class SessionRepository {
         errorMessage: session.errorMessage ?? null,
         maxQueueSize: session.maxQueueSize ?? 100,
         idleTimeout: session.idleTimeout ?? null,
-        modelConnectionId: session.modelConnectionId ?? null,
-        modelProvider: session.modelProvider ?? null,
-        modelName: session.modelName ?? null,
+        modelId: session.modelId ?? null,
       })
       .onConflictDoUpdate({
         target: sessions.id,
@@ -180,9 +169,7 @@ export class SessionRepository {
           errorMessage: session.errorMessage ?? null,
           maxQueueSize: session.maxQueueSize ?? 100,
           idleTimeout: session.idleTimeout ?? null,
-          modelConnectionId: sql`coalesce(excluded.model_connection_id, ${sessions.modelConnectionId})`,
-          modelProvider: sql`coalesce(excluded.model_provider, ${sessions.modelProvider})`,
-          modelName: sql`coalesce(excluded.model_name, ${sessions.modelName})`,
+          modelId: sql`coalesce(excluded.model_id, ${sessions.modelId})`,
         },
       });
 
@@ -193,6 +180,7 @@ export class SessionRepository {
         workspaceId: session.workspaceId,
         nextQueueSequence: 1,
         nextEventSequence: 1,
+        nextMessageSequence: 1,
         updatedAt: now,
       })
       .onConflictDoUpdate({
@@ -295,14 +283,12 @@ export class SessionRepository {
         name: sessions.name,
         status: sessions.status,
         updatedAt: sessions.updatedAt,
-        eventCount: count(sessionEvents.sequence),
+        eventCount: count(sessionMessages.sequence),
         active: sql<number>`coalesce(max(${sessionRuntime.active}), 0)`,
-        modelConnectionId: sessions.modelConnectionId,
-        modelProvider: sessions.modelProvider,
-        modelName: sessions.modelName,
+        modelId: sessions.modelId,
       })
       .from(sessions)
-      .leftJoin(sessionEvents, eq(sessionEvents.sessionId, sessions.id))
+      .leftJoin(sessionMessages, eq(sessionMessages.sessionId, sessions.id))
       .leftJoin(sessionRuntime, eq(sessionRuntime.sessionId, sessions.id))
       .where(where)
       .groupBy(sessions.id)
@@ -383,9 +369,9 @@ export class SessionEventRepository {
       .prepare(
         `
         INSERT INTO session_counters (
-          session_id, next_queue_sequence, next_event_sequence, updated_at
+          session_id, next_queue_sequence, next_event_sequence, next_message_sequence, updated_at
         )
-        VALUES (?, 1, ?, ?)
+        VALUES (?, 1, ?, 1, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           next_event_sequence = next_event_sequence + ?,
           updated_at = excluded.updated_at
@@ -501,6 +487,30 @@ export class SessionEventRepository {
       .sort((a, b) => a.sequence - b.sequence);
   }
 
+  async listBefore(
+    sessionId: string,
+    beforeCursor: string,
+    limit = 100
+  ): Promise<SessionEvent[]> {
+    const before = Number.parseInt(beforeCursor, 10) || 0;
+    if (before <= 1) return [];
+
+    const cappedLimit = Math.min(limit, 100);
+
+    const rows = await this.db.query.sessionEvents.findMany({
+      where: and(
+        eq(sessionEvents.sessionId, sessionId),
+        lt(sessionEvents.sequence, before)
+      ),
+      orderBy: [desc(sessionEvents.sequence)],
+      limit: cappedLimit,
+    });
+
+    return rows
+      .map(mapSessionEvent)
+      .sort((a, b) => a.sequence - b.sequence);
+  }
+
   async trim(sessionId: string, maxEvents: number): Promise<void> {
     const currentCount = await this.count(sessionId);
 
@@ -590,9 +600,9 @@ export class InputQueueRepository {
       .prepare(
         `
         INSERT INTO session_counters (
-          session_id, next_queue_sequence, next_event_sequence, updated_at
+          session_id, next_queue_sequence, next_event_sequence, next_message_sequence, updated_at
         )
-        VALUES (?, 2, 1, ?)
+        VALUES (?, 2, 1, 1, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           next_queue_sequence = next_queue_sequence + 1,
           updated_at = excluded.updated_at

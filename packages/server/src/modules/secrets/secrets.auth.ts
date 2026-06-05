@@ -41,7 +41,7 @@ async function verifyWorkspaceAccess(
 }
 
 /**
- * Verify workspace and model connection exist
+ * Verify workspace and model exist
  */
 async function verifyWorkspaceExists(
   env: Env,

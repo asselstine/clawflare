@@ -4,6 +4,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
@@ -20,7 +21,7 @@ export const workspaces = sqliteTable("workspaces", {
   slug: text("slug").notNull().unique(),
   name: text("name").notNull(),
   description: text("description"),
-  defaultModelConnectionId: text("default_model_connection_id"),
+  defaultModelId: text("default_model_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
 });
@@ -126,9 +127,7 @@ export const sessions = sqliteTable("sessions", {
   errorMessage: text("error_message"),
   maxQueueSize: integer("max_queue_size").notNull().default(100),
   idleTimeout: text("idle_timeout"),
-  modelConnectionId: text("model_connection_id"),
-  modelProvider: text("model_provider"),
-  modelName: text("model_name"),
+  modelId: text("model_id"),
 });
 
 export const sessionEvents = sqliteTable(
@@ -146,11 +145,45 @@ export const sessionEvents = sqliteTable(
   })
 );
 
+/**
+ * Durable, user-facing conversation state for a session.
+ *
+ * Messages are the source of truth for API clients and UI rendering. A session
+ * is an ordered list of messages; each message has typed content blocks such as
+ * text and tool calls. Tool results are attached to the tool_call block they
+ * complete, so clients can render tool output underneath the call without
+ * reconstructing relationships from separate runtime events.
+ *
+ * session_events stores replayable message deltas. Replaying those deltas from
+ * an empty message list must reconstruct this table exactly. The runtime may
+ * still keep workflow snapshots for execution, but those snapshots are not the
+ * public conversation model.
+ */
+export const sessionMessages = sqliteTable(
+  "session_messages",
+  {
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    workspaceId: text("workspace_id"),
+    id: text("id").notNull(),
+    role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
+    status: text("status", { enum: ["queued", "streaming", "complete", "error"] }).notNull(),
+    contentJson: text("content_json").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.sessionId, table.sequence] }),
+    sessionMessageId: uniqueIndex("idx_session_messages_session_id_unique").on(table.sessionId, table.id),
+  })
+);
+
 export const sessionCounters = sqliteTable("session_counters", {
   sessionId: text("session_id").primaryKey().references(() => sessions.id, { onDelete: "cascade" }),
   workspaceId: text("workspace_id"),
   nextQueueSequence: integer("next_queue_sequence").notNull().default(1),
   nextEventSequence: integer("next_event_sequence").notNull().default(1),
+  nextMessageSequence: integer("next_message_sequence").notNull().default(1),
   updatedAt: integer("updated_at").notNull(),
 });
 
@@ -271,13 +304,24 @@ export const egressHandlers = sqliteTable(
   })
 );
 
-export const modelConnections = sqliteTable("model_connections", {
+export const providers = sqliteTable("providers", {
   id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   displayName: text("display_name"),
   provider: text("provider").notNull(),
-  modelName: text("model_name").notNull(),
   secretRefsJson: text("secret_refs_json").notNull().default(sql`'{}'`),
+  configJson: text("config_json").notNull().default(sql`'{}'`),
+  createdAt: integer("created_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  deletedAt: integer("deleted_at"),
+});
+
+export const models = sqliteTable("models", {
+  id: text("id").primaryKey(),
+  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  providerId: text("provider_id").notNull().references(() => providers.id, { onDelete: "cascade" }),
+  displayName: text("display_name"),
+  modelName: text("model_name").notNull(),
   configJson: text("config_json").notNull().default(sql`'{}'`),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),

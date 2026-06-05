@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { handleDeleteSession, handleDeleteSessions, handleKillSession } from "../../../src/modules/sessions/sessions.routes.js";
+import { handleAbortSession, handleDeleteSession, handleDeleteSessions, handleKillSession } from "../../../src/modules/sessions/sessions.routes.js";
 import type { RequestContext } from "../../../src/http/request-context.js";
 import type { Env } from "../../../src/internal-types/index.js";
 
@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   append: vi.fn(),
   setActive: vi.fn(),
   findActiveForSession: vi.fn(),
+  requestCancelRun: vi.fn(),
   cancelRun: vi.fn(),
   listForSession: vi.fn(),
   deleteForSession: vi.fn(),
@@ -32,6 +33,7 @@ vi.mock("../../../src/data/index.js", () => ({
   })),
   SessionRunRepository: vi.fn().mockImplementation(() => ({
     findActiveForSession: mocks.findActiveForSession,
+    requestCancel: mocks.requestCancelRun,
     cancel: mocks.cancelRun,
   })),
   ContainerContextRepository: vi.fn().mockImplementation(() => ({
@@ -63,6 +65,74 @@ function createRequestContext(): RequestContext {
     role: "owner",
   };
 }
+
+describe("handleAbortSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("requests cancellation for the active run without closing the session", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "processing",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue({
+      id: "run-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      status: "running",
+    });
+    mocks.requestCancelRun.mockResolvedValue(undefined);
+
+    const response = await handleAbortSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as {
+      ok: boolean;
+      status: string;
+      aborted: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.status).toBe("processing");
+    expect(data.aborted).toBe(true);
+    expect(mocks.requestCancelRun).toHaveBeenCalledWith("run-1");
+    expect(mocks.cancelRun).not.toHaveBeenCalled();
+    expect(mocks.markClosed).not.toHaveBeenCalled();
+    expect(mocks.setActive).not.toHaveBeenCalled();
+  });
+
+  it("returns ok when there is no active run to cancel", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "idle",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue(null);
+
+    const response = await handleAbortSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as {
+      ok: boolean;
+      status: string;
+      aborted: boolean;
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.status).toBe("idle");
+    expect(data.aborted).toBe(false);
+    expect(mocks.requestCancelRun).not.toHaveBeenCalled();
+    expect(mocks.markClosed).not.toHaveBeenCalled();
+  });
+});
 
 describe("handleKillSession", () => {
   beforeEach(() => {

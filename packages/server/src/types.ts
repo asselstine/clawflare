@@ -3,10 +3,20 @@
 
 import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 
+export type { AgentMessage } from "@earendil-works/pi-agent-core";
+
 export type {
-  AgentMessage,
+  Message,
+  MessageContentBlock,
+  MessageRole,
+  MessageStatus,
+  SessionDelta,
   SessionEvent,
   SessionStatus,
+  TextContentBlock,
+  ToolCallContentBlock,
+  ToolCallStatus,
+  ToolResult,
   ChatRequest,
   ChatSubmittedResponse,
   SessionResponse,
@@ -19,11 +29,11 @@ export type {
   DeleteSessionsResponse,
   ToolDefinition,
   ModelProvider,
-  ModelConnection,
-  ModelConnectionListResponse,
-  CreateModelConnectionRequest,
-  UpdateModelConnectionRequest,
-  SetDefaultModelConnectionRequest,
+  Model,
+  ModelListResponse,
+  CreateModelRequest,
+  UpdateModelRequest,
+  SetDefaultModelRequest,
 } from "@clawflare/types";
 
 export type AgentSession = {

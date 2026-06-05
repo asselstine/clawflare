@@ -4,7 +4,7 @@ import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
 import { buildAgentComponentsFromResolved } from "../src/runtime/agent-config.js";
 
 describe("buildAgentComponents", () => {
-  it("passes AWS_BEARER_TOKEN_BEDROCK to Bedrock as bearerToken from resolved model connection", async () => {
+  it("passes AWS_BEARER_TOKEN_BEDROCK to Bedrock as bearerToken from resolved model", async () => {
     const stream = createAssistantMessageEventStream();
     const message: AssistantMessage = {
       role: "assistant",
@@ -27,7 +27,7 @@ describe("buildAgentComponents", () => {
 
     const spy = vi.spyOn(bedrockProviderModule, "streamBedrock").mockReturnValue(stream);
 
-    // Build components from a resolved model connection
+    // Build components from a resolved model
     const components = await buildAgentComponentsFromResolved({
       id: "test-connection",
       provider: "amazon-bedrock",

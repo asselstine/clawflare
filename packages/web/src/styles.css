@@ -65,7 +65,7 @@ select:disabled {
   font-weight: 700;
 }
 
-.markdown :where(p, ul, ol, pre, blockquote) {
+.markdown :where(p, ul, ol, pre, blockquote, table) {
   margin: 0.65rem 0;
 }
 
@@ -92,6 +92,31 @@ select:disabled {
   background: transparent;
   padding: 0;
   color: #dce4ef;
+}
+
+.markdown table {
+  display: block;
+  width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.markdown :where(th, td) {
+  border: 1px solid #303644;
+  padding: 0.45rem 0.65rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th {
+  background: #1b1f27;
+  color: #f1f5f9;
+  font-weight: 650;
+}
+
+.markdown tr:nth-child(even) td {
+  background: rgba(36, 40, 49, 0.42);
 }
 
 @layer components {

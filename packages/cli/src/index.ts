@@ -119,7 +119,7 @@ program
   .addCommand(
     new Command("remove")
       .description("Remove a model provider")
-      .argument("[name]", "Name or ID of the model connection to remove")
+      .argument("[name]", "Name or ID of the model to remove")
       .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
       .option("-t, --token <token>", "API token for authentication")
       .action(async (name: string | undefined, options: { server?: string; token?: string }) => {
@@ -196,10 +196,10 @@ program
 // models command
 program
   .command("models")
-  .description("Manage configured model connections")
+  .description("Manage configured models")
   .addCommand(
     new Command("list")
-      .description("List configured model connections")
+      .description("List configured models")
       .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
       .option("-t, --token <token>", "API token for authentication")
       .action(async (options: { server?: string; token?: string }) => {

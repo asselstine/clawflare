@@ -20,7 +20,7 @@ interface InfoRequestContext {
 }
 
 /**
- * Get server info (supported providers, model connection support)
+ * Get server info (supported providers, model support)
  * Also returns workspace-specific info if authenticated
  */
 export async function handleGetInfo(
@@ -32,22 +32,22 @@ export async function handleGetInfo(
 
     const response: {
       contextWindow: number;
-      supportsWorkspaceModelConnections: boolean;
+      supportsWorkspaceModels: boolean;
       supportedProviders: string[];
       workspace?: {
-        hasModelConnections: boolean;
+        hasModels: boolean;
       };
     } = {
       contextWindow,
-      supportsWorkspaceModelConnections: true,
+      supportsWorkspaceModels: true,
       supportedProviders: getSupportedProviders(),
     };
 
     // Include workspace-specific info if available
     if (requestContext?.workspaceId) {
-      const { hasModelConnections } = await import("../model-connections/model-connections.service.js");
+      const { hasModels } = await import("../models/models.service.js");
       response.workspace = {
-        hasModelConnections: await hasModelConnections(env, requestContext.workspaceId),
+        hasModels: await hasModels(env, requestContext.workspaceId),
       };
     }
 

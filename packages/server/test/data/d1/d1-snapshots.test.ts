@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
@@ -23,13 +23,10 @@ function migrationStatements(migrationFile: string): string[] {
 }
 
 function allMigrationStatements(): string[] {
-  return [
-    "0001_initial_schema.sql",
-    "007_encrypted_secrets.sql",
-    "008_session_name.sql",
-    "012_workflow_waiting_at.sql",
-    "013_session_runtime_hot_context.sql",
-  ].flatMap((file) => migrationStatements(file));
+  return readdirSync(MIGRATIONS_DIR)
+    .filter((name) => name.endsWith(".sql"))
+    .sort()
+    .flatMap((file) => migrationStatements(file));
 }
 
 async function createDb(): Promise<{ db: D1Database; dispose: () => Promise<void> }> {

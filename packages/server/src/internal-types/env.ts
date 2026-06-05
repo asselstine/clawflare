@@ -68,11 +68,11 @@ export interface Env {
   // AWS region setting (optional, for Bedrock)
   AWS_REGION?: string;
 
-  // Key encryption key for envelope-encrypted model connection secrets.
+  // Key encryption key for envelope-encrypted model secrets.
   // This may be a Workers secret string or an account-level Secrets Store secret binding.
   CLAWFLARE_KEK?: string | { get(): Promise<string | null> };
 
-  // Test mode flag - enables mock AI responses when no model connection is configured
+  // Test mode flag - enables mock AI responses when no model is configured
   MOCK_AI?: string;
 
   // Debug settings

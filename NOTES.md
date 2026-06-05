@@ -5,7 +5,6 @@ Clawflare is a agent workflow platform for devs.
 - custom egress; devs can extend to support more servers. relies on workspace secrets (i.e. no oauth)
 - local ingress allows developers to have the cloud talk to a local server. (just establishes a websocket)
 - custom tools extend agent capabilities
-- BYOM: bring your own model. Model connections allows users to select which model they use.
-
+- BYOM: bring your own model. Providers store credentials, and models let users select which model they use.
 
 

@@ -10,7 +10,7 @@ const mocks = vi.hoisted(() => ({
   createRun: vi.fn(),
   enqueue: vi.fn(),
   latestCursor: vi.fn(),
-  resolveModelConnectionForNewSession: vi.fn(),
+  resolveModelForNewSession: vi.fn(),
   runSessionRun: vi.fn(),
   seedDefaults: vi.fn(),
 }));
@@ -35,8 +35,8 @@ vi.mock("../../../src/data/index.js", () => ({
   })),
 }));
 
-vi.mock("../../../src/modules/model-connections/model-connections.service.js", () => ({
-  resolveModelConnectionForNewSession: mocks.resolveModelConnectionForNewSession,
+vi.mock("../../../src/modules/models/models.service.js", () => ({
+  resolveModelForNewSession: mocks.resolveModelForNewSession,
 }));
 
 vi.mock("../../../src/runtime/workflow.js", () => ({
@@ -73,7 +73,7 @@ describe("handleChat timing", () => {
     vi.clearAllMocks();
     mocks.latestCursor.mockResolvedValue("0");
     mocks.enqueue.mockResolvedValue({ ok: true, queued: 1 });
-    mocks.resolveModelConnectionForNewSession.mockResolvedValue({
+    mocks.resolveModelForNewSession.mockResolvedValue({
       id: "model-1",
       provider: "openai",
       modelName: "gpt-5",
@@ -97,6 +97,10 @@ describe("handleChat timing", () => {
       );
 
       expect(response.status).toBe(200);
+      expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({
+        id: "session-1",
+        name: "hello",
+      }));
       const logs = timingLogs(consoleSpy);
       const phases = logs.map((entry) => entry.phase);
 
@@ -145,9 +149,7 @@ describe("handleChat timing", () => {
       updatedAt: Date.now(),
       maxQueueSize: 100,
       idleTimeout: "7 days",
-      modelConnectionId: "model-1",
-      modelProvider: "openai",
-      modelName: "gpt-5",
+      modelId: "model-1",
     });
 
     const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -196,9 +198,7 @@ describe("handleChat timing", () => {
       updatedAt: Date.now(),
       maxQueueSize: 100,
       idleTimeout: "7 days",
-      modelConnectionId: "model-1",
-      modelProvider: "openai",
-      modelName: "gpt-5",
+      modelId: "model-1",
     });
     const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {

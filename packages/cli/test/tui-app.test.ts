@@ -63,10 +63,24 @@ describe("updateToolCallStatusesFromEvents", () => {
     }];
 
     updateToolCallStatusesFromEvents(toolCalls, [{
-      type: "tool_execution_end",
-      toolCallId: "tool-1",
-      toolName: "execute_code",
-      isError: true,
+      type: "message.updated",
+      message: {
+        id: "assistant-1",
+        sessionId: "session-1",
+        sequence: 1,
+        role: "assistant",
+        status: "complete",
+        content: [{
+          type: "tool_call",
+          id: "tool-1",
+          name: "execute_code",
+          input: {},
+          status: "error",
+          result: { output: {}, text: "failed", isError: true, completedAt: 1 },
+        }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
       timestamp: Date.now(),
       sequence: 1,
     } as never]);
@@ -139,23 +153,23 @@ describe("shouldShowTrailingThinking", () => {
 describe("getEventDisplayMessage", () => {
   it("does not describe user prompt message events as response updates", () => {
     expect(getEventDisplayMessage({
-      type: "message_end",
-      message: { role: "user", content: "hello" },
+      type: "message.completed",
+      message: { role: "user", content: [{ type: "text", text: "hello" }] },
     } as never)).toBeNull();
   });
 
   it("keeps assistant message status stable while streaming", () => {
     expect(getEventDisplayMessage({
-      type: "message_start",
-      message: { role: "assistant", content: "" },
+      type: "message.created",
+      message: { role: "assistant", status: "streaming", content: [{ type: "text", text: "" }] },
     } as never)).toBe("Generating response...");
     expect(getEventDisplayMessage({
-      type: "message_update",
-      message: { role: "assistant", content: "hel" },
+      type: "message.updated",
+      message: { role: "assistant", status: "streaming", content: [{ type: "text", text: "hel" }] },
     } as never)).toBe("Generating response...");
     expect(getEventDisplayMessage({
-      type: "message_end",
-      message: { role: "assistant", content: "hello" },
+      type: "message.completed",
+      message: { role: "assistant", status: "complete", content: [{ type: "text", text: "hello" }] },
     } as never)).toBe("Response ready");
   });
 });
@@ -166,14 +180,14 @@ describe("applyAssistantPartialEvents", () => {
       { role: "user", content: "hello" },
     ], [
       {
-        type: "message_start",
-        message: { role: "assistant", content: [{ type: "text", text: "" }] },
+        type: "message.created",
+        message: { role: "assistant", status: "streaming", content: [{ type: "text", text: "" }] },
         timestamp: Date.now(),
         sequence: 1,
       },
       {
-        type: "message_update",
-        message: { role: "assistant", content: [{ type: "text", text: "streaming" }] },
+        type: "message.updated",
+        message: { role: "assistant", status: "streaming", content: [{ type: "text", text: "streaming" }] },
         timestamp: Date.now(),
         sequence: 2,
       },
@@ -192,14 +206,14 @@ describe("applyAssistantPartialEvents", () => {
       { role: "assistant", content: "final" },
     ], [
       {
-        type: "message_start",
-        message: { role: "assistant", content: [{ type: "text", text: "" }] },
+        type: "message.created",
+        message: { role: "assistant", status: "streaming", content: [{ type: "text", text: "" }] },
         timestamp: Date.now(),
         sequence: 1,
       },
       {
-        type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: "final" }] },
+        type: "message.completed",
+        message: { role: "assistant", status: "complete", content: [{ type: "text", text: "final" }] },
         timestamp: Date.now(),
         sequence: 2,
       },
@@ -220,8 +234,8 @@ describe("ClawflareTUIApp", () => {
       getServerInfo: vi.fn().mockResolvedValue({
         contextWindow: 128000,
         supportedProviders: [],
-        supportsWorkspaceModelConnections: true,
-        workspace: { hasModelConnections: true },
+        supportsWorkspaceModels: true,
+        workspace: { hasModels: true },
       }),
       createSession: vi.fn().mockResolvedValue({
         id: "session-current",

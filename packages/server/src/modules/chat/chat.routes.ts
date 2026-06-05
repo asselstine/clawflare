@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { AppBindings } from "../../http/app-bindings.js";
 import { requireAuth } from "../../middleware/auth.js";
 import type { Env } from "../../internal-types/index.js";
-import type { ChatRequest, ModelProvider } from "../../types.js";
+import type { ChatRequest } from "../../types.js";
 import {
   SessionRepository,
   SessionRunRepository,
@@ -10,11 +10,12 @@ import {
 } from "../../data/index.js";
 import { json, badRequest, gone, tooManyRequests, serverError, unprocessable } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
-import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
+import { resolveModelForNewSession } from "../models/models.service.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import { runSessionRun } from "../../runtime/workflow.js";
 import { seedDefaultSessionTools } from "../tools/tools.service.js";
+import { createSessionTitleFromPrompt } from "../sessions/session-title.js";
 
 export const chatRoutes = new Hono<AppBindings>();
 
@@ -70,7 +71,7 @@ export async function handleChat(
       workspaceId,
       apiRequestId,
       hasSessionId: Boolean(body.sessionId),
-      hasModelConnectionId: body.modelConnectionId !== undefined,
+      hasModelId: body.modelId !== undefined,
       contentLength: typeof body.content === "string" ? body.content.length : undefined,
     });
 
@@ -98,10 +99,10 @@ export async function handleChat(
     let response: Response;
     if (existingSession) {
       // Check if trying to change model on existing session
-      if (body.modelConnectionId !== undefined) {
-        if (body.modelConnectionId !== existingSession.modelConnectionId) {
+      if (body.modelId !== undefined) {
+        if (body.modelId !== existingSession.modelId) {
           return badRequest(
-            "Cannot change model connection for existing session. Create a new session instead."
+            "Cannot change model for existing session. Create a new session instead."
           );
         }
       }
@@ -116,7 +117,7 @@ export async function handleChat(
         workspaceId,
         content,
         maxTurns,
-        body.modelConnectionId,
+        body.modelId,
         requestContext,
         executionCtx,
         {
@@ -232,7 +233,7 @@ async function handleNewSession(
   workspaceId: string,
   content: string,
   maxTurns: number | undefined,
-  modelConnectionId: string | undefined,
+  modelId: string | undefined,
   requestContext: RequestContext,
   executionCtx: ExecutionContext | undefined,
   apiTiming: { apiReceivedAt: number; apiRequestId: string },
@@ -247,28 +248,28 @@ async function handleNewSession(
     apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
   });
 
-  // Resolve model connection for the new session
+  // Resolve model for the new session
   const modelStart = timingStart();
-  const resolvedModel = await resolveModelConnectionForNewSession(
+  const resolvedModel = await resolveModelForNewSession(
     env,
     workspaceId,
-    modelConnectionId,
+    modelId,
     auth
   );
   logTiming(env, sessionId, "chat.model.resolved", modelStart, {
     workspaceId,
     apiRequestId: apiTiming.apiRequestId,
     apiElapsedMs: Date.now() - apiTiming.apiReceivedAt,
-    requestedModelConnectionId: modelConnectionId,
+    requestedModelId: modelId,
     found: Boolean(resolvedModel),
     provider: resolvedModel?.provider,
     modelName: resolvedModel?.modelName,
   });
 
-  // If no model connection is configured, return 422 error immediately
+  // If no model is configured, return 422 error immediately
   if (!resolvedModel) {
     return unprocessable(
-      "No model connection configured for this workspace",
+      "No model configured for this workspace",
       {
         hint: "Use 'clawflare providers add' to add a model provider, then '/models' in the TUI to select it",
       }
@@ -276,27 +277,27 @@ async function handleNewSession(
   }
 
   // If explicit model requested but not found, return error
-  if (modelConnectionId && !resolvedModel) {
+  if (modelId && !resolvedModel) {
     return badRequest(
-      `Model connection "${modelConnectionId}" not found or not configured`
+      `Model "${modelId}" not found or not configured`
     );
   }
 
   const runId = crypto.randomUUID();
+  const sessionName = createSessionTitleFromPrompt(content);
 
   // Initialize session state with workspace and model info
   const initialState: import("../../data/index.js").SessionMetadataState = {
     id: sessionId,
     workspaceId,
     workflowId: runId,
+    name: sessionName,
     status: "processing" as const,
     nextEventCursor: "0",
     updatedAt: Date.now(),
     maxQueueSize: 100,
     idleTimeout: "7 days",
-    modelConnectionId: resolvedModel?.id,
-    modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
-    modelName: resolvedModel?.modelName,
+    modelId: resolvedModel?.id,
   };
   const saveStart = timingStart();
   await sessions.save(initialState);
@@ -332,17 +333,19 @@ async function handleNewSession(
     workspaceId: string;
     eventCursor: string;
     isNewSession: true;
-    modelConnection?: { id: string; provider: string; modelName: string };
+    name?: string;
+    model?: { id: string; provider: string; modelName: string };
   } = {
     sessionId,
     workspaceId,
     eventCursor: initialState.nextEventCursor,
     isNewSession: true,
+    name: sessionName,
   };
 
-  // Include model connection info if available
+  // Include model info if available
   if (resolvedModel) {
-    response.modelConnection = {
+    response.model = {
       id: resolvedModel.id,
       provider: resolvedModel.provider,
       modelName: resolvedModel.modelName,

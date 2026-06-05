@@ -1,6 +1,6 @@
-import type { AgentMessage, SessionEvent, SessionSummary } from "@clawflare/types";
+import type { Message, SessionEvent, SessionSummary } from "@clawflare/types";
 
-export type DisplayMessageRole = "user" | "assistant" | "toolResult" | "error";
+export type DisplayMessageRole = "user" | "assistant" | "system" | "toolResult" | "error";
 export type ToolCallStatus = "pending" | "running" | "complete" | "error";
 
 export interface ToolCallInfo {
@@ -37,25 +37,18 @@ export function formatSessionTitle(session: SessionSummary): string {
 
 export function getEventDisplayMessage(event: SessionEvent): string | null {
   switch (event.type) {
-    case "tool_execution_start":
-      return `Running ${event.toolName}`;
-    case "tool_execution_end":
-      return `${event.toolName} ${event.isError ? "failed" : "completed"}`;
-    case "tool_execution_update":
-      return `${event.toolName} updating`;
-    case "agent_start":
-      return "Agent started";
-    case "agent_end":
-      return "Complete";
-    case "turn_start":
-      return "Turn started";
-    case "turn_end":
-      return "Turn completed";
-    case "message_start":
-    case "message_update":
+    case "message.created":
+    case "message.updated": {
+      const runningTool = event.message.content.find((block) => block.type === "tool_call" && block.status === "running");
+      if (runningTool?.type === "tool_call") return `Running ${runningTool.name}`;
       return getEventMessageRole(event) === "assistant" ? "Generating response" : null;
-    case "message_end":
+    }
+    case "message.completed":
       return getEventMessageRole(event) === "assistant" ? "Response ready" : null;
+    case "message.errored":
+      return "Message failed";
+    case "session.status_changed":
+      return event.status === "idle" ? "Complete" : event.status;
     default:
       return "Processing";
   }
@@ -94,7 +87,7 @@ export function formatToolCallHeader(toolName: string, params: Record<string, un
   }
 }
 
-export function formatMessageForDisplay(message: AgentMessage): DisplayMessage {
+export function formatMessageForDisplay(message: Message): DisplayMessage {
   const role = toDisplayRole(message.role);
   const content = getMessageContent(message);
 
@@ -107,61 +100,41 @@ export function formatMessageForDisplay(message: AgentMessage): DisplayMessage {
     };
   }
 
-  if (role !== "toolResult") {
-    return { role, content: extractTextContent(content) };
-  }
-
-  const toolMessage = message as AgentMessage & {
-    toolName?: string;
-    isError?: boolean;
-    details?: unknown;
-  };
-  const toolName = toolMessage.toolName ?? "tool";
-
-  return {
-    role,
-    toolName,
-    isError: getPersistedToolResultIsError(toolMessage),
-    details: toolMessage.details,
-    content: `${toolName}: ${extractTextContent(content)}`,
-  };
+  return { role, content: extractTextContent(content) };
 }
 
 export function formatMessagesFromEvents(events: SessionEvent[]): DisplayMessage[] {
-  return events
-    .filter((event) => event.type === "message_end" && "message" in event)
-    .map((event) => formatMessageForDisplay(event.message));
-}
+  const messages: Message[] = [];
+  const byId = new Map<string, number>();
 
-export function attachToolResults(messages: DisplayMessage[]): DisplayMessage[] {
-  const next = messages.map((message) => ({
-    ...message,
-    toolCalls: message.toolCalls?.map((toolCall) => ({ ...toolCall })),
-  }));
-  const assistantToolCallIndex = new Map<number, number>();
+  for (const event of events) {
+    if (event.type === "message.created") {
+      byId.set(event.message.id, messages.length);
+      messages.push(event.message);
+      continue;
+    }
 
-  for (let i = 0; i < next.length; i++) {
-    const msg = next[i];
-    if (msg?.role !== "toolResult" || !msg.toolName) continue;
-
-    for (let j = i - 1; j >= 0; j--) {
-      const assistant = next[j];
-      if (assistant?.role !== "assistant" || !assistant.toolCalls?.length) continue;
-
-      const toolIndex = assistantToolCallIndex.get(j) ?? 0;
-      if (toolIndex < assistant.toolCalls.length) {
-        assistant.toolCalls[toolIndex] = {
-          ...assistant.toolCalls[toolIndex]!,
-          result: msg,
-          status: msg.isError ? "error" : "complete",
-        };
-        assistantToolCallIndex.set(j, toolIndex + 1);
+    if (event.type === "message.updated" || event.type === "message.completed") {
+      const index = byId.get(event.message.id);
+      if (index === undefined) {
+        byId.set(event.message.id, messages.length);
+        messages.push(event.message);
+      } else {
+        messages[index] = event.message;
       }
-      break;
     }
   }
 
-  return next.filter((message) => message.role !== "toolResult");
+  return messages
+    .sort((a, b) => a.sequence - b.sequence)
+    .map(formatMessageForDisplay);
+}
+
+export function attachToolResults(messages: DisplayMessage[]): DisplayMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    toolCalls: message.toolCalls?.map((toolCall) => ({ ...toolCall })),
+  }));
 }
 
 export function applyAssistantPartialEvents(messages: DisplayMessage[], events: SessionEvent[]): DisplayMessage[] {
@@ -175,7 +148,6 @@ export function applyAssistantPartialEvents(messages: DisplayMessage[], events: 
 
   for (const event of events) {
     if (!("message" in event)) continue;
-    if (event.type !== "message_start" && event.type !== "message_update" && event.type !== "message_end") continue;
     if (eventMessageRole(event.message) !== "assistant") continue;
 
     const index = ensureAssistant();
@@ -184,7 +156,7 @@ export function applyAssistantPartialEvents(messages: DisplayMessage[], events: 
     next[index] = {
       ...next[index]!,
       content: extractTextContent(content),
-      streaming: event.type !== "message_end",
+      streaming: event.message.status !== "complete",
       toolCalls: toolCalls.length ? toolCalls : next[index]!.toolCalls,
     };
   }
@@ -198,23 +170,19 @@ export function updateToolCallStatusesFromEvents(messages: DisplayMessage[], eve
     return {
       ...message,
       toolCalls: message.toolCalls.map((toolCall) => {
-        const event = [...events].reverse().find((candidate) => "toolCallId" in candidate && candidate.toolCallId === toolCall.id);
-        if (!event) return toolCall;
-        if (event.type === "tool_execution_start") return { ...toolCall, status: "running" };
-        if (event.type === "tool_execution_end") return { ...toolCall, status: event.isError ? "error" : "complete" };
-        if (event.type === "tool_execution_update" && "status" in event) {
-          const status = event.status;
-          if (status === "running" || status === "complete" || status === "error") return { ...toolCall, status };
-        }
+        const block = [...events]
+          .reverse()
+          .flatMap((event) => "message" in event ? event.message.content : [])
+          .find((candidate) => candidate.type === "tool_call" && candidate.id === toolCall.id);
+        if (block?.type === "tool_call") return toolCallFromBlock(block as unknown as Record<string, unknown>);
         return toolCall;
       }),
     };
   });
 }
 
-export function isSessionComplete(status: string, eventCount: number): boolean {
-  const done = status === "idle" || status === "error" || status === "closed" || status === "expired";
-  return done && eventCount < 100;
+export function isSessionComplete(status: string): boolean {
+  return status === "idle" || status === "error" || status === "closed" || status === "expired";
 }
 
 function getEventMessageRole(event: SessionEvent): string | undefined {
@@ -222,18 +190,18 @@ function getEventMessageRole(event: SessionEvent): string | undefined {
   return eventMessageRole(event.message);
 }
 
-function eventMessageRole(message: AgentMessage): string | undefined {
+function eventMessageRole(message: Message): string | undefined {
   return typeof message.role === "string" ? message.role : undefined;
 }
 
 function toDisplayRole(role: string): DisplayMessageRole {
-  if (role === "user" || role === "assistant" || role === "toolResult") return role;
+  if (role === "user" || role === "assistant" || role === "system") return role;
   return "error";
 }
 
-function getMessageContent(message: AgentMessage): string | Array<Record<string, unknown>> | undefined {
+function getMessageContent(message: Message): string | Array<Record<string, unknown>> | undefined {
   if (!("content" in message)) return undefined;
-  return message.content as string | Array<Record<string, unknown>> | undefined;
+  return message.content as unknown as string | Array<Record<string, unknown>> | undefined;
 }
 
 function extractTextContent(content: string | Array<Record<string, unknown>> | undefined): string {
@@ -248,18 +216,31 @@ function extractTextContent(content: string | Array<Record<string, unknown>> | u
 function extractToolCalls(content: string | Array<Record<string, unknown>> | undefined): ToolCallInfo[] {
   if (!Array.isArray(content)) return [];
   return content
-    .filter((part) => part.type === "toolCall")
-    .map((part) => ({
-      id: typeof part.id === "string" ? part.id : "",
-      name: typeof part.name === "string" ? part.name : "tool",
-      params: isRecord(part.arguments) ? part.arguments : {},
-      status: "pending",
-    }));
+    .filter((part) => part.type === "toolCall" || part.type === "tool_call")
+    .map(toolCallFromBlock);
 }
 
-function getPersistedToolResultIsError(toolResult: { isError?: boolean; details?: unknown }): boolean {
-  const details = toolResult.details;
-  return Boolean(toolResult.isError) || (isRecord(details) && details.ok === false);
+function toolCallFromBlock(part: Record<string, unknown>): ToolCallInfo {
+  const result = isRecord(part.result) ? part.result : undefined;
+  return {
+    id: typeof part.id === "string" ? part.id : "",
+    name: typeof part.name === "string" ? part.name : "tool",
+    params: isRecord(part.arguments) ? part.arguments : isRecord(part.input) ? part.input : {},
+    status: toolCallStatus(part.status),
+    result: result
+      ? {
+          role: "toolResult",
+          toolName: typeof part.name === "string" ? part.name : "tool",
+          isError: Boolean(result.isError),
+          details: result.output,
+          content: typeof result.text === "string" ? result.text : JSON.stringify(result.output),
+        }
+      : undefined,
+  };
+}
+
+function toolCallStatus(value: unknown): ToolCallStatus {
+  return value === "running" || value === "complete" || value === "error" ? value : "pending";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

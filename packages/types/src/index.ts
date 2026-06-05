@@ -1,8 +1,56 @@
-import type { AgentMessage, AgentEvent } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 export type { AgentMessage, AgentEvent } from "@earendil-works/pi-agent-core";
 
-export type SessionEvent = AgentEvent & {
+export type MessageRole = "user" | "assistant" | "system";
+
+export type MessageStatus = "queued" | "streaming" | "complete" | "error";
+
+export type ToolCallStatus = "queued" | "running" | "complete" | "error";
+
+export interface TextContentBlock {
+  type: "text";
+  text: string;
+}
+
+export interface ToolResult {
+  output: unknown;
+  text?: string;
+  isError: boolean;
+  startedAt?: number;
+  completedAt: number;
+}
+
+export interface ToolCallContentBlock {
+  type: "tool_call";
+  id: string;
+  name: string;
+  input: unknown;
+  status: ToolCallStatus;
+  result?: ToolResult;
+}
+
+export type MessageContentBlock = TextContentBlock | ToolCallContentBlock;
+
+export interface Message {
+  id: string;
+  sessionId: string;
+  sequence: number;
+  role: MessageRole;
+  status: MessageStatus;
+  content: MessageContentBlock[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type SessionDelta =
+  | { type: "message.created"; message: Message }
+  | { type: "message.updated"; message: Message }
+  | { type: "message.completed"; message: Message }
+  | { type: "message.errored"; messageId: string; error: string }
+  | { type: "session.status_changed"; status: SessionStatus; errorMessage?: string };
+
+export type SessionEvent = SessionDelta & {
   timestamp: number;
   sequence: number;
 };
@@ -19,7 +67,7 @@ export interface ChatRequest {
   content: string;
   sessionId?: string;
   maxTurns?: number;
-  modelConnectionId?: string;
+  modelId?: string;
 }
 
 export interface ChatSubmittedResponse {
@@ -27,7 +75,8 @@ export interface ChatSubmittedResponse {
   workspaceId: string;
   eventCursor: string;
   isNewSession: boolean;
-  modelConnection?: {
+  name?: string;
+  model?: {
     id: string;
     provider: ModelProvider;
     modelName: string;
@@ -39,9 +88,14 @@ export interface SessionResponse {
   workspaceId: string;
   name?: string;
   status: SessionStatus;
-  messages?: AgentMessage[];
+  messages: Message[];
   events: SessionEvent[];
   nextEventCursor: string;
+  nextMessageCursor: string;
+  promptHistory?: {
+    systemPrompt: string;
+    messages: AgentMessage[];
+  };
   errorMessage?: string;
 }
 
@@ -54,9 +108,8 @@ export interface SessionSummary {
   messageCount: number;
   updatedAt: number;
   isActive: boolean;
-  modelConnectionId?: string;
-  modelProvider?: ModelProvider;
-  modelName?: string;
+  modelId?: string;
+  containers?: string[];
 }
 
 export interface SessionListResponse {
@@ -66,7 +119,7 @@ export interface SessionListResponse {
 
 export interface CreateSessionRequest {
   sessionId?: string;
-  modelConnectionId?: string;
+  modelId?: string;
   parentSessionId?: string;
   parentMessageId?: string;
 }
@@ -76,7 +129,7 @@ export interface CreateSessionResponse {
   workspaceId: string;
   eventCursor: string;
   createdAt: number;
-  modelConnection?: {
+  model?: {
     id: string;
     provider: ModelProvider;
     modelName: string;
@@ -150,6 +203,28 @@ export interface ProviderModelsResponse {
   models: ProviderModelInfo[];
 }
 
+export interface WorkspaceProvider {
+  id: string;
+  workspaceId: string;
+  provider: ModelProvider;
+  providerDisplayName?: string;
+  configuredSecrets: string[];
+  requiredSecrets: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface WorkspaceProviderListResponse {
+  providers: WorkspaceProvider[];
+}
+
+export interface CreateWorkspaceProviderRequest {
+  provider: ModelProvider;
+  providerDisplayName?: string;
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+}
+
 export interface EgressHandlerInfo {
   egressHandlerId: string;
   name: string;
@@ -190,11 +265,13 @@ export interface UpdateEgressHandlerRequest {
   enabled?: boolean;
 }
 
-export interface ModelConnection {
+export interface Model {
   id: string;
   workspaceId: string;
+  providerId: string;
   displayName?: string;
   provider: ModelProvider;
+  providerDisplayName?: string;
   modelName: string;
   configuredSecrets: string[];
   requiredSecrets: string[];
@@ -202,35 +279,40 @@ export interface ModelConnection {
   updatedAt: number;
 }
 
-export interface ModelConnectionListResponse {
-  modelConnections: ModelConnection[];
-  defaultModelConnectionId?: string;
+export interface ModelListResponse {
+  models: Model[];
+  defaultModelId?: string;
 }
 
-export interface CreateModelConnectionRequest {
+export interface CreateModelRequest {
   displayName?: string;
   provider: ModelProvider;
+  providerId?: string;
+  providerDisplayName?: string;
   modelName: string;
-  secrets: Record<string, string>;
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  providerConfig?: Record<string, unknown>;
   setAsDefault?: boolean;
 }
 
-export interface UpdateModelConnectionRequest {
+export interface UpdateModelRequest {
   displayName?: string | null;
-  provider?: ModelProvider;
   modelName?: string;
   secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  providerConfig?: Record<string, unknown>;
 }
 
-export interface SetDefaultModelConnectionRequest {
-  modelConnectionId: string | null;
+export interface SetDefaultModelRequest {
+  modelId: string | null;
 }
 
 export interface ServerInfo {
   contextWindow: number;
-  supportsWorkspaceModelConnections: boolean;
+  supportsWorkspaceModels: boolean;
   supportedProviders: string[];
   workspace?: {
-    hasModelConnections: boolean;
+    hasModels: boolean;
   };
 }

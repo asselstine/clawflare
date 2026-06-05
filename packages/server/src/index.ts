@@ -36,10 +36,10 @@ export type {
   UpsertStoredCodeParams,
   EgressHandlerMetadata,
   UpsertEgressHandlerParams,
-  // Model connection types
+  // Model types
   ModelProvider,
-  CreateModelConnectionParams,
-  UpdateModelConnectionParams,
+  CreateModelParams,
+  UpdateModelParams,
 } from "./data/index.js";
 
 // Export data layer errors
@@ -141,24 +141,24 @@ export {
   defineHttpEgressHandler,
 } from "@clawflare/egress-core";
 
-// Export model connection types
+// Export model types
 export type {
-  ModelConnection,
-  ModelConnectionListResponse,
+  Model,
+  ModelListResponse,
 } from "./types.js";
 
-// Export model connection service
+// Export model service
 export {
-  createModelConnection,
-  updateModelConnection,
-  deleteModelConnection,
-  resolveModelConnection,
-  listModelConnections,
-  resolveModelConnectionForSession,
-  resolveModelConnectionForNewSession,
-  type ResolvedModelConnection,
-  type CreateModelConnectionResult,
-} from "./modules/model-connections/model-connections.service.js";
+  createModel,
+  updateModel,
+  deleteModel,
+  resolveModel,
+  listModels,
+  resolveModelForSession,
+  resolveModelForNewSession,
+  type ResolvedModel,
+  type CreateModelResult,
+} from "./modules/models/models.service.js";
 
 // Export provider catalog utilities
 export {
@@ -171,15 +171,15 @@ export {
   type ProviderDefinition,
 } from "./modules/providers/providers.catalog.js";
 
-// Export model connection validation and response helpers
+// Export model validation and response helpers
 export {
-  validateModelConnectionInput,
-  redactModelConnection,
-  redactModelConnections,
-  type ModelConnectionInput,
-  type ParsedModelConnection,
-  type PublicModelConnection,
-} from "./modules/model-connections/model-connections.validation.js";
+  validateModelInput,
+  redactModel,
+  redactModels,
+  type ModelInput,
+  type ParsedModel,
+  type PublicModel,
+} from "./modules/models/models.validation.js";
 
 // Export secret broker client and authorization types
 export {

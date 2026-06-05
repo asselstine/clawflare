@@ -7,7 +7,7 @@ import { password, select, confirm } from "@inquirer/prompts";
 import { loadConfig } from "./login.js";
 import { DEFAULT_SERVER } from "../constants.js";
 import { AgentClient } from "../client.js";
-import type { ModelConnection, ProviderInfo, ProviderModelInfo } from "@clawflare/types";
+import type { Model, ProviderInfo, ProviderModelInfo } from "@clawflare/types";
 
 interface AddOptions {
   server?: string;
@@ -58,11 +58,11 @@ async function fetchProviderModels(
 }
 
 /**
- * Fetch existing model connections from the server
+ * Fetch existing models from the server
  */
-async function fetchModelConnections(client: AgentClient): Promise<ModelConnection[]> {
-  const { modelConnections } = await client.listModelConnections();
-  return modelConnections;
+async function fetchModels(client: AgentClient): Promise<Model[]> {
+  const { models } = await client.listModels();
+  return models;
 }
 
 /**
@@ -161,30 +161,30 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
 
   // Check if user wants to set as default
   const setAsDefault = await confirm({
-    message: "Set as default model connection?",
+    message: "Set as default model?",
     default: true,
   });
 
-  console.log("\nCreating model connection...");
+  console.log("\nCreating model...");
 
   try {
-    const connection = await client.createModelConnection({
+    const model = await client.createModel({
       provider: selectedProvider.id,
       modelName: selectedModel.id,
       secrets,
       setAsDefault,
     });
 
-    console.log(`\n✓ Model connection created successfully!`);
-    console.log(`  ID: ${connection.id}`);
-    console.log(`  Provider: ${connection.provider}`);
-    console.log(`  Model: ${connection.modelName}`);
+    console.log(`\n✓ Model created successfully!`);
+    console.log(`  ID: ${model.id}`);
+    console.log(`  Provider: ${model.provider}`);
+    console.log(`  Model: ${model.modelName}`);
     if (setAsDefault) {
       console.log(`  Set as default: Yes`);
     }
   } catch (error) {
     console.error(
-      `\n✗ Failed to create model connection: ${
+      `\n✗ Failed to create model: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -198,41 +198,41 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
 export async function providersRemoveCommand(options: RemoveOptions): Promise<void> {
   const client = await getClient(options);
 
-  const connections = await fetchModelConnections(client);
+  const models = await fetchModels(client);
 
-  if (connections.length === 0) {
-    console.log("No model connections to remove.");
+  if (models.length === 0) {
+    console.log("No models to remove.");
     return;
   }
 
-  let connectionId: string;
+  let modelId: string;
 
   if (options.name) {
     // Find by display name or id
-    const match = connections.find(
+    const match = models.find(
       (c) => c.displayName === options.name || c.id === options.name
     );
     if (!match) {
-      console.error(`Error: Model connection "${options.name}" not found.`);
+      console.error(`Error: Model "${options.name}" not found.`);
       process.exit(1);
     }
-    connectionId = match.id;
+    modelId = match.id;
   } else {
     // Interactive selection
-    const choices = connections.map((c) => ({
+    const choices = models.map((c) => ({
       name: c.displayName || `${c.provider} - ${c.modelName}`,
       value: c.id,
       description: `ID: ${c.id.slice(0, 8)}...`,
     }));
 
-    connectionId = await select({
-      message: "Select a model connection to remove:",
+    modelId = await select({
+      message: "Select a model to remove:",
       choices,
     });
   }
 
   const confirmDelete = await confirm({
-    message: "Are you sure you want to remove this model connection?",
+    message: "Are you sure you want to remove this model?",
     default: false,
   });
 
@@ -241,14 +241,14 @@ export async function providersRemoveCommand(options: RemoveOptions): Promise<vo
     return;
   }
 
-  console.log("\nRemoving model connection...");
+  console.log("\nRemoving model...");
 
   try {
-    await client.deleteModelConnection(connectionId);
-    console.log("\n✓ Model connection removed successfully!");
+    await client.deleteModel(modelId);
+    console.log("\n✓ Model removed successfully!");
   } catch (error) {
     console.error(
-      `\n✗ Failed to remove model connection: ${
+      `\n✗ Failed to remove model: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -293,27 +293,27 @@ export async function providersListCommand(options: ListOptions): Promise<void> 
 }
 
 /**
- * List configured model connections
+ * List configured models
  */
 export async function modelsListCommand(options: ListOptions): Promise<void> {
   const client = await getClient(options);
 
   try {
-    const connections = await fetchModelConnections(client);
+    const connections = await fetchModels(client);
 
     if (connections.length === 0) {
-      console.log("\nNo model connections configured.");
+      console.log("\nNo models configured.");
       console.log("Run 'clawflare providers add' to add a provider and model.\n");
       return;
     }
 
-    console.log("\nConfigured model connections:\n");
+    console.log("\nConfigured models:\n");
 
     // Get default
-    const { defaultModelConnectionId } = await client.listModelConnections();
+    const { defaultModelId } = await client.listModels();
 
     for (const conn of connections) {
-      const isDefault = conn.id === defaultModelConnectionId;
+      const isDefault = conn.id === defaultModelId;
       console.log(`  ${conn.displayName || `${conn.provider} - ${conn.modelName}`}`);
       console.log(`    ID: ${conn.id}`);
       console.log(`    Provider: ${conn.provider}`);

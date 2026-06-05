@@ -8,7 +8,7 @@
  * - Both the encrypted DEK and ciphertext are stored in D1
  * - The KEK is stored in Cloudflare Secret Store and never leaves
  *
- * Key format: workspaces/{workspaceId}/model-connections/{connectionId}/{secretKey}
+ * Key format: workspaces/{workspaceId}/providers/{providerId}/{secretKey}
  */
 
 

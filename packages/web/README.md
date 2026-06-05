@@ -53,7 +53,7 @@ The values are stored in browser local storage and sent directly from the browse
   - `/cf_debug [key]`
   - `/clear`
   - `/help`
-- Model connection setup and default model selection
+- Provider setup and default model selection
 - Egress handler configuration, enable/disable, and deletion
 - Tool definition browser
 - `cf_debug` panel for session storage inspection

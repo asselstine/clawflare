@@ -2,7 +2,8 @@ import type {
   ChatRequest,
   ChatSubmittedResponse,
   ConfigureEgressHandlerRequest,
-  CreateModelConnectionRequest,
+  CreateWorkspaceProviderRequest,
+  CreateModelRequest,
   CreateSessionRequest,
   CreateSessionResponse,
   DeleteSessionResponse,
@@ -10,8 +11,8 @@ import type {
   EgressHandlerInfo,
   EgressHandlerListResponse,
   KillSessionResponse,
-  ModelConnection,
-  ModelConnectionListResponse,
+  Model,
+  ModelListResponse,
   ProviderInfo,
   ProviderListResponse,
   ProviderModelInfo,
@@ -20,7 +21,9 @@ import type {
   SessionListResponse,
   SessionResponse,
   UpdateEgressHandlerRequest,
-  UpdateModelConnectionRequest,
+  UpdateModelRequest,
+  WorkspaceProvider,
+  WorkspaceProviderListResponse,
 } from "@clawflare/types";
 import { isSessionComplete } from "./format";
 
@@ -29,6 +32,8 @@ interface StreamUpdate {
   newEvents: SessionResponse["events"];
   complete: boolean;
 }
+
+const SESSION_EVENT_PAGE_SIZE = 100;
 
 export interface DeviceStartResponse {
   deviceCode: string;
@@ -109,13 +114,15 @@ export class ClawflareApiClient {
     sessionId: string,
     cursor?: string,
     includeMessages: boolean | "auto" = "auto",
-    options: { eventWindow?: "tail"; eventLimit?: number } = {},
+    options: { eventWindow?: "tail" | "before"; eventLimit?: number; before?: string; includePromptHistory?: boolean } = {},
   ): Promise<SessionResponse> {
     const params = new URLSearchParams();
     if (cursor) params.set("since", cursor);
     params.set("includeMessages", includeMessages === "auto" ? "auto" : includeMessages ? "1" : "0");
     if (options.eventWindow) params.set("eventWindow", options.eventWindow);
     if (options.eventLimit !== undefined) params.set("eventLimit", String(options.eventLimit));
+    if (options.before) params.set("before", options.before);
+    if (options.includePromptHistory) params.set("includePromptHistory", "1");
     return this.requestJson<SessionResponse>(`/v1/session/${encodeURIComponent(sessionId)}?${params.toString()}`);
   }
 
@@ -139,6 +146,10 @@ export class ClawflareApiClient {
     return this.requestJson(`/v1/session/${encodeURIComponent(sessionId)}/close`, { method: "POST" });
   }
 
+  async abortSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string; aborted: boolean }> {
+    return this.requestJson(`/v1/session/${encodeURIComponent(sessionId)}/abort`, { method: "POST" });
+  }
+
   async killSession(sessionId: string): Promise<KillSessionResponse> {
     return this.requestJson<KillSessionResponse>(`/v1/session/${encodeURIComponent(sessionId)}/kill`, { method: "POST" });
   }
@@ -156,6 +167,17 @@ export class ClawflareApiClient {
     return data.tools ?? [];
   }
 
+  async invokeTool<TDetails = unknown>(
+    sessionId: string,
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<{ tool: string; result: { content?: Array<{ type: string; text?: string }>; details?: TDetails } }> {
+    return this.requestJson(`/v1/tools/${encodeURIComponent(name)}`, {
+      method: "POST",
+      body: JSON.stringify({ sessionId, input }),
+    });
+  }
+
   async listProviders(): Promise<ProviderInfo[]> {
     const data = await this.requestJson<ProviderListResponse>("/v1/providers");
     return data.providers ?? [];
@@ -166,34 +188,47 @@ export class ClawflareApiClient {
     return data.models ?? [];
   }
 
-  async listModelConnections(): Promise<ModelConnectionListResponse> {
-    return this.requestJson<ModelConnectionListResponse>("/v1/model-connections");
+  async listConfiguredProviders(): Promise<WorkspaceProvider[]> {
+    const data = await this.requestJson<WorkspaceProviderListResponse>("/v1/providers/configured");
+    return data.providers ?? [];
   }
 
-  async createModelConnection(input: CreateModelConnectionRequest): Promise<ModelConnection> {
-    const data = await this.requestJson<{ modelConnection: ModelConnection }>("/v1/model-connections", {
+  async createProvider(input: CreateWorkspaceProviderRequest): Promise<WorkspaceProvider> {
+    const data = await this.requestJson<{ provider: WorkspaceProvider }>("/v1/providers", {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return data.modelConnection;
+    return data.provider;
   }
 
-  async updateModelConnection(id: string, input: UpdateModelConnectionRequest): Promise<ModelConnection> {
-    const data = await this.requestJson<{ modelConnection: ModelConnection }>(`/v1/model-connections/${encodeURIComponent(id)}`, {
+  async listModels(): Promise<ModelListResponse> {
+    return this.requestJson<ModelListResponse>("/v1/models");
+  }
+
+  async createModel(input: CreateModelRequest): Promise<Model> {
+    const data = await this.requestJson<{ model: Model }>("/v1/models", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    return data.model;
+  }
+
+  async updateModel(id: string, input: UpdateModelRequest): Promise<Model> {
+    const data = await this.requestJson<{ model: Model }>(`/v1/models/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(input),
     });
-    return data.modelConnection;
+    return data.model;
   }
 
-  async deleteModelConnection(id: string): Promise<{ ok: boolean }> {
-    return this.requestJson<{ ok: boolean }>(`/v1/model-connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+  async deleteModel(id: string): Promise<{ ok: boolean }> {
+    return this.requestJson<{ ok: boolean }>(`/v1/models/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
-  async setDefaultModelConnection(modelConnectionId: string | null): Promise<{ ok: boolean; defaultModelConnectionId?: string }> {
-    return this.requestJson("/v1/workspace/default-model-connection", {
+  async setDefaultModel(modelId: string | null): Promise<{ ok: boolean; defaultModelId?: string }> {
+    return this.requestJson("/v1/workspace/default-model", {
       method: "PUT",
-      body: JSON.stringify({ modelConnectionId }),
+      body: JSON.stringify({ modelId }),
     });
   }
 
@@ -248,7 +283,7 @@ export class ClawflareApiClient {
   }
 
   private async *streamSessionSse(sessionId: string, initialCursor?: string, signal?: AbortSignal): AsyncGenerator<StreamUpdate> {
-    const params = new URLSearchParams({ includeMessages: "auto" });
+    const params = new URLSearchParams({ includeMessages: "auto", includePromptHistory: "1" });
     if (initialCursor) params.set("since", initialCursor);
     const response = await this.request(`/v1/session/${encodeURIComponent(sessionId)}/events?${params.toString()}`, {
       headers: { Accept: "text/event-stream" },
@@ -259,6 +294,7 @@ export class ClawflareApiClient {
     if (!response.ok) throw new Error(await responseErrorMessage(response));
     if (!response.body) throw new Error("Event stream response has no body");
 
+    let sawActivity = false;
     for await (const event of parseServerSentEvents(response.body)) {
       if (event.event === "heartbeat") continue;
       if (event.event === "error") throw new Error(event.data || "Session stream failed");
@@ -266,22 +302,28 @@ export class ClawflareApiClient {
 
       const session = safeJsonParse<SessionResponse>(event.data);
       if (!session) continue;
+      sawActivity = sawActivity || session.status === "processing" || session.events.length > 0;
+      const complete = isStreamComplete(session, sawActivity);
       yield {
         session,
         newEvents: session.events,
-        complete: isSessionComplete(session.status, session.events.length),
+        complete,
       };
-      if (isSessionComplete(session.status, session.events.length)) return;
+      if (complete) return;
     }
+
+    throw new Error("Session event stream closed before completion");
   }
 
   private async *pollSession(sessionId: string, initialCursor?: string, signal?: AbortSignal): AsyncGenerator<StreamUpdate> {
     let cursor = initialCursor;
+    let sawActivity = false;
     for (let i = 0; i < 10_000; i++) {
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
-      const session = await this.getSession(sessionId, cursor, "auto");
+      const session = await this.getSession(sessionId, cursor, "auto", { includePromptHistory: true });
       cursor = session.nextEventCursor;
-      const complete = isSessionComplete(session.status, session.events.length);
+      sawActivity = sawActivity || session.status === "processing" || session.events.length > 0;
+      const complete = isStreamComplete(session, sawActivity);
       yield { session, newEvents: session.events, complete };
       if (complete) return;
       await new Promise((resolve) => setTimeout(resolve, i < 6 ? 100 : 350));
@@ -292,7 +334,15 @@ export class ClawflareApiClient {
   private async requestJson<T>(path: string, init: RequestOptions = {}): Promise<T> {
     const response = await this.request(path, init);
     if (!response.ok) throw new Error(await responseErrorMessage(response));
-    return response.json() as Promise<T>;
+    const text = await response.text();
+    if (!text || text === "undefined") {
+      throw new Error(`Expected JSON from ${path}, received ${text ? "invalid" : "empty"} response`);
+    }
+    const parsed = safeJsonParse<T>(text);
+    if (parsed === null) {
+      throw new Error(`Expected JSON from ${path}, received invalid response`);
+    }
+    return parsed;
   }
 
   private request(path: string, init: RequestOptions = {}): Promise<Response> {
@@ -301,6 +351,12 @@ export class ClawflareApiClient {
     if (!init.skipJsonContentType && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     return fetch(`${this.baseUrl}${path}`, { ...init, headers });
   }
+}
+
+function isStreamComplete(session: SessionResponse, sawActivity: boolean): boolean {
+  if (!isSessionComplete(session.status)) return false;
+  if (session.events.length >= SESSION_EVENT_PAGE_SIZE) return false;
+  return sawActivity || session.status !== "idle";
 }
 
 interface ParsedSse {

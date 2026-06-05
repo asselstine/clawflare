@@ -2,10 +2,10 @@ import type { AgentEvent, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Env } from "../internal-types/index.js";
 import {
   SessionEventRepository,
+  SessionMessageRepository,
   SessionRepository,
   SessionRunRepository,
   SessionRuntimeRepository,
-  type NewSessionEvent,
   type SessionRun,
   type SessionInputEvent,
 } from "../data/index.js";
@@ -27,10 +27,14 @@ import {
 } from "../lib/timing.js";
 import { logger, errorMessage } from "../lib/logger.js";
 import {
-  resolveModelConnection,
-  resolveModelConnectionForSession,
-  type ResolvedModelConnection,
-} from "../modules/model-connections/model-connections.service.js";
+  resolveModel,
+  resolveModelForSession,
+  type ResolvedModel,
+} from "../modules/models/models.service.js";
+import {
+  appendSessionStatusEvent,
+  projectAndAppendAgentEvents,
+} from "./message-projection.js";
 
 const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web service. Your core tools allow you to execute code, and egress handlers can afford authorized fetches from external HTTP APIs and supported HTTPS protocol endpoints such as native Git smart HTTP. Before saying you lack access to an external service, account, resource, profile, API, or HTTPS git remote, inspect the configured egress handlers with your search tool. Treat enabled, configured egress handlers as available authenticated routes for matching domains; treat unavailable or disabled handlers as not currently usable. If an authenticated request reaches the service but receives a 401 or 403, report that the configured credential was rejected or lacks permission instead of claiming no credential path exists. When using code execution tools, provide JavaScript as an ES module with a default exported async function: export default async function(input, env) { ... }. Return values or write to console.log for any output that should be visible; do not infer or invent results that are absent from tool output.
 
@@ -44,7 +48,7 @@ interface StoredWorkflowSession {
 
 interface WorkflowAgentContext {
   workspaceId: string;
-  resolvedModel: ResolvedModelConnection | null;
+  resolvedModel: ResolvedModel | null;
   components: BuildAgentComponentsResult;
   mockAI: boolean;
   hotContext?: WorkflowHotContext;
@@ -52,8 +56,8 @@ interface WorkflowAgentContext {
 
 interface WorkflowHotContext {
   workspaceId: string;
-  modelConnectionId?: string | null;
-  resolvedModel: ResolvedModelConnection | null;
+  modelId?: string | null;
+  resolvedModel: ResolvedModel | null;
   toolRefs?: string[];
   cachedAt: number;
 }
@@ -90,7 +94,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
 }
 
-function isResolvedModelConnection(value: unknown): value is ResolvedModelConnection {
+function isResolvedModel(value: unknown): value is ResolvedModel {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -105,8 +109,8 @@ function isWorkflowHotContext(value: unknown): value is WorkflowHotContext {
   return (
     isRecord(value) &&
     typeof value.workspaceId === "string" &&
-    (value.modelConnectionId === undefined || value.modelConnectionId === null || typeof value.modelConnectionId === "string") &&
-    (value.resolvedModel === null || isResolvedModelConnection(value.resolvedModel)) &&
+    (value.modelId === undefined || value.modelId === null || typeof value.modelId === "string") &&
+    (value.resolvedModel === null || isResolvedModel(value.resolvedModel)) &&
     (value.toolRefs === undefined || (Array.isArray(value.toolRefs) && value.toolRefs.every((toolRef) => typeof toolRef === "string"))) &&
     typeof value.cachedAt === "number"
   );
@@ -189,6 +193,7 @@ function optionalNextStepInfo(value: unknown): NextStepInfo | undefined {
 }
 
 function serializeForWorkflow(value: unknown): JsonValue {
+  if (value === undefined) return null;
   return JSON.parse(JSON.stringify(value)) as JsonValue;
 }
 
@@ -196,28 +201,18 @@ function deserializeForWorkflow(serializedJson: string): JsonValue {
   return JSON.parse(serializedJson) as JsonValue;
 }
 
-function messageTimestamp(event: AgentEvent): number | undefined {
-  if (!("message" in event) || !isRecord(event.message)) return undefined;
-  return typeof event.message.timestamp === "number" ? event.message.timestamp : undefined;
-}
-
-function toSessionEvents(events: AgentEvent[]): NewSessionEvent[] {
-  return events.map((event) => ({
-    ...event,
-    timestamp: messageTimestamp(event) ?? Date.now(),
-  }));
-}
-
 async function appendAgentEvents(
   env: Env,
   eventsRepo: SessionEventRepository,
+  messagesRepo: SessionMessageRepository,
   sessionId: string,
   events: AgentEvent[],
+  workspaceId?: string,
   timing?: WorkflowTimingLog,
 ): Promise<void> {
   if (events.length === 0) return;
   const appendStart = timingStart();
-  await eventsRepo.append(sessionId, toSessionEvents(events));
+  await projectAndAppendAgentEvents(eventsRepo, messagesRepo, sessionId, events, { workspaceId });
   (timing ?? ((phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)))("workflow.events.appended", appendStart, {
     eventCount: events.length,
     eventTypes: events.map((event) => event.type),
@@ -229,13 +224,11 @@ async function appendErrorEvent(
   sessionId: string,
   message: string,
 ): Promise<void> {
-  await eventsRepo.append(sessionId, [
-    {
-      type: "error",
-      timestamp: Date.now(),
-      errorMessage: message,
-    },
-  ]);
+  await appendSessionStatusEvent(eventsRepo, sessionId, {
+    type: "session.status_changed",
+    status: "error",
+    errorMessage: message,
+  });
 }
 
 async function createWorkflowAgentContext(
@@ -255,7 +248,7 @@ async function createWorkflowAgentContext(
     const mockAI = shouldUseMockAI(env);
     (timing ?? ((phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)))("workflow.agent_context.cache_hit", cachedStart, {
       workspaceId: cached.workspaceId,
-      modelConnectionId: cached.modelConnectionId,
+      modelId: cached.modelId,
       provider: cached.resolvedModel?.provider,
       modelName: cached.resolvedModel?.modelName,
       toolRefCount: cached.toolRefs?.length,
@@ -271,7 +264,7 @@ async function createWorkflowAgentContext(
       provider: components.model.provider,
       mockAI,
       workspaceId: cached.workspaceId,
-      modelConnectionId: cached.modelConnectionId,
+      modelId: cached.modelId,
       cacheHit: true,
     });
 
@@ -294,23 +287,23 @@ async function createWorkflowAgentContext(
   (timing ?? ((phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)))("workflow.agent_context.session_loaded", sessionStart, {
     found: Boolean(session),
     workspaceId: session?.workspaceId,
-    modelConnectionId: session?.modelConnectionId,
+    modelId: session?.modelId,
   });
   const workspaceId = session?.workspaceId ?? "default-workspace";
 
   const modelStart = timingStart();
-  const resolvedModel = session?.modelConnectionId
-    ? await resolveModelConnection(env, workspaceId, session.modelConnectionId, {
+  const resolvedModel = session?.modelId
+    ? await resolveModel(env, workspaceId, session.modelId, {
         type: "session",
         sessionId,
       })
-    : await resolveModelConnectionForSession(env, sessionId, {
+    : await resolveModelForSession(env, sessionId, {
         type: "session",
         sessionId,
       });
   (timing ?? ((phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)))("workflow.agent_context.model_resolved", modelStart, {
     workspaceId,
-    modelConnectionId: resolvedModel?.id,
+    modelId: resolvedModel?.id,
     provider: resolvedModel?.provider,
     modelName: resolvedModel?.modelName,
   });
@@ -331,13 +324,13 @@ async function createWorkflowAgentContext(
     provider: components.model.provider,
     mockAI,
     workspaceId,
-    modelConnectionId: resolvedModel?.id,
+    modelId: resolvedModel?.id,
     cacheHit: false,
   });
 
   const hotContext: WorkflowHotContext = {
     workspaceId,
-    modelConnectionId: resolvedModel?.id ?? null,
+    modelId: resolvedModel?.id ?? null,
     resolvedModel,
     cachedAt: Date.now(),
   };
@@ -345,7 +338,7 @@ async function createWorkflowAgentContext(
   const cacheSaved = await saveWorkflowHotContext(runtime, sessionId, hotContext, timing);
   (timing ?? ((phase, startedAt, details) => logTiming(env, sessionId, phase, startedAt, details)))("workflow.agent_context.cache_saved", cacheSaveStart, {
     workspaceId,
-    modelConnectionId: resolvedModel?.id,
+    modelId: resolvedModel?.id,
     written: cacheSaved,
   });
 
@@ -381,7 +374,7 @@ async function createWorkflowAgent(
     const hotContext: WorkflowHotContext = {
       ...(preparedContext.hotContext ?? {
         workspaceId,
-        modelConnectionId: resolvedModel?.id ?? null,
+        modelId: resolvedModel?.id ?? null,
         resolvedModel,
       }),
       toolRefs,
@@ -391,7 +384,7 @@ async function createWorkflowAgent(
     preparedContext.hotContext = {
       ...(preparedContext.hotContext ?? {
         workspaceId,
-        modelConnectionId: resolvedModel?.id ?? null,
+        modelId: resolvedModel?.id ?? null,
         resolvedModel,
         cachedAt: Date.now(),
       }),
@@ -410,7 +403,7 @@ async function createWorkflowAgent(
     toolCount: tools.length,
     mockAI,
     workspaceId,
-    modelConnectionId: resolvedModel?.id,
+    modelId: resolvedModel?.id,
     ...(extraTimingDetails?.() ?? {}),
   });
 
@@ -449,7 +442,7 @@ async function loadAgentSession(
     hasStoredSession: Boolean(stored),
     storedSessionValid: isAgentSessionState(stored),
     usedAgentContext: Boolean(agentContext),
-    modelConnectionId: agentContext?.resolvedModel?.id,
+    modelId: agentContext?.resolvedModel?.id,
   });
 
   if (isAgentSessionState(stored)) {
@@ -663,7 +656,17 @@ export async function runSessionRun(
 
     if (error instanceof TimeBudgetExceeded) {
       await repo.releaseRunnable(runId, workerId);
-      timing("workflow.run.yielded", undefined, { runId, reason: "time_budget" });
+      const continuationScheduled = Boolean(options.ctx);
+      timing("workflow.run.yielded", undefined, {
+        runId,
+        reason: "time_budget",
+        continuationScheduled,
+      });
+      options.ctx?.waitUntil(runSessionRun(env, runId, {
+        budgetMs,
+        leaseMs,
+        ctx: options.ctx,
+      }));
       return;
     }
 
@@ -717,6 +720,7 @@ async function processPrompt(
       const stepTiming = createWorkflowTiming(env, sessionId, stepCollector);
       const runtime = new SessionRuntimeRepository(env.DB);
       const events = new SessionEventRepository(env.DB);
+      const messages = new SessionMessageRepository(env.DB);
 
       const loaded = await loadAgentSession(env, sessionId, undefined, stepTiming);
       const loadedSession = loaded.session;
@@ -743,7 +747,7 @@ async function processPrompt(
         });
         return savedSession;
       });
-      const appendEventsPromise = appendAgentEvents(env, events, sessionId, enqueueResult.events, stepTiming).then(() => {
+      const appendEventsPromise = appendAgentEvents(env, events, messages, sessionId, enqueueResult.events, run.workspaceId, stepTiming).then(() => {
         stepTiming("workflow.prompt.events_appended", appendStart, {
           eventCount: enqueueResult.events.length,
           eventTypes: enqueueResult.events.map((event) => event.type),
@@ -761,7 +765,7 @@ async function processPrompt(
           ...promptApiTimingDetails(input),
         });
         const liveEvents = new LiveAgentEventPersister((agentEvents) =>
-          appendAgentEvents(env, events, sessionId, agentEvents, stepTiming)
+          appendAgentEvents(env, events, messages, sessionId, agentEvents, run.workspaceId, stepTiming)
         );
         const agentContext = loaded.agentContext ?? await createWorkflowAgentContext(env, sessionId, stepTiming);
         const agent = await createWorkflowAgent(
@@ -797,7 +801,7 @@ async function processPrompt(
         });
         await liveEvents.flushUpdates();
         const unpersistedEvents = assistantResult.events.filter((event) => !liveEvents.hasHandled(event));
-        await appendAgentEvents(env, events, sessionId, unpersistedEvents, stepTiming);
+        await appendAgentEvents(env, events, messages, sessionId, unpersistedEvents, run.workspaceId, stepTiming);
         nextStep = assistantResult.nextStep ?? null;
       }
 
@@ -834,8 +838,9 @@ async function processPrompt(
           });
           const runtime = new SessionRuntimeRepository(env.DB);
           const events = new SessionEventRepository(env.DB);
+          const messages = new SessionMessageRepository(env.DB);
           const liveEvents = new LiveAgentEventPersister((agentEvents) =>
-            appendAgentEvents(env, events, sessionId, agentEvents, stepTiming)
+            appendAgentEvents(env, events, messages, sessionId, agentEvents, run.workspaceId, stepTiming)
           );
           const result = currentStep.type === "complete"
             ? (() => {
@@ -883,7 +888,7 @@ async function processPrompt(
           });
           await liveEvents.flushUpdates();
           const unpersistedEvents = result.events.filter((event) => !liveEvents.hasHandled(event));
-          await appendAgentEvents(env, events, sessionId, unpersistedEvents, stepTiming);
+          await appendAgentEvents(env, events, messages, sessionId, unpersistedEvents, run.workspaceId, stepTiming);
 
           await flushTimingCollector(env, stepCollector, {
             sessionId,

@@ -116,28 +116,42 @@ export async function handleMockOAuthAutoApprove(
         role: "owner",
       });
 
-      // Create a test model connection for the workspace (required for chat tests)
-      const modelConnectionId = crypto.randomUUID();
+      // Create a test provider and model for the workspace (required for chat tests)
+      const providerId = crypto.randomUUID();
+      const modelId = crypto.randomUUID();
       await env.DB.prepare(`
-        INSERT INTO model_connections 
-          (id, workspace_id, provider, model_name, display_name, secret_refs_json, config_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO providers 
+          (id, workspace_id, provider, display_name, secret_refs_json, config_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
-        modelConnectionId,
+        providerId,
         workspaceId,
         "amazon-bedrock",
-        "minimax.minimax-m2.5",
-        "E2E Test Model",
+        "E2E Test Provider",
         "{}",
         "{}",
         now,
         now
       ).run();
-
-      // Set the model connection as the workspace default
       await env.DB.prepare(`
-        UPDATE workspaces SET default_model_connection_id = ? WHERE id = ?
-      `).bind(modelConnectionId, workspaceId).run();
+        INSERT INTO models
+          (id, workspace_id, provider_id, model_name, display_name, config_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        modelId,
+        workspaceId,
+        providerId,
+        "minimax.minimax-m2.5",
+        "E2E Test Model",
+        "{}",
+        now,
+        now
+      ).run();
+
+      // Set the model as the workspace default
+      await env.DB.prepare(`
+        UPDATE workspaces SET default_model_id = ? WHERE id = ?
+      `).bind(modelId, workspaceId).run();
     }
 
     // Approve the device authorization

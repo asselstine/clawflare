@@ -7,7 +7,7 @@ import type { EncryptedSecretEnvelope } from "../modules/secrets/secrets.crypto.
 
 export interface EncryptedSecretRecord {
   workspaceId: string;
-  /** Format: model-connections/{connectionId}/{secretKey} or other key types */
+  /** Format: providers/{providerId}/{secretKey} or other key types */
   key: string;
   /** Version for forward compatibility */
   v: number;
@@ -28,13 +28,13 @@ export interface EncryptedSecretStore {
 }
 
 /**
- * Create the database key for a model connection secret
+ * Create the database key for a provider secret
  */
 export function createKey(
-  connectionId: string,
+  providerId: string,
   secretKey: string
 ): string {
-  return `model-connections/${connectionId}/${secretKey}`;
+  return `providers/${providerId}/${secretKey}`;
 }
 
 /**

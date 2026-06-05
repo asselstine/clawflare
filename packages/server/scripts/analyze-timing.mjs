@@ -25,7 +25,7 @@ const keyGaps = [
     label: "New session model resolve",
     from: "chat.auth.context_created",
     to: "chat.model.resolved",
-    note: "Large gap suggests model connection lookup or Secret Broker/provider credential resolution overhead.",
+    note: "Large gap suggests model lookup or Secret Broker/provider credential resolution overhead.",
   },
   {
     label: "Session poll event query",
@@ -67,7 +67,7 @@ const keyGaps = [
     label: "Model context lookup",
     from: "workflow.prompt.start",
     to: "workflow.agent_context.model_resolved",
-    note: "Large gap suggests model connection or secret resolution overhead inside the workflow.",
+    note: "Large gap suggests model or secret resolution overhead inside the workflow.",
   },
   {
     label: "Agent components build",

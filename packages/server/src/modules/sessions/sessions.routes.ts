@@ -5,6 +5,7 @@ import type { Env } from "../../internal-types/index.js";
 import {
   ContainerContextRepository,
   SessionEventRepository,
+  SessionMessageRepository,
   SessionRepository,
   SessionRuntimeRepository,
   SessionRunRepository,
@@ -12,13 +13,12 @@ import {
   type SessionMetadataState,
 } from "../../data/index.js";
 import { destroyContainer } from "../tools/container/client.js";
-import type { ModelProvider } from "../../types.js";
 import { badRequest, json, notFound, serverError } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
-import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
+import { resolveModelForNewSession } from "../models/models.service.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
-import type { DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
+import type { AgentMessage, DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
@@ -45,6 +45,9 @@ sessionRoutes.post("/:id/name", (c) =>
 );
 sessionRoutes.post("/:id/close", (c) =>
   handleCloseSession(c.req.param("id"), c.env, c.get("requestContext")!)
+);
+sessionRoutes.post("/:id/abort", (c) =>
+  handleAbortSession(c.req.param("id"), c.env, c.get("requestContext")!)
 );
 sessionRoutes.post("/:id/kill", (c) =>
   handleKillSession(c.req.param("id"), c.env, c.get("requestContext")!)
@@ -93,7 +96,7 @@ export async function handleCreateSession(
   try {
     const body = (await request.json().catch(() => ({}))) as {
       sessionId?: string;
-      modelConnectionId?: string;
+      modelId?: string;
     };
     const sessionId = body.sessionId || crypto.randomUUID();
     // Use workspace from request context
@@ -105,18 +108,18 @@ export async function handleCreateSession(
     // Create authorization context for this request
     const auth = createAuthSession(requestContext);
 
-    // Resolve model connection for the session
-    const resolvedModel = await resolveModelConnectionForNewSession(
+    // Resolve model for the session
+    const resolvedModel = await resolveModelForNewSession(
       env,
       workspaceId,
-      body.modelConnectionId,
+      body.modelId,
       auth
     );
 
     // If explicit model requested but not found, return error
-    if (body.modelConnectionId && !resolvedModel) {
+    if (body.modelId && !resolvedModel) {
       return badRequest(
-        `Model connection "${body.modelConnectionId}" not found or not available`
+        `Model "${body.modelId}" not found or not available`
       );
     }
 
@@ -130,9 +133,7 @@ export async function handleCreateSession(
       updatedAt: Date.now(),
       maxQueueSize: 100,
       idleTimeout: "7 days",
-      modelConnectionId: resolvedModel?.id,
-      modelProvider: (resolvedModel?.provider as ModelProvider | undefined),
-      modelName: resolvedModel?.modelName,
+      modelId: resolvedModel?.id,
     };
     await sessions.save(initialState);
     await seedDefaultSessionTools(env, sessionId);
@@ -143,7 +144,7 @@ export async function handleCreateSession(
       workspaceId,
       eventCursor: initialState.nextEventCursor,
       createdAt: Date.now(),
-      modelConnection: resolvedModel
+      model: resolvedModel
         ? {
             id: resolvedModel.id,
             provider: resolvedModel.provider,
@@ -211,8 +212,8 @@ function delay(ms: number): Promise<void> {
 
 interface BuiltSessionResponse {
   response: SessionResponse;
-  shouldIncludeMessages: boolean;
   eventCount: number;
+  messageCount: number;
   status: SessionStatus;
 }
 
@@ -220,6 +221,25 @@ function sessionEventLimit(url: URL, fallback: number): number {
   const parsed = Number.parseInt(url.searchParams.get("eventLimit") ?? "", 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(parsed, SESSION_EVENT_PAGE_SIZE);
+}
+
+function shouldIncludePromptHistory(url: URL): boolean {
+  const value = url.searchParams.get("includePromptHistory");
+  return value === "1" || value === "true";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function promptHistoryFromRuntimeSession(value: unknown): SessionResponse["promptHistory"] | undefined {
+  if (!isRecord(value) || typeof value.systemPrompt !== "string" || !Array.isArray(value.messages)) {
+    return undefined;
+  }
+  return {
+    systemPrompt: value.systemPrompt,
+    messages: value.messages as AgentMessage[],
+  };
 }
 
 async function buildSessionResponse(
@@ -230,7 +250,8 @@ async function buildSessionResponse(
 ): Promise<Response | BuiltSessionResponse> {
   const sessions = new SessionRepository(env.DB);
   const eventsRepo = new SessionEventRepository(env.DB);
-  const runtime = new SessionRuntimeRepository(env.DB);
+  const messagesRepo = new SessionMessageRepository(env.DB);
+  const runtimeRepo = new SessionRuntimeRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
   const lookupStart = timingStart();
@@ -265,22 +286,24 @@ async function buildSessionResponse(
 
   const sinceCursor = url.searchParams.get("since");
   const eventWindow = url.searchParams.get("eventWindow");
-  const shouldLoadTailEvents = !sinceCursor && eventWindow === "tail";
-  const eventLimit = sessionEventLimit(
-    url,
-    shouldLoadTailEvents ? SESSION_EVENT_TAIL_PAGE_SIZE : SESSION_EVENT_PAGE_SIZE,
-  );
+  const eventLimit = sessionEventLimit(url, SESSION_EVENT_PAGE_SIZE);
   const eventsStart = timingStart();
-  const { events, nextCursor } = shouldLoadTailEvents
+  const eventPage = !sinceCursor && eventWindow === "tail"
     ? {
         events: await eventsRepo.listRecent(sessionId, eventLimit),
         nextCursor: sessionState.nextEventCursor,
       }
-    : await eventsRepo.listSince(
-        sessionId,
-        sinceCursor || undefined,
-        eventLimit
-      );
+    : !sinceCursor && eventWindow === "before"
+      ? {
+          events: await eventsRepo.listBefore(sessionId, url.searchParams.get("before") ?? "0", eventLimit),
+          nextCursor: url.searchParams.get("before") ?? "0",
+        }
+      : await eventsRepo.listSince(
+          sessionId,
+          sinceCursor || undefined,
+          eventLimit
+        );
+  const { events, nextCursor } = eventPage;
   logTiming(env, sessionId, "session.poll.events_loaded", eventsStart, {
     workspaceId: effectiveWorkspaceId,
     since: sinceCursor || undefined,
@@ -289,38 +312,39 @@ async function buildSessionResponse(
     nextCursor,
   });
 
-  const includeMessages = url.searchParams.get("includeMessages");
-  const shouldIncludeMessages = includeMessages === "auto"
-    ? events.some((event) => event.type === "message_end") || sessionState.status === "idle" || sessionState.status === "error"
-    : includeMessages !== "0" && includeMessages !== "false";
-  logTiming(env, sessionId, "session.poll.messages_decided", undefined, {
+  const messagesStart = timingStart();
+  const { messages, nextCursor: nextMessageCursor } = await messagesRepo.list(sessionId, {
+    after: url.searchParams.get("afterMessage") ?? undefined,
+    before: url.searchParams.get("beforeMessage") ?? undefined,
+    limit: sessionEventLimit(url, SESSION_EVENT_TAIL_PAGE_SIZE),
+  });
+  logTiming(env, sessionId, "session.poll.messages_loaded", messagesStart, {
     workspaceId: effectiveWorkspaceId,
-    includeMessages: includeMessages ?? undefined,
-    shouldIncludeMessages,
+    messageCount: messages.length,
+    nextMessageCursor,
   });
 
-  const workflowSession = shouldIncludeMessages
-    ? await loadWorkflowSessionForPoll(env, sessionId, runtime)
-    : null;
+  const promptHistory = shouldIncludePromptHistory(url)
+    ? promptHistoryFromRuntimeSession(await runtimeRepo.getWorkflowSession(sessionId))
+    : undefined;
 
   const response: SessionResponse = {
     id: sessionState.id,
     name: sessionState.name,
     status: sessionState.status,
+    messages,
     events,
     nextEventCursor: nextCursor,
+    nextMessageCursor,
+    promptHistory,
     errorMessage: sessionState.status === "error" ? sessionState.errorMessage : undefined,
     workspaceId: sessionState.workspaceId,
   };
 
-  if (shouldIncludeMessages) {
-    response.messages = workflowSession?.messages ?? [];
-  }
-
   return {
     response,
-    shouldIncludeMessages,
     eventCount: events.length,
+    messageCount: messages.length,
     status: sessionState.status,
   };
 }
@@ -350,17 +374,15 @@ export async function handleGetSession(
 
     logSessionPollResponseSize(env, sessionId, built.response, {
       workspaceId: effectiveWorkspaceId,
-      shouldIncludeMessages: built.shouldIncludeMessages,
       eventCount: built.eventCount,
-      messageCount: built.response.messages?.length,
+      messageCount: built.messageCount,
       status: built.status,
     });
     logTiming(env, sessionId, "session.poll.response", routeStart, {
       workspaceId: effectiveWorkspaceId,
       status: 200,
-      shouldIncludeMessages: built.shouldIncludeMessages,
       eventCount: built.eventCount,
-      messageCount: built.response.messages?.length,
+      messageCount: built.messageCount,
     });
     return json(built.response);
   } catch (error) {
@@ -372,21 +394,6 @@ export async function handleGetSession(
     });
     return serverError("Session poll failed. Check server logs for details.");
   }
-}
-
-async function loadWorkflowSessionForPoll(
-  env: Env,
-  sessionId: string,
-  runtime: SessionRuntimeRepository,
-): Promise<{ messages?: import("../../types.js").AgentMessage[] } | null> {
-  const messagesStart = timingStart();
-  const workflowSession = await runtime.getWorkflowSession(sessionId) as
-    | { messages?: import("../../types.js").AgentMessage[] }
-    | null;
-  logTiming(env, sessionId, "session.poll.messages_loaded", messagesStart, {
-    messageCount: workflowSession?.messages?.length ?? 0,
-  });
-  return workflowSession;
 }
 
 function logSessionPollResponseSize(
@@ -774,6 +781,47 @@ export async function handleCloseSession(
 }
 
 /**
+ * Ask the active durable run to stop between steps without closing the session.
+ */
+export async function handleAbortSession(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const sessions = new SessionRepository(env.DB);
+  const runs = new SessionRunRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  try {
+    const session = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+
+    if (!session) {
+      return notFound("Session");
+    }
+
+    if (session.status === "closed" || session.status === "expired") {
+      return badRequest("Session already closed");
+    }
+
+    const activeRun = await runs.findActiveForSession(sessionId);
+    if (!activeRun) {
+      return json({ ok: true, sessionId, status: session.status, aborted: false, workspaceId: effectiveWorkspaceId });
+    }
+
+    await runs.requestCancel(activeRun.id);
+    return json({ ok: true, sessionId, status: session.status, aborted: true, workspaceId: effectiveWorkspaceId });
+  } catch (error) {
+    logger.error("Session abort failed", error, {
+      handler: "handleAbortSession",
+      route: "POST /v1/session/:id/abort",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
  * Force-kill a session by cancelling its durable run and destroying owned containers.
  */
 async function killSessionResources(
@@ -992,6 +1040,7 @@ export async function handleListSessions(
   const sessionsRepo = new SessionRepository(env.DB);
   const events = new SessionEventRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
+  const containers = new ContainerContextRepository(env.DB);
   // Use workspace from request context
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -1012,6 +1061,7 @@ export async function handleListSessions(
           events.count(sessionId),
           runtime.isActive(sessionId),
         ]);
+        const sessionContainers = await containers.listForSession(effectiveWorkspaceId, sessionId);
         const summary: SessionSummary = {
           id: state.id,
           workspaceId: state.workspaceId,
@@ -1021,6 +1071,7 @@ export async function handleListSessions(
           messageCount,
           updatedAt: state.updatedAt,
           isActive,
+          containers: sessionContainers.map((container) => container.containerId),
         };
 
         const response: SessionListResponse = { sessions: [summary], total: 1 };
@@ -1038,7 +1089,10 @@ export async function handleListSessions(
       offset,
     };
     
-    const sessions = await sessionsRepo.list(filter);
+    const sessions = await Promise.all((await sessionsRepo.list(filter)).map(async (session) => ({
+      ...session,
+      containers: (await containers.listForSession(effectiveWorkspaceId, session.id)).map((container) => container.containerId),
+    })));
     const total = await sessionsRepo.count(filter);
 
     const response: SessionListResponse = { sessions, total };

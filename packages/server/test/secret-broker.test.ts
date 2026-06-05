@@ -105,7 +105,7 @@ describe("secret broker", () => {
       const storeResponse = await secretBroker.fetch(
         post("/store", {
           auth: authContext(),
-          key: "model-connections/connection-1/AWS_BEARER_TOKEN_BEDROCK",
+          key: "providers/provider-1/AWS_BEARER_TOKEN_BEDROCK",
           value: "bedrock-token",
         }),
         env
@@ -115,7 +115,7 @@ describe("secret broker", () => {
 
       const encryptedRecord = await db
         .prepare("SELECT ct FROM encrypted_secrets WHERE workspace_id = ? AND key = ?")
-        .bind("workspace-1", "model-connections/connection-1/AWS_BEARER_TOKEN_BEDROCK")
+        .bind("workspace-1", "providers/provider-1/AWS_BEARER_TOKEN_BEDROCK")
         .first<{ ct: string }>();
       expect(encryptedRecord?.ct).toBeTruthy();
       expect(encryptedRecord?.ct).not.toContain("bedrock-token");
@@ -123,7 +123,7 @@ describe("secret broker", () => {
       const getResponse = await secretBroker.fetch(
         post("/get", {
           auth: authContext(),
-          key: "model-connections/connection-1/AWS_BEARER_TOKEN_BEDROCK",
+          key: "providers/provider-1/AWS_BEARER_TOKEN_BEDROCK",
         }),
         env
       );

@@ -64,11 +64,11 @@ The server uses:
 
 `wrangler.jsonc` configures these bindings directly.
 
-## Model Connections
+## Models
 
 AI providers are configured per-workspace via the API, not via Wrangler secrets. Provider secrets are envelope-encrypted: each provider secret gets a data encryption key, and encrypted secret payloads plus encrypted DEKs are stored in D1. The Worker only needs one app-bound key encryption key, `CLAWFLARE_KEK`.
 
-Create the KEK once and keep it stable for the lifetime of stored model connection secrets:
+Create the KEK once and keep it stable for the lifetime of stored model secrets:
 
 ```bash
 openssl rand -base64 32

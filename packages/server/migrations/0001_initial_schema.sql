@@ -1,7 +1,7 @@
 -- Clawflare Initial Schema
 -- Consolidated migration: sessions, events, queues, runtime, stored code, egress handlers,
 -- auth (users, workspaces, memberships, OAuth accounts, tokens, device auth, web sessions,
--- access tokens, email verification, password reset), and model connections.
+-- access tokens, email verification, password reset), and models.
 
 PRAGMA foreign_keys = ON;
 
@@ -12,6 +12,7 @@ CREATE TABLE users (
   id TEXT PRIMARY KEY,
   email TEXT NOT NULL UNIQUE,
   display_name TEXT,
+  email_verified_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
@@ -26,7 +27,7 @@ CREATE TABLE workspaces (
   slug TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   description TEXT,
-  default_model_connection_id TEXT,
+  default_model_id TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
@@ -133,6 +134,7 @@ CREATE TABLE device_authorizations (
   approved_at INTEGER,
   created_at INTEGER NOT NULL,
   oauth_state_hash TEXT,
+  return_url TEXT,
   access_token_plaintext TEXT,
   token_retrieved_at INTEGER
 ) STRICT;
@@ -180,6 +182,7 @@ CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   workflow_id TEXT NOT NULL,
   workspace_id TEXT,
+  name TEXT,
   status TEXT NOT NULL CHECK (
     status IN ('idle', 'processing', 'awaiting_input', 'error', 'closed', 'expired')
   ),
@@ -188,9 +191,7 @@ CREATE TABLE sessions (
   error_message TEXT,
   max_queue_size INTEGER NOT NULL DEFAULT 100,
   idle_timeout TEXT,
-  model_connection_id TEXT,
-  model_provider TEXT,
-  model_name TEXT
+  model_id TEXT
 ) STRICT;
 
 CREATE INDEX idx_sessions_status_updated ON sessions(status, updated_at DESC);
@@ -220,6 +221,35 @@ CREATE INDEX idx_session_events_workspace ON session_events(workspace_id);
 CREATE INDEX idx_session_events_workspace_session ON session_events(workspace_id, session_id);
 
 -- =============================================================================
+-- Session Messages
+-- =============================================================================
+-- Durable, user-facing conversation state. A session is an ordered list of
+-- messages. Messages contain typed content blocks: text blocks and assistant
+-- tool_call blocks. Tool results are attached to their tool_call block so UI
+-- clients render tool output without reconstructing relationships from runtime
+-- events. session_events stores replayable deltas over these messages; applying
+-- those deltas from an empty list must reconstruct this table exactly.
+CREATE TABLE session_messages (
+  session_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  workspace_id TEXT,
+  id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+  status TEXT NOT NULL CHECK (status IN ('queued', 'streaming', 'complete', 'error')),
+  content_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, sequence),
+  UNIQUE(session_id, id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_session_messages_session_sequence ON session_messages(session_id, sequence);
+CREATE INDEX idx_session_messages_session_id ON session_messages(session_id, id);
+CREATE INDEX idx_session_messages_workspace ON session_messages(workspace_id);
+CREATE INDEX idx_session_messages_workspace_session ON session_messages(workspace_id, session_id);
+
+-- =============================================================================
 -- Session Counters
 -- =============================================================================
 CREATE TABLE session_counters (
@@ -227,6 +257,7 @@ CREATE TABLE session_counters (
   workspace_id TEXT,
   next_queue_sequence INTEGER NOT NULL DEFAULT 1,
   next_event_sequence INTEGER NOT NULL DEFAULT 1,
+  next_message_sequence INTEGER NOT NULL DEFAULT 1,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
@@ -250,6 +281,25 @@ CREATE INDEX idx_session_input_queue_session_sequence ON session_input_queue(ses
 CREATE INDEX idx_session_input_queue_workspace ON session_input_queue(workspace_id);
 
 -- =============================================================================
+-- Session Tools
+-- =============================================================================
+CREATE TABLE session_tools (
+  session_id TEXT NOT NULL,
+  tool_ref_type TEXT NOT NULL CHECK (tool_ref_type IN ('builtin', 'custom')),
+  tool_ref TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  config_json TEXT NOT NULL DEFAULT '{}',
+  pinned_version_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, tool_ref_type, tool_ref),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_session_tools_session_enabled
+  ON session_tools(session_id, enabled);
+
+-- =============================================================================
 -- Session Runtime State
 -- =============================================================================
 CREATE TABLE session_runtime (
@@ -258,12 +308,52 @@ CREATE TABLE session_runtime (
   active INTEGER NOT NULL DEFAULT 0,
   workflow_session_json TEXT,
   snapshot_json TEXT,
+  workflow_waiting_at INTEGER,
+  hot_context_json TEXT,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 ) STRICT;
 
 CREATE INDEX idx_session_runtime_active ON session_runtime(active);
 CREATE INDEX idx_session_runtime_workspace ON session_runtime(workspace_id);
+
+-- =============================================================================
+-- Session Runs
+-- =============================================================================
+CREATE TABLE session_runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  workspace_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('runnable', 'running', 'completed', 'error', 'cancel_requested', 'cancelled')),
+  input_json TEXT NOT NULL,
+  attempt INTEGER NOT NULL DEFAULT 0,
+  lease_owner TEXT,
+  lease_expires_at INTEGER,
+  step_cursor INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_session_runs_session_status
+  ON session_runs(session_id, status);
+CREATE INDEX idx_session_runs_status_updated
+  ON session_runs(status, updated_at);
+CREATE INDEX idx_session_runs_lease
+  ON session_runs(status, lease_expires_at);
+
+CREATE TABLE session_run_steps (
+  run_id TEXT NOT NULL,
+  step_name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('completed')),
+  result_json TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (run_id, step_name),
+  FOREIGN KEY (run_id) REFERENCES session_runs(id) ON DELETE CASCADE
+) STRICT;
 
 -- =============================================================================
 -- Container Contexts
@@ -324,14 +414,13 @@ CREATE INDEX idx_egress_handlers_workspace ON egress_handlers(workspace_id);
 CREATE INDEX idx_egress_handlers_workspace_enabled ON egress_handlers(workspace_id, enabled);
 
 -- =============================================================================
--- Model Connections
+-- Providers
 -- =============================================================================
-CREATE TABLE model_connections (
+CREATE TABLE providers (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
   display_name TEXT,
   provider TEXT NOT NULL,
-  model_name TEXT NOT NULL,
   secret_refs_json TEXT NOT NULL DEFAULT '{}',
   config_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL,
@@ -340,7 +429,47 @@ CREATE TABLE model_connections (
   FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX idx_model_connections_workspace
-  ON model_connections(workspace_id, deleted_at, updated_at DESC);
-CREATE INDEX idx_model_connections_provider
-  ON model_connections(provider, model_name);
+CREATE INDEX idx_providers_workspace
+  ON providers(workspace_id, deleted_at, updated_at DESC);
+CREATE INDEX idx_providers_provider
+  ON providers(provider);
+
+-- =============================================================================
+-- Models
+-- =============================================================================
+CREATE TABLE models (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  display_name TEXT,
+  model_name TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  deleted_at INTEGER,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+  FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_models_workspace
+  ON models(workspace_id, deleted_at, updated_at DESC);
+CREATE INDEX idx_models_provider
+  ON models(provider_id, model_name);
+
+-- =============================================================================
+-- Encrypted Secrets
+-- =============================================================================
+CREATE TABLE encrypted_secrets (
+  workspace_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  v INTEGER NOT NULL,
+  edek TEXT NOT NULL,
+  ct TEXT NOT NULL,
+  nonce TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (workspace_id, key)
+) STRICT;
+
+CREATE INDEX idx_encrypted_secrets_workspace
+  ON encrypted_secrets(workspace_id, updated_at DESC);

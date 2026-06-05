@@ -25,7 +25,7 @@ export interface Workspace {
   slug: string;
   name: string;
   description?: string | null;
-  defaultModelConnectionId?: string | null;
+  defaultModelId?: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -135,8 +135,8 @@ export class WorkspaceRepository {
   }
 
   async create(
-    workspace: Omit<Workspace, "createdAt" | "updatedAt" | "defaultModelConnectionId"> & {
-      defaultModelConnectionId?: string | null;
+    workspace: Omit<Workspace, "createdAt" | "updatedAt" | "defaultModelId"> & {
+      defaultModelId?: string | null;
     }
   ): Promise<Workspace> {
     const now = Date.now();
@@ -146,7 +146,7 @@ export class WorkspaceRepository {
       slug: workspace.slug,
       name: workspace.name,
       description: workspace.description ?? null,
-      defaultModelConnectionId: workspace.defaultModelConnectionId ?? null,
+      defaultModelId: workspace.defaultModelId ?? null,
       createdAt: now,
       updatedAt: now,
     });
@@ -154,7 +154,7 @@ export class WorkspaceRepository {
     return {
       ...workspace,
       description: workspace.description ?? null,
-      defaultModelConnectionId: workspace.defaultModelConnectionId ?? null,
+      defaultModelId: workspace.defaultModelId ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -169,7 +169,7 @@ export class WorkspaceRepository {
         description: workspaces.description,
         createdAt: workspaces.createdAt,
         updatedAt: workspaces.updatedAt,
-        defaultModelConnectionId: workspaces.defaultModelConnectionId,
+        defaultModelId: workspaces.defaultModelId,
       })
       .from(workspaces)
       .innerJoin(

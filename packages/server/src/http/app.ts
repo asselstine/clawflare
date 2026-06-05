@@ -8,9 +8,9 @@ import { debugRoutes } from "../modules/debug/debug.routes.js";
 import { egressHandlersRoutes } from "../modules/egress-handlers/egress-handlers.routes.js";
 import { infoRoutes } from "../modules/info/info.routes.js";
 import {
-  modelConnectionsRoutes,
+  modelsRoutes,
   workspaceRoutes,
-} from "../modules/model-connections/model-connections.routes.js";
+} from "../modules/models/models.routes.js";
 import { providersRoutes } from "../modules/providers/providers.routes.js";
 import { sessionRoutes, sessionsRoutes } from "../modules/sessions/sessions.routes.js";
 import { toolsRoutes } from "../modules/tools/tools.routes.js";
@@ -50,7 +50,7 @@ app.route("/v1/info", infoRoutes);
 app.route("/v1/cf_debug", debugRoutes);
 app.route("/v1/egress-handlers", egressHandlersRoutes);
 app.route("/v1/providers", providersRoutes);
-app.route("/v1/model-connections", modelConnectionsRoutes);
+app.route("/v1/models", modelsRoutes);
 app.route("/v1/workspace", workspaceRoutes);
 
 app.get("/ws", requireAuth, (c) => {

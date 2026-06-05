@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
   Bot,
@@ -14,8 +15,10 @@ import {
   LogIn,
   LogOut,
   MessageSquare,
+  Monitor,
   Plus,
   Power,
+  RefreshCw,
   Send,
   Settings,
   Shield,
@@ -26,11 +29,14 @@ import {
 } from "lucide-react";
 import type {
   EgressHandlerInfo,
-  ModelConnection,
+  Model,
   ProviderInfo,
   ProviderModelInfo,
+  SessionListResponse,
   SessionStatus,
+  SessionResponse,
   SessionSummary,
+  WorkspaceProvider,
 } from "@clawflare/types";
 import { z } from "zod";
 import { ClawflareApiClient } from "./lib/api";
@@ -49,10 +55,10 @@ import {
 import { loadSettings, saveSettings, type AppSettings } from "./lib/settings";
 
 type AppPage = "chat" | "settings";
-type SettingsSection = "egress" | "models" | "account" | "data";
+type SettingsSection = "providers" | "egress" | "models" | "account" | "data";
 type LoginStatus = "idle" | "starting" | "waiting" | "approved" | "error";
 
-const settingsSectionIds: SettingsSection[] = ["egress", "models", "account", "data"];
+const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", "account", "data"];
 
 function sessionIdFromLocation(): string | null {
   const match = window.location.pathname.match(/^\/session\/([^/]+)$/);
@@ -63,8 +69,8 @@ function settingsSectionFromLocation(): SettingsSection | null {
   const match = window.location.pathname.match(/^\/settings(?:\/([^/]+))?$/);
   if (!match) return null;
   const section = match[1];
-  if (!section) return "egress";
-  return settingsSectionIds.includes(section as SettingsSection) ? (section as SettingsSection) : "egress";
+  if (!section) return "providers";
+  return settingsSectionIds.includes(section as SettingsSection) ? (section as SettingsSection) : "providers";
 }
 
 function updateBrowserSessionPath(sessionId: string, mode: "push" | "replace" = "push"): void {
@@ -84,12 +90,14 @@ function updateBrowserRootPath(mode: "push" | "replace" = "push"): void {
   window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", "/");
 }
 
-const modelFormSchema = z.object({
+const providerFormSchema = z.object({
   provider: z.string().min(1),
-  modelName: z.string().min(1),
-  displayName: z.string().optional(),
+  modelName: z.string().optional(),
   setAsDefault: z.boolean(),
   secrets: z.record(z.string()),
+}).refine((value) => !value.setAsDefault || Boolean(value.modelName), {
+  message: "modelName is required when choosing a default model",
+  path: ["modelName"],
 });
 
 const egressFormSchema = z.object({
@@ -109,17 +117,21 @@ function App(): JSX.Element {
   const [loginUser, setLoginUser] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string>("");
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  const [promptHistory, setPromptHistory] = useState<SessionResponse["promptHistory"] | null>(null);
   const [prompt, setPrompt] = useState("");
   const [statusText, setStatusText] = useState("Disconnected");
   const [isRunning, setIsRunning] = useState(false);
+  const [serverProcessingSessionId, setServerProcessingSessionId] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [appPage, setAppPage] = useState<AppPage>(initialSettingsSection ? "settings" : "chat");
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSettingsSection ?? "egress");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSettingsSection ?? "providers");
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [showModelForm, setShowModelForm] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
-  const [modelDisplayName, setModelDisplayName] = useState("");
+  const [setCreatedModelAsDefault, setSetCreatedModelAsDefault] = useState(false);
   const [modelSecrets, setModelSecrets] = useState<Record<string, string>>({});
   const [selectedEgress, setSelectedEgress] = useState("");
   const [showEgressForm, setShowEgressForm] = useState(false);
@@ -128,7 +140,17 @@ function App(): JSX.Element {
   const [egressEnabled, setEgressEnabled] = useState(true);
   const [composerRows, setComposerRows] = useState(2);
   const abortController = useRef<AbortController | null>(null);
+  const runningSessionIdRef = useRef<string | null>(null);
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const oldestLoadedEventSequenceRef = useRef<number | null>(null);
+  const historyLoadingRef = useRef(false);
+  const latestEventCursorRef = useRef<string | null>(null);
+  const followingSessionRef = useRef<string | null>(null);
+  const followingAbortControllerRef = useRef<AbortController | null>(null);
+  const restoreScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const shouldStickToBottomRef = useRef(true);
   const loginWindowRef = useRef<Window | null>(null);
   const initialPathSessionRef = useRef<string | null>(null);
 
@@ -148,12 +170,21 @@ function App(): JSX.Element {
     queryKey: ["sessions", settings.serverUrl, settings.token],
     queryFn: () => client.listSessions({ status: "all", limit: 80 }),
     enabled: isConfigured,
-    refetchInterval: isRunning ? 2000 : 15_000,
+    refetchInterval: (query) => {
+      const activeSession = query.state.data?.sessions.find((session) => session.id === sessionId);
+      return isRunning || serverProcessingSessionId === sessionId || activeSession?.status === "processing" ? 2000 : 15_000;
+    },
   });
 
   const providers = useQuery({
     queryKey: ["providers", settings.serverUrl, settings.token],
     queryFn: () => client.listProviders(),
+    enabled: isConfigured && appPage === "settings",
+  });
+
+  const workspaceProviders = useQuery({
+    queryKey: ["workspace-providers", settings.serverUrl, settings.token],
+    queryFn: () => client.listConfiguredProviders(),
     enabled: isConfigured && appPage === "settings",
   });
 
@@ -163,9 +194,9 @@ function App(): JSX.Element {
     enabled: isConfigured && appPage === "settings" && Boolean(selectedProvider),
   });
 
-  const modelConnections = useQuery({
-    queryKey: ["model-connections", settings.serverUrl, settings.token],
-    queryFn: () => client.listModelConnections(),
+  const models = useQuery({
+    queryKey: ["models", settings.serverUrl, settings.token],
+    queryFn: () => client.listModels(),
     enabled: isConfigured && appPage === "settings",
   });
 
@@ -216,6 +247,8 @@ function App(): JSX.Element {
         abortRun();
         setSessionId("");
         setMessages([]);
+        setPromptHistory(null);
+        resetHistoryState();
         updateBrowserRootPath("replace");
       }
       setStatusText(result.ok ? "Session deleted" : "Session deleted with cleanup errors");
@@ -231,43 +264,54 @@ function App(): JSX.Element {
     onError: showError,
   });
 
-  const addModelConnection = useMutation({
+  const addProvider = useMutation({
     mutationFn: () => {
-      const parsed = modelFormSchema.parse({
+      const parsed = providerFormSchema.parse({
         provider: selectedProvider,
-        modelName: selectedModel,
-        displayName: modelDisplayName.trim() || undefined,
-        setAsDefault: true,
+        modelName: selectedModel || undefined,
+        setAsDefault: setCreatedModelAsDefault,
         secrets: pruneEmpty(modelSecrets),
       });
-      return client.createModelConnection(parsed);
+      if (!parsed.setAsDefault) {
+        return client.createProvider({
+          provider: parsed.provider,
+          secrets: parsed.secrets,
+        });
+      }
+      return client.createModel({
+        provider: parsed.provider,
+        modelName: parsed.modelName!,
+        secrets: parsed.secrets,
+        setAsDefault: true,
+      });
     },
     onSuccess: () => {
       setModelSecrets({});
-      setModelDisplayName("");
+      setSetCreatedModelAsDefault(false);
       setShowModelForm(false);
-      setStatusText("Model connection added");
-      void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
+      setStatusText("Provider configured");
+      void queryClient.invalidateQueries({ queryKey: ["workspace-providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
       void info.refetch();
     },
     onError: showError,
   });
 
-  const deleteModelConnection = useMutation({
-    mutationFn: (id: string) => client.deleteModelConnection(id),
+  const deleteModel = useMutation({
+    mutationFn: (id: string) => client.deleteModel(id),
     onSuccess: () => {
-      setStatusText("Model connection removed");
-      void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
+      setStatusText("Model removed");
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
       void info.refetch();
     },
     onError: showError,
   });
 
   const setDefaultModel = useMutation({
-    mutationFn: (id: string | null) => client.setDefaultModelConnection(id),
+    mutationFn: (id: string | null) => client.setDefaultModel(id),
     onSuccess: () => {
       setStatusText("Default model updated");
-      void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: showError,
   });
@@ -310,9 +354,24 @@ function App(): JSX.Element {
     onError: showError,
   });
 
+  const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
+  const activeSessionIsProcessing = currentSession?.status === "processing" || serverProcessingSessionId === sessionId;
+  const composerBusy = isRunning || activeSessionIsProcessing;
+
   useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, isRunning]);
+    const restore = restoreScrollRef.current;
+    if (restore) {
+      const scroller = messageScrollerRef.current;
+      if (scroller) {
+        scroller.scrollTop = scroller.scrollHeight - restore.scrollHeight + restore.scrollTop;
+      }
+      restoreScrollRef.current = null;
+      return;
+    }
+    if (shouldStickToBottomRef.current) {
+      messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+  }, [messages, composerBusy]);
 
   useEffect(() => {
     if (!isConfigured) return;
@@ -359,27 +418,75 @@ function App(): JSX.Element {
     if (!selectedEgress && first) setSelectedEgress(first);
   }, [availableEgress.data, selectedEgress]);
 
+  useEffect(() => {
+    if (currentSession && currentSession.id === serverProcessingSessionId && currentSession.status !== "processing") {
+      setServerProcessingSessionId(null);
+    }
+  }, [currentSession, serverProcessingSessionId]);
+
+  useEffect(() => {
+    if (!isConfigured || !sessionId || appPage !== "chat" || isRunning || !activeSessionIsProcessing) return;
+    if (followingSessionRef.current === sessionId) return;
+
+    const controller = new AbortController();
+    followingSessionRef.current = sessionId;
+    followingAbortControllerRef.current = controller;
+    shouldStickToBottomRef.current = true;
+    setStatusText(`Following ${sessionId.slice(0, 8)}`);
+
+    void followProcessingSession(sessionId, controller);
+
+    return () => {
+      controller.abort();
+      if (followingSessionRef.current === sessionId) followingSessionRef.current = null;
+      if (followingAbortControllerRef.current === controller) followingAbortControllerRef.current = null;
+    };
+  }, [activeSessionIsProcessing, appPage, isConfigured, isRunning, sessionId, settings.serverUrl, settings.token]);
+
   function showError(cause: unknown): void {
     const message = cause instanceof Error ? cause.message : String(cause);
     setError(message);
     setStatusText("Error");
   }
 
+  function resetHistoryState(): void {
+    oldestLoadedEventSequenceRef.current = null;
+    historyLoadingRef.current = false;
+    latestEventCursorRef.current = null;
+    restoreScrollRef.current = null;
+    shouldStickToBottomRef.current = true;
+    setHasOlderMessages(false);
+    setHistoryLoading(false);
+  }
+
+  function focusPrompt(): void {
+    window.requestAnimationFrame(() => {
+      promptInputRef.current?.focus();
+    });
+  }
+
   function startDraftSession(options: { history?: "push" | "replace" | false } = {}): void {
     abortRun();
+    followingAbortControllerRef.current?.abort();
+    followingAbortControllerRef.current = null;
+    followingSessionRef.current = null;
     setAppPage("chat");
     setMobileSessionsOpen(false);
     setSessionId("");
+    setServerProcessingSessionId(null);
     setMessages([]);
+    setPromptHistory(null);
+    resetHistoryState();
     setError(null);
     setStatusText("Ready for first prompt");
     if (options.history !== false) updateBrowserRootPath(options.history ?? "push");
+    focusPrompt();
   }
 
   function openSettings(section: SettingsSection | null = null, options: { history?: "push" | "replace" | false } = {}): void {
     setAppPage("settings");
     setMobileSessionsOpen(false);
-    setSettingsSection(section ?? "egress");
+    setSettingsSection(section ?? "providers");
     if (options.history !== false) updateBrowserSettingsPath(section, options.history ?? "push");
   }
 
@@ -436,7 +543,10 @@ function App(): JSX.Element {
           saveSettings(nextSettings);
           setSettings(nextSettings);
           setSessionId("");
+          setServerProcessingSessionId(null);
           setMessages([]);
+          setPromptHistory(null);
+          resetHistoryState();
           setLoginStatus("approved");
           setLoginUser(result.user?.displayName ?? result.user?.email ?? null);
           setLoginMessage("Approved!");
@@ -475,17 +585,145 @@ function App(): JSX.Element {
       const session = await client.getSession(targetSessionId, undefined, false, {
         eventWindow: "tail",
         eventLimit: 100,
+        includePromptHistory: true,
       });
       const recentMessages = formatMessagesFromEvents(session.events);
+      const oldestSequence = oldestEventSequence(session.events);
       setAppPage("chat");
       setMobileSessionsOpen(false);
       setSessionId(session.id);
+      setServerProcessingSessionId(session.status === "processing" ? session.id : null);
       if (options.history !== false) updateBrowserSessionPath(session.id, options.history ?? "push");
+      shouldStickToBottomRef.current = true;
       setMessages(attachToolResults(recentMessages));
+      setPromptHistory(session.promptHistory ?? null);
+      oldestLoadedEventSequenceRef.current = oldestSequence;
+      latestEventCursorRef.current = session.nextEventCursor;
+      historyLoadingRef.current = false;
+      setHasOlderMessages(Boolean(oldestSequence && oldestSequence > 1));
+      setHistoryLoading(false);
       setError(session.status === "error" ? session.errorMessage ?? null : null);
       setStatusText(`Opened recent ${session.id.slice(0, 8)}`);
+      focusPrompt();
     } catch (cause) {
       showError(cause);
+    }
+  }
+
+  async function loadPreviousMessages(): Promise<void> {
+    const before = oldestLoadedEventSequenceRef.current;
+    if (!sessionId || !before || before <= 1 || historyLoadingRef.current || !hasOlderMessages) return;
+
+    historyLoadingRef.current = true;
+    setHistoryLoading(true);
+    setStatusText("Loading earlier messages");
+
+    try {
+      const session = await client.getSession(sessionId, undefined, false, {
+        eventWindow: "before",
+        before: String(before),
+        eventLimit: 100,
+        includePromptHistory: true,
+      });
+      const olderMessages = attachToolResults(formatMessagesFromEvents(session.events));
+      const nextOldestSequence = oldestEventSequence(session.events);
+
+      if (session.events.length === 0 || !nextOldestSequence) {
+        restoreScrollRef.current = null;
+        setHasOlderMessages(false);
+        setStatusText("No earlier messages");
+        return;
+      }
+
+      const scroller = messageScrollerRef.current;
+      if (scroller) {
+        restoreScrollRef.current = {
+          scrollHeight: scroller.scrollHeight,
+          scrollTop: scroller.scrollTop,
+        };
+      }
+      oldestLoadedEventSequenceRef.current = nextOldestSequence;
+      setHasOlderMessages(nextOldestSequence > 1);
+      setPromptHistory(session.promptHistory ?? promptHistory);
+      setMessages((current) => [...olderMessages, ...current]);
+      setStatusText(`Loaded earlier ${session.id.slice(0, 8)}`);
+    } catch (cause) {
+      showError(cause);
+    } finally {
+      historyLoadingRef.current = false;
+      setHistoryLoading(false);
+    }
+  }
+
+  async function followProcessingSession(targetSessionId: string, controller: AbortController): Promise<void> {
+    try {
+      const initialSession = latestEventCursorRef.current
+        ? null
+        : await client.getSession(targetSessionId, undefined, false, {
+            eventWindow: "tail",
+            eventLimit: 100,
+            includePromptHistory: true,
+          });
+
+      if (controller.signal.aborted || sessionId !== targetSessionId) return;
+
+      if (initialSession) {
+        const recentMessages = attachToolResults(formatMessagesFromEvents(initialSession.events));
+        const oldestSequence = oldestEventSequence(initialSession.events);
+        setMessages(recentMessages);
+        setPromptHistory(initialSession.promptHistory ?? null);
+        oldestLoadedEventSequenceRef.current = oldestSequence;
+        latestEventCursorRef.current = initialSession.nextEventCursor;
+        setHasOlderMessages(Boolean(oldestSequence && oldestSequence > 1));
+        setServerProcessingSessionId(initialSession.status === "processing" ? targetSessionId : null);
+        if (initialSession.status !== "processing") {
+          setStatusText(initialSession.status === "error" ? "Error" : "Complete");
+          if (initialSession.status === "error") setError(initialSession.errorMessage ?? "Session failed");
+          await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+          return;
+        }
+      }
+
+      for await (const update of client.streamSession(targetSessionId, latestEventCursorRef.current ?? undefined, controller.signal)) {
+        if (controller.signal.aborted || sessionId !== targetSessionId) return;
+        latestEventCursorRef.current = update.session.nextEventCursor;
+        const lastEvent = [...update.newEvents].reverse().map(getEventDisplayMessage).find(Boolean);
+        if (lastEvent) setStatusText(lastEvent);
+
+        setMessages((current) => {
+          const serverMessages = attachToolResults((update.session.messages ?? []).map(formatMessageForDisplay));
+          const base = serverMessages.length ? serverMessages : current;
+          return attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
+        });
+        setPromptHistory(update.session.promptHistory ?? null);
+
+        if (update.complete) {
+          if (update.session.status === "error") {
+            throw new Error(update.session.errorMessage ?? "Session failed");
+          }
+          break;
+        }
+      }
+
+      if (controller.signal.aborted || sessionId !== targetSessionId) return;
+      const finalSession = await client.getSession(targetSessionId, undefined, true, {
+        eventWindow: "tail",
+        eventLimit: 100,
+        includePromptHistory: true,
+      });
+      latestEventCursorRef.current = finalSession.nextEventCursor;
+      setMessages(attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay)));
+      setPromptHistory(finalSession.promptHistory ?? null);
+      setServerProcessingSessionId(null);
+      setStatusText(finalSession.status === "error" ? "Error" : "Complete");
+      setError(finalSession.status === "error" ? finalSession.errorMessage ?? "Session failed" : null);
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } catch (cause) {
+      if (controller.signal.aborted || sessionId !== targetSessionId) return;
+      showError(cause);
+    } finally {
+      if (followingSessionRef.current === targetSessionId) followingSessionRef.current = null;
+      if (followingAbortControllerRef.current === controller) followingAbortControllerRef.current = null;
     }
   }
 
@@ -527,6 +765,7 @@ function App(): JSX.Element {
         return true;
       case "clear":
         setMessages([]);
+        setPromptHistory(null);
         setStatusText("Chat cleared");
         return true;
       case "help":
@@ -578,6 +817,7 @@ function App(): JSX.Element {
       if (input === "all") {
         const result = await client.deleteSessions();
         setSessionId("");
+        resetHistoryState();
         updateBrowserRootPath("replace");
         setMessages((current) => [...current, {
           role: result.ok ? "assistant" : "error",
@@ -596,20 +836,31 @@ function App(): JSX.Element {
 
   async function submitPrompt(): Promise<void> {
     const content = prompt.trim();
-    if (!content || isRunning) return;
-    setPrompt("");
-    setComposerRows(2);
+    if (!content) return;
 
-    if (handleCommand(content)) return;
+    if (handleCommand(content)) {
+      setPrompt("");
+      setComposerRows(2);
+      return;
+    }
+
+    if (composerBusy) {
+      showError(new Error("Agent is still running. Wait for this turn to finish or abort it first."));
+      return;
+    }
+
     const optimistic: DisplayMessage = { role: "user", content };
     const currentSessionId = sessionId;
 
-    setMessages((current) => [...current, optimistic]);
+    shouldStickToBottomRef.current = true;
+    setPrompt("");
+    setComposerRows(2);
     setIsRunning(true);
     setError(null);
     setStatusText("Submitting");
     const controller = new AbortController();
     abortController.current = controller;
+    runningSessionIdRef.current = currentSessionId || null;
 
     try {
       const submitted = await client.submitChat({
@@ -617,19 +868,34 @@ function App(): JSX.Element {
         sessionId: currentSessionId || undefined,
       });
       setSessionId(submitted.sessionId);
+      const submittedName = submitted.name;
+      if (submittedName) {
+        queryClient.setQueryData<SessionListResponse>(["sessions", settings.serverUrl, settings.token], (current) => {
+          if (!current) return current;
+          return {
+            ...current,
+            sessions: current.sessions.map((session) =>
+              session.id === submitted.sessionId ? { ...session, name: submittedName } : session
+            ),
+          };
+        });
+      }
+      runningSessionIdRef.current = submitted.sessionId;
       updateBrowserSessionPath(submitted.sessionId, currentSessionId ? "replace" : "push");
       setStatusText(`Processing ${submitted.sessionId.slice(0, 8)}`);
+      setMessages((current) => [...current, optimistic]);
 
       for await (const update of client.streamSession(submitted.sessionId, submitted.eventCursor, controller.signal)) {
+        latestEventCursorRef.current = update.session.nextEventCursor;
         const lastEvent = [...update.newEvents].reverse().map(getEventDisplayMessage).find(Boolean);
         if (lastEvent) setStatusText(lastEvent);
 
-        setMessages(() => {
+        setMessages((current) => {
           const serverMessages = attachToolResults((update.session.messages ?? []).map(formatMessageForDisplay));
-          const reconciled = serverMessages.some((message) => message.role === "user" && message.content.trim() === content);
-          const base = reconciled ? serverMessages : [...serverMessages, optimistic];
+          const base = mergeCurrentTurnMessages(current, serverMessages, content, optimistic);
           return attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
         });
+        setPromptHistory(update.session.promptHistory ?? null);
 
         if (update.complete) {
           if (update.session.status === "error") {
@@ -639,7 +905,19 @@ function App(): JSX.Element {
         }
       }
 
+      const finalSession = await client.getSession(submitted.sessionId, undefined, true, {
+        eventWindow: "tail",
+        eventLimit: 100,
+        includePromptHistory: true,
+      });
+      latestEventCursorRef.current = finalSession.nextEventCursor;
+      setMessages((current) => {
+        const serverMessages = attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay));
+        return mergeCurrentTurnMessages(current, serverMessages, content, optimistic);
+      });
+      setPromptHistory(finalSession.promptHistory ?? null);
       setStatusText("Complete");
+      setServerProcessingSessionId(null);
       await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } catch (cause) {
       if (controller.signal.aborted) {
@@ -648,19 +926,36 @@ function App(): JSX.Element {
       } else {
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(message);
-        setMessages((current) => [...current, { role: "error", content: message }]);
-        setStatusText("Error");
+        if (isAlreadyProcessingError(message) && currentSessionId) {
+          setServerProcessingSessionId(currentSessionId);
+          setStatusText("Agent is running");
+          void sessions.refetch();
+        } else {
+          setStatusText("Error");
+        }
+        setPrompt((current) => current || content);
       }
     } finally {
       setIsRunning(false);
       abortController.current = null;
+      runningSessionIdRef.current = null;
     }
   }
 
   function abortRun(): void {
+    const targetSessionId = runningSessionIdRef.current || sessionId || serverProcessingSessionId;
+    if (targetSessionId) {
+      void client.abortSession(targetSessionId)
+        .then(() => queryClient.invalidateQueries({ queryKey: ["sessions"] }))
+        .catch(showError);
+    }
     abortController.current?.abort();
     abortController.current = null;
+    followingAbortControllerRef.current?.abort();
+    followingAbortControllerRef.current = null;
+    if (followingSessionRef.current === targetSessionId) followingSessionRef.current = null;
     setIsRunning(false);
+    setServerProcessingSessionId(null);
   }
 
   function signOut(): void {
@@ -668,7 +963,10 @@ function App(): JSX.Element {
     saveSettings(nextSettings);
     setSettings(nextSettings);
     setSessionId("");
+    setServerProcessingSessionId(null);
     setMessages([]);
+    setPromptHistory(null);
+    resetHistoryState();
     setError(null);
     setLoginStatus("idle");
     setLoginMessage("");
@@ -687,7 +985,6 @@ function App(): JSX.Element {
 
   const selectedProviderInfo = providers.data?.find((provider) => provider.id === selectedProvider);
   const selectedEgressInfo = availableEgress.data?.find((handler) => handler.egressHandlerId === selectedEgress);
-  const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
   const connected = isConfigured && !info.isError;
 
   return (
@@ -699,6 +996,11 @@ function App(): JSX.Element {
           onNew={startDraftSession}
           onOpen={(id) => void openSession(id)}
           onDelete={(id) => deleteSession.mutate(id)}
+          onRefresh={() => {
+            setStatusText("Sessions refreshed");
+            void sessions.refetch();
+          }}
+          refreshing={sessions.isFetching}
           onSettings={() => openSettings()}
           settingsActive={appPage === "settings"}
         />
@@ -746,6 +1048,11 @@ function App(): JSX.Element {
               onNew={startDraftSession}
               onOpen={(id) => void openSession(id)}
               onDelete={(id) => deleteSession.mutate(id)}
+              onRefresh={() => {
+                setStatusText("Sessions refreshed");
+                void sessions.refetch();
+              }}
+              refreshing={sessions.isFetching}
               onSettings={() => openSettings()}
               settingsActive={appPage === "settings"}
             />
@@ -761,14 +1068,15 @@ function App(): JSX.Element {
             loginUser={loginUser}
             serverInfo={info.data}
             providers={providers.data ?? []}
+            workspaceProviders={workspaceProviders.data ?? []}
             providerModels={providerModels.data ?? []}
             selectedProvider={selectedProvider}
             selectedModel={selectedModel}
             showModelForm={showModelForm}
             selectedProviderInfo={selectedProviderInfo}
-            modelConnections={modelConnections.data?.modelConnections ?? []}
-            defaultModelConnectionId={modelConnections.data?.defaultModelConnectionId}
-            modelDisplayName={modelDisplayName}
+            models={models.data?.models ?? []}
+            defaultModelId={models.data?.defaultModelId}
+            setCreatedModelAsDefault={setCreatedModelAsDefault}
             modelSecrets={modelSecrets}
             availableEgress={availableEgress.data ?? []}
             configuredEgress={configuredEgress.data ?? []}
@@ -786,10 +1094,10 @@ function App(): JSX.Element {
             onProviderChange={setSelectedProvider}
             onModelChange={setSelectedModel}
             onToggleModelForm={() => setShowModelForm((current) => !current)}
-            onModelDisplayNameChange={setModelDisplayName}
+            onSetCreatedModelAsDefaultChange={setSetCreatedModelAsDefault}
             onModelSecretChange={(key, value) => setModelSecrets((current) => ({ ...current, [key]: value }))}
-            onCreateModel={() => addModelConnection.mutate()}
-            onDeleteModel={(id) => deleteModelConnection.mutate(id)}
+            onCreateModel={() => addProvider.mutate()}
+            onDeleteModel={(id) => deleteModel.mutate(id)}
             onSetDefaultModel={(id) => setDefaultModel.mutate(id)}
             onEgressChange={setSelectedEgress}
             onToggleEgressForm={() => setShowEgressForm((current) => !current)}
@@ -803,8 +1111,28 @@ function App(): JSX.Element {
           />
         ) : (
           <>
-            <section className="scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-4 sm:py-6">
+            <section
+              ref={messageScrollerRef}
+              className="scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-4 sm:py-6"
+              onScroll={(event) => {
+                const scroller = event.currentTarget;
+                shouldStickToBottomRef.current = isNearBottom(scroller);
+                if (scroller.scrollTop < 96) void loadPreviousMessages();
+              }}
+            >
               <div className="mx-auto flex max-w-4xl flex-col gap-5">
+                {sessionId && (historyLoading || hasOlderMessages) ? (
+                  <div className="flex justify-center">
+                    <button
+                      className="flex h-8 items-center gap-2 rounded-md border border-shell-700 bg-shell-850 px-3 text-xs text-slate-400 transition hover:border-shell-600 hover:text-slate-200 disabled:cursor-wait disabled:opacity-70"
+                      disabled={historyLoading}
+                      onClick={() => void loadPreviousMessages()}
+                    >
+                      {historyLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
+                      {historyLoading ? "Loading earlier" : "Load earlier"}
+                    </button>
+                  </div>
+                ) : null}
                 {!isConfigured ? (
                   <EmptyState
                     icon={<KeyRound className="h-7 w-7" />}
@@ -818,9 +1146,12 @@ function App(): JSX.Element {
                     body="Ask the agent to inspect sessions, write code, use containers, or configure integrations."
                   />
                 ) : (
-                  messages.map((message, index) => <ChatMessage key={`${index}-${message.role}`} message={message} />)
+                  <>
+                    <PromptHistoryReveal promptHistory={promptHistory} visibleMessages={messages} />
+                    {messages.map((message, index) => <ChatMessage key={`${index}-${message.role}`} message={message} />)}
+                  </>
                 )}
-                {isRunning ? <Thinking /> : null}
+                {composerBusy ? <Thinking /> : null}
                 {error ? <ErrorBanner message={error} onDismiss={() => setError(null)} /> : null}
                 <div ref={messageEndRef} />
               </div>
@@ -830,10 +1161,11 @@ function App(): JSX.Element {
               <div className="mx-auto max-w-4xl">
                 <div className="flex items-end gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
                   <textarea
+                    ref={promptInputRef}
                     className="scrollbar min-h-11 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                     rows={composerRows}
                     value={prompt}
-                    placeholder={isRunning ? "Agent is running..." : "Message Clawflare or type /help"}
+                    placeholder={composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
                     disabled={!isConfigured}
                     onChange={(event) => {
                       setPrompt(event.target.value);
@@ -846,14 +1178,14 @@ function App(): JSX.Element {
                       }
                     }}
                   />
-                  {isRunning ? (
+                  {composerBusy ? (
                     <IconButton title="Abort" onClick={abortRun}>
                       <Square className="h-4 w-4" />
                     </IconButton>
                   ) : (
                     <button
                       className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-600 text-white transition hover:bg-accent-500 disabled:bg-shell-700"
-                      disabled={!prompt.trim() || !isConfigured}
+                      disabled={!prompt.trim() || !isConfigured || composerBusy}
                       title="Send"
                       onClick={() => void submitPrompt()}
                     >
@@ -876,6 +1208,8 @@ interface SessionSidebarProps {
   onNew: () => void;
   onOpen: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
   onSettings: () => void;
   settingsActive: boolean;
 }
@@ -888,6 +1222,9 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
           <Plus className="h-4 w-4" />
           New chat
         </button>
+        <IconButton title="Refresh sessions" onClick={props.onRefresh}>
+          <RefreshCw className={`h-4 w-4 ${props.refreshing ? "animate-spin" : ""}`} />
+        </IconButton>
       </div>
       <div className="scrollbar min-h-0 flex-1 overflow-y-auto p-2">
         {props.sessions.map((session) => (
@@ -906,11 +1243,6 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
                 <span>{session.messageCount} events</span>
                 <span>{formatUpdatedAt(session.updatedAt)}</span>
               </div>
-              {session.modelProvider && session.modelName ? (
-                <div className="mt-1 truncate text-xs text-slate-400">
-                  {session.modelProvider}/{session.modelName}
-                </div>
-              ) : null}
             </button>
             <button
               className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-red-950/50 hover:text-red-200"
@@ -940,20 +1272,70 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
   );
 }
 
+function PromptHistoryReveal({ promptHistory, visibleMessages }: { promptHistory: SessionResponse["promptHistory"] | null; visibleMessages: DisplayMessage[] }): JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  const content = formatPromptHistoryBeforeFirstVisibleMessage(promptHistory, visibleMessages);
+  if (!content) return null;
+
+  return (
+    <details className="group" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary className="flex cursor-pointer list-none justify-center">
+        <span className="rounded-md px-2 py-1 text-xs text-slate-600 transition group-open:text-slate-400 hover:bg-shell-850 hover:text-slate-400">
+          {open ? "hide system prompt" : "see system prompt"}
+        </span>
+      </summary>
+      <PromptHistoryBlock label="Prompt history" content={content} />
+    </details>
+  );
+}
+
+function PromptHistoryBlock({ label, content }: { label: string; content: string }): JSX.Element {
+  return (
+    <section className="rounded-md border border-shell-700 bg-shell-900/70 p-3">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-slate-500">{label}</div>
+      <pre className="scrollbar max-h-[32rem] overflow-auto whitespace-pre-wrap text-xs leading-5 text-slate-300">
+        {content}
+      </pre>
+    </section>
+  );
+}
+
 function ChatMessage({ message }: { message: DisplayMessage }): JSX.Element {
   const isUser = message.role === "user";
   const isError = message.role === "error";
-  return (
-    <article className={`flex gap-3 ${isUser ? "justify-end" : "justify-start"}`}>
-      {!isUser ? <Avatar role={message.role} /> : null}
-      <div className={`min-w-0 max-w-[84%] rounded-lg px-4 py-3 ${isUser ? "bg-slate-100 text-shell-950" : isError ? "bg-red-950/55 text-red-100 ring-1 ring-red-800" : "bg-shell-850 text-slate-100 ring-1 ring-shell-700"}`}>
-        {message.content ? (
-          isUser ? (
-            <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p>
-          ) : (
-            <ReactMarkdown className="markdown text-sm">{message.content}</ReactMarkdown>
-          )
+  const isSystem = message.role === "system";
+  if (isSystem) return <PromptHistoryBlock label="System" content={message.content} />;
+
+  if (isError) {
+    return (
+      <article className="flex justify-start gap-3">
+        <Avatar role={message.role} />
+        <div className="min-w-0 max-w-[84%] rounded-lg bg-red-950/55 px-4 py-3 text-red-100 ring-1 ring-red-800">
+          {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} className="markdown text-sm">{message.content}</ReactMarkdown> : null}
+        </div>
+      </article>
+    );
+  }
+
+  if (!isUser && !isError) {
+    return (
+      <article className="w-full min-w-0 py-1">
+        {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} className="markdown text-[0.95rem] text-slate-100">{message.content}</ReactMarkdown> : null}
+        {message.toolCalls?.length ? (
+          <div className="mt-4 flex flex-col gap-2">
+            {message.toolCalls.map((toolCall, index) => (
+              <ToolCall key={`${toolCall.id}-${index}`} toolCall={toolCall} />
+            ))}
+          </div>
         ) : null}
+      </article>
+    );
+  }
+
+  return (
+    <article className="flex justify-end gap-3">
+      <div className="min-w-0 max-w-[84%] rounded-lg bg-slate-100 px-4 py-3 text-shell-950">
+        {message.content ? <p className="whitespace-pre-wrap text-sm leading-6">{message.content}</p> : null}
         {message.toolCalls?.length ? (
           <div className="mt-3 flex flex-col gap-2">
             {message.toolCalls.map((toolCall, index) => (
@@ -962,7 +1344,6 @@ function ChatMessage({ message }: { message: DisplayMessage }): JSX.Element {
           </div>
         ) : null}
       </div>
-      {isUser ? <Avatar role={message.role} /> : null}
     </article>
   );
 }
@@ -971,13 +1352,13 @@ function ToolCall({ toolCall }: { toolCall: ToolCallInfo }): JSX.Element {
   const hasError = toolCall.status === "error" || toolCall.result?.isError;
   const complete = toolCall.status === "complete" || Boolean(toolCall.result && !hasError);
   return (
-    <details className={`rounded-md border px-3 py-2 ${hasError ? "border-red-700 bg-red-950/35" : complete ? "border-emerald-800 bg-emerald-950/20" : "border-shell-600 bg-shell-900"}`}>
-      <summary className="flex cursor-pointer list-none items-center gap-2 text-sm">
+    <details className={`border-l-2 py-1 pl-3 ${hasError ? "border-red-600" : complete ? "border-mint-600" : "border-accent-600"}`}>
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-slate-300">
         {hasError ? <X className="h-4 w-4 text-red-300" /> : complete ? <Check className="h-4 w-4 text-mint-500" /> : <Circle className="h-3 w-3 fill-accent-500 text-accent-500" />}
         <span className="truncate font-medium">{formatToolCallHeader(toolCall.name, toolCall.params)}</span>
         <ChevronDown className="ml-auto h-4 w-4 text-slate-500" />
       </summary>
-      <pre className="scrollbar mt-3 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-shell-950 p-3 text-xs text-slate-300">
+      <pre className="scrollbar mt-3 max-h-72 overflow-auto whitespace-pre-wrap border-l border-shell-700 pl-3 text-xs leading-5 text-slate-400">
         {JSON.stringify({ arguments: toolCall.params, result: toolCall.result?.content, details: toolCall.result?.details }, null, 2)}
       </pre>
     </details>
@@ -999,16 +1380,17 @@ interface SettingsPageProps {
   loginStatus: LoginStatus;
   loginMessage: string;
   loginUser: string | null;
-  serverInfo?: { contextWindow: number; supportsWorkspaceModelConnections: boolean; supportedProviders: string[]; workspace?: { hasModelConnections: boolean } };
+  serverInfo?: { contextWindow: number; supportsWorkspaceModels: boolean; supportedProviders: string[]; workspace?: { hasModels: boolean } };
   providers: ProviderInfo[];
+  workspaceProviders: WorkspaceProvider[];
   providerModels: ProviderModelInfo[];
   selectedProvider: string;
   selectedModel: string;
   showModelForm: boolean;
   selectedProviderInfo?: ProviderInfo;
-  modelConnections: ModelConnection[];
-  defaultModelConnectionId?: string;
-  modelDisplayName: string;
+  models: Model[];
+  defaultModelId?: string;
+  setCreatedModelAsDefault: boolean;
   modelSecrets: Record<string, string>;
   availableEgress: EgressHandlerInfo[];
   configuredEgress: EgressHandlerInfo[];
@@ -1026,7 +1408,7 @@ interface SettingsPageProps {
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onToggleModelForm: () => void;
-  onModelDisplayNameChange: (value: string) => void;
+  onSetCreatedModelAsDefaultChange: (value: boolean) => void;
   onModelSecretChange: (key: string, value: string) => void;
   onCreateModel: () => void;
   onDeleteModel: (id: string) => void;
@@ -1043,10 +1425,11 @@ interface SettingsPageProps {
 }
 
 const settingsSections: Array<{ id: SettingsSection; label: string; icon: JSX.Element }> = [
+  { id: "providers", label: "Providers", icon: <KeyRound className="h-4 w-4" /> },
   { id: "egress", label: "Egress", icon: <Shield className="h-4 w-4" /> },
   { id: "models", label: "Models", icon: <Database className="h-4 w-4" /> },
   { id: "account", label: "Account", icon: <User className="h-4 w-4" /> },
-  { id: "data", label: "Data", icon: <Trash2 className="h-4 w-4" /> },
+  { id: "data", label: "Data", icon: <Monitor className="h-4 w-4" /> },
 ];
 
 function SettingsPage(props: SettingsPageProps): JSX.Element {
@@ -1055,7 +1438,7 @@ function SettingsPage(props: SettingsPageProps): JSX.Element {
       <div className="mx-auto flex max-w-5xl flex-col gap-5">
         <div>
           <h2 className="text-lg font-semibold text-slate-100">Settings</h2>
-          <p className="mt-1 text-sm text-slate-500">Manage account access, model connections, egress handlers, and workspace data.</p>
+          <p className="mt-1 text-sm text-slate-500">Manage provider credentials, default model selection, egress handlers, account access, and workspace data.</p>
         </div>
         <div className="grid min-h-[22rem] gap-5 lg:min-h-[32rem] lg:grid-cols-[13rem_1fr]">
           <nav className="grid grid-cols-2 gap-2 sm:flex sm:flex-row sm:overflow-x-auto lg:flex-col lg:overflow-visible">
@@ -1075,6 +1458,7 @@ function SettingsPage(props: SettingsPageProps): JSX.Element {
             ))}
           </nav>
           <div className="rounded-md border border-shell-700 bg-shell-900 p-3 sm:p-4">
+            {props.section === "providers" ? <ProvidersPanel {...props} /> : null}
             {props.section === "egress" ? <EgressPanel {...props} /> : null}
             {props.section === "models" ? <ModelsPanel {...props} /> : null}
             {props.section === "account" ? <AccountPanel {...props} /> : null}
@@ -1114,49 +1498,76 @@ function AccountPanel(props: SettingsPageProps): JSX.Element {
 }
 
 function ModelsPanel(props: SettingsPageProps): JSX.Element {
+  const hasModels = props.models.length > 0;
+
   return (
     <PanelStack>
-      <SectionTitle icon={<Database className="h-4 w-4" />} title="Configured models" />
-      {props.modelConnections.map((connection) => (
+      <SectionTitle icon={<Database className="h-4 w-4" />} title="Default model" />
+      {!hasModels ? (
+        <InfoBox>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-slate-200">No models configured</p>
+              <p className="mt-1 text-sm text-slate-500">Configure a provider before choosing a default model.</p>
+            </div>
+            <button className="secondary-btn self-start" onClick={() => props.onSectionChange("providers")}>
+              <KeyRound className="h-4 w-4" />
+              Configure providers
+            </button>
+          </div>
+        </InfoBox>
+      ) : null}
+      {hasModels && !props.defaultModelId ? (
+        <InfoBox>
+          <p className="text-sm font-medium text-slate-200">No default model selected</p>
+          <p className="mt-1 text-sm text-slate-500">Choose one of your configured models to use automatically for new chats.</p>
+        </InfoBox>
+      ) : null}
+      {props.models.map((connection) => (
         <Row key={connection.id}>
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">{connection.displayName || `${connection.provider}/${connection.modelName}`}</p>
             <p className="truncate text-xs text-slate-500">{connection.provider}/{connection.modelName}</p>
           </div>
-          <IconButton title="Set default" active={connection.id === props.defaultModelConnectionId} onClick={() => props.onSetDefaultModel(connection.id)}>
+          <IconButton title="Set default" active={connection.id === props.defaultModelId} onClick={() => props.onSetDefaultModel(connection.id)}>
             <Check className="h-4 w-4" />
-          </IconButton>
-          <IconButton title="Delete" onClick={() => props.onDeleteModel(connection.id)}>
-            <Trash2 className="h-4 w-4" />
           </IconButton>
         </Row>
       ))}
-      {props.modelConnections.length === 0 ? <p className="text-sm text-slate-500">No model connections configured.</p> : null}
+    </PanelStack>
+  );
+}
 
+function ProvidersPanel(props: SettingsPageProps): JSX.Element {
+  return (
+    <PanelStack>
+      <SectionTitle icon={<KeyRound className="h-4 w-4" />} title="Configured providers" />
+      {props.workspaceProviders.map((provider) => (
+        <Row key={provider.id}>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">{provider.providerDisplayName || providerLabel(props.providers, provider.provider)}</p>
+            <p className="truncate text-xs text-slate-500">
+              {provider.provider}
+              {provider.configuredSecrets.length ? ` · ${provider.configuredSecrets.length} secret${provider.configuredSecrets.length === 1 ? "" : "s"}` : ""}
+            </p>
+          </div>
+        </Row>
+      ))}
+      {props.workspaceProviders.length === 0 ? <p className="text-sm text-slate-500">No providers configured.</p> : null}
       <button className="secondary-btn self-start" onClick={props.onToggleModelForm}>
         {props.showModelForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-        Add Model
+        Add Provider
       </button>
 
       {props.showModelForm ? (
         <div className="flex flex-col gap-4 rounded-md border border-shell-700 bg-shell-850 p-4">
-          <SectionTitle icon={<Plus className="h-4 w-4" />} title="Add model" />
+          <SectionTitle icon={<Plus className="h-4 w-4" />} title="Add provider" />
           <Field label="Provider">
             <select className="input" value={props.selectedProvider} onChange={(event) => props.onProviderChange(event.target.value)}>
               {props.providers.map((provider) => (
                 <option key={provider.id} value={provider.id}>{provider.name || provider.id}</option>
               ))}
             </select>
-          </Field>
-          <Field label="Model">
-            <select className="input" value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)}>
-              {props.providerModels.map((model) => (
-                <option key={model.id} value={model.id}>{model.name} ({model.id})</option>
-              ))}
-            </select>
-          </Field>
-          <Field label="Display name">
-            <input className="input" value={props.modelDisplayName} onChange={(event) => props.onModelDisplayNameChange(event.target.value)} placeholder="optional" />
           </Field>
           {props.selectedProviderInfo?.requiredSecrets.map((secret) => (
             <Field key={secret} label={`${secret} required`}>
@@ -1168,9 +1579,30 @@ function ModelsPanel(props: SettingsPageProps): JSX.Element {
               <input className="input" type="password" value={props.modelSecrets[secret] ?? ""} onChange={(event) => props.onModelSecretChange(secret, event.target.value)} />
             </Field>
           ))}
-          <button className="primary-btn self-start" disabled={!props.selectedProvider || !props.selectedModel} onClick={props.onCreateModel}>
-            <Plus className="h-4 w-4" />
-            Add model
+          <label className="flex items-start gap-3 rounded-md border border-shell-700 bg-shell-900 px-3 py-2 text-sm text-slate-300">
+            <input
+              className="mt-1"
+              type="checkbox"
+              checked={props.setCreatedModelAsDefault}
+              onChange={(event) => props.onSetCreatedModelAsDefaultChange(event.target.checked)}
+            />
+            <span className="min-w-0">
+              <span className="block font-medium text-slate-200">Choose Default Model</span>
+              <span className="block text-xs text-slate-500">Use this model automatically for new chats unless another model is selected.</span>
+            </span>
+          </label>
+          {props.setCreatedModelAsDefault ? (
+            <Field label="Default model">
+              <select className="input" value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)}>
+                {props.providerModels.map((model) => (
+                  <option key={model.id} value={model.id}>{model.name} ({model.id})</option>
+                ))}
+              </select>
+            </Field>
+          ) : null}
+          <button className="primary-btn self-start" disabled={!props.selectedProvider || (props.setCreatedModelAsDefault && !props.selectedModel)} onClick={props.onCreateModel}>
+            <Hammer className="h-4 w-4" />
+            Add
           </button>
         </div>
       ) : null}
@@ -1252,7 +1684,7 @@ function EgressPanel(props: SettingsPageProps): JSX.Element {
 function DataPanel(props: { sessionsTotal: number; onDeleteAll: () => void }): JSX.Element {
   return (
     <PanelStack>
-      <SectionTitle icon={<Trash2 className="h-4 w-4" />} title="Data" />
+      <SectionTitle icon={<Monitor className="h-4 w-4" />} title="Data" />
       <InfoBox>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -1364,6 +1796,117 @@ function pruneEmpty<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== "" && entry !== undefined && entry !== null)) as T;
 }
 
+function oldestEventSequence(events: Array<{ sequence: number }>): number | null {
+  return events.reduce<number | null>((oldest, event) => (
+    oldest === null || event.sequence < oldest ? event.sequence : oldest
+  ), null);
+}
+
+function isNearBottom(scroller: HTMLElement): boolean {
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 96;
+}
+
+function mergeCurrentTurnMessages(
+  current: DisplayMessage[],
+  serverMessages: DisplayMessage[],
+  promptContent: string,
+  optimistic: DisplayMessage,
+): DisplayMessage[] {
+  if (serverMessages.length === 0) return hasMatchingUserMessage(current, promptContent) ? current : [...current, optimistic];
+
+  const currentPromptIndex = findLastUserMessageIndex(current, promptContent);
+  const serverPromptIndex = findFirstUserMessageIndex(serverMessages, promptContent);
+  if (currentPromptIndex !== -1 && serverPromptIndex !== -1) {
+    return [
+      ...current.slice(0, currentPromptIndex),
+      ...serverMessages.slice(serverPromptIndex),
+    ];
+  }
+
+  return hasMatchingUserMessage(current, promptContent) ? current : [...current, optimistic];
+}
+
+function hasMatchingUserMessage(messages: DisplayMessage[], content: string): boolean {
+  return findLastUserMessageIndex(messages, content) !== -1;
+}
+
+function findLastUserMessageIndex(messages: DisplayMessage[], content: string): number {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role === "user" && message.content.trim() === content) return index;
+  }
+  return -1;
+}
+
+function findFirstUserMessageIndex(messages: DisplayMessage[], content: string): number {
+  return messages.findIndex((message) => message.role === "user" && message.content.trim() === content);
+}
+
+function formatPromptHistoryBeforeFirstVisibleMessage(
+  promptHistory: SessionResponse["promptHistory"] | null,
+  visibleMessages: DisplayMessage[],
+): string {
+  if (!promptHistory?.systemPrompt) return "";
+
+  const firstVisibleUser = visibleMessages.find((message) => message.role === "user");
+  const firstVisibleUserText = firstVisibleUser?.content.trim();
+  const firstVisibleHistoryIndex = firstVisibleUserText
+    ? promptHistory.messages.findIndex((message) =>
+        agentMessageRole(message) === "user" && agentMessageText(message).trim() === firstVisibleUserText
+      )
+    : -1;
+  const historyMessages = firstVisibleHistoryIndex >= 0
+    ? promptHistory.messages.slice(0, firstVisibleHistoryIndex)
+    : promptHistory.messages;
+
+  return [
+    formatPromptHistoryEntry("system", promptHistory.systemPrompt),
+    ...historyMessages.map((message) => formatPromptHistoryEntry(agentMessageLabel(message), agentMessageText(message))),
+  ].filter(Boolean).join("\n\n");
+}
+
+function formatPromptHistoryEntry(label: string, content: string): string {
+  const trimmed = content.trim();
+  if (!trimmed) return "";
+  return `--- ${label} ---\n${trimmed}`;
+}
+
+function agentMessageRole(message: unknown): string {
+  return isUnknownRecord(message) && typeof message.role === "string" ? message.role : "message";
+}
+
+function agentMessageLabel(message: unknown): string {
+  if (!isUnknownRecord(message)) return "message";
+  const role = agentMessageRole(message);
+  if (role !== "toolResult") return role;
+  return typeof message.toolName === "string" ? `toolResult: ${message.toolName}` : role;
+}
+
+function agentMessageText(message: unknown): string {
+  if (!isUnknownRecord(message)) return JSON.stringify(message, null, 2);
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  return content.map((part) => {
+    if (!isUnknownRecord(part)) return JSON.stringify(part);
+    if (part.type === "text" && typeof part.text === "string") return part.text;
+    return JSON.stringify(part, null, 2);
+  }).join("\n");
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAlreadyProcessingError(message: string): boolean {
+  return message.toLowerCase().includes("already processing");
+}
+
+function providerLabel(providers: ProviderInfo[], providerId: string): string {
+  return providers.find((provider) => provider.id === providerId)?.name || providerId;
+}
+
 function schemaProperties(handler?: EgressHandlerInfo): Array<[string, string[]]> {
   const properties = handler?.configSchema?.properties;
   if (!properties || typeof properties !== "object") return [];
@@ -1407,7 +1950,7 @@ const helpText = `Commands:
 /kill [session-id|all] - Terminate session workflows and containers
 /delete [session-id|all] - Delete sessions after cleanup
 /name <name> - Name the current session
-/models - Show model connections
+/models - Show models
 /clear - Clear chat history
 /help - Show this help message`;
 
