@@ -10,7 +10,7 @@
 import { Container, ContainerProxy } from "@cloudflare/containers";
 import type { Env } from "../../../internal-types/index.js";
 import { routeOutboundRequest } from "../../../egress/gateway.js";
-import { ContainerContextRepository } from "../../../data/index.js";
+import { ContainerRepository } from "../../../data/index.js";
 
 // Required for outbound interception to work.
 export { ContainerProxy };
@@ -33,15 +33,18 @@ const codingContainerOutbound = async (
     return routeOutboundRequest(env, request, requestId);
   }
 
-  const contexts = new ContainerContextRepository(env.DB);
-  const containerContext = await contexts.get(containerId);
-  if (!containerContext) {
+  const containers = new ContainerRepository(env.DB);
+  const container = await containers.getById(containerId);
+  if (!container) {
     return routeOutboundRequest(env, request, requestId);
   }
+  const [sessionLink] = await containers.listLinksForContainerId(containerId);
 
   return routeOutboundRequest(env, request, requestId, {
-    workspaceId: containerContext.workspaceId,
-    auth: { type: "session", sessionId: containerContext.sessionId },
+    workspaceId: container.workspaceId,
+    auth: sessionLink
+      ? { type: "session", sessionId: sessionLink.sessionId }
+      : undefined,
   });
 };
 

@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   AlertTriangle,
@@ -64,6 +65,11 @@ type LoginStatus = "idle" | "starting" | "waiting" | "approved" | "error";
 interface SelectedContainer {
   sessionId: string;
   containerId: string;
+}
+
+interface ContainerFileLink {
+  containerId: string;
+  path: string;
 }
 
 interface ContainerDirEntry {
@@ -132,6 +138,38 @@ interface TerminalEntry {
   details?: ContainerBashDetails;
   isError?: boolean;
 }
+
+type QuickPromptItem =
+  | {
+      id: string;
+      kind: "file";
+      label: string;
+      detail: string;
+      path: string;
+      fileType: "file" | "directory";
+    }
+  | {
+      id: string;
+      kind: "container";
+      label: string;
+      detail: string;
+      sessionId: string;
+      containerId: string;
+    }
+  | {
+      id: string;
+      kind: "session";
+      label: string;
+      detail: string;
+      sessionId: string;
+    }
+  | {
+      id: string;
+      kind: "prompt";
+      label: string;
+      detail: string;
+      prompt: string;
+    };
 
 const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", "account", "data"];
 
@@ -211,6 +249,9 @@ function App(): JSX.Element {
   const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [quickFileSelectedIndex, setQuickFileSelectedIndex] = useState(0);
+  const [quickPromptOpen, setQuickPromptOpen] = useState(false);
+  const [quickPromptQuery, setQuickPromptQuery] = useState("");
+  const [quickPromptSelectedIndex, setQuickPromptSelectedIndex] = useState(0);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [showModelForm, setShowModelForm] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
@@ -226,6 +267,7 @@ function App(): JSX.Element {
   const runningSessionIdRef = useRef<string | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const terminalInputRef = useRef<HTMLInputElement | null>(null);
+  const quickPromptInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const oldestLoadedEventSequenceRef = useRef<number | null>(null);
@@ -337,11 +379,20 @@ function App(): JSX.Element {
       });
       return response.result.details?.results ?? [];
     },
-    enabled: isConfigured && Boolean(selectedContainer) && quickFileMode,
+    enabled: isConfigured && Boolean(selectedContainer) && (quickFileMode || quickPromptOpen),
   });
   const quickFileMatches = useMemo(
     () => filterQuickFiles(quickFiles.data ?? [], quickFileQuery),
     [quickFiles.data, quickFileQuery],
+  );
+  const quickPromptItems = useMemo(
+    () => buildQuickPromptItems({
+      query: quickPromptQuery,
+      sessions: sessions.data?.sessions ?? [],
+      selectedContainer,
+      files: quickFiles.data ?? [],
+    }),
+    [quickFiles.data, quickPromptQuery, selectedContainer, sessions.data?.sessions],
   );
 
   const providers = useQuery({
@@ -523,6 +574,12 @@ function App(): JSX.Element {
   });
 
   const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
+  const currentContainerIds = sessionId
+    ? mergeContainers(
+        currentSession ? sessionContainers(currentSession) : [defaultContainerId(sessionId)],
+        inferContainerIds(sessionId, messages),
+      )
+    : [];
   const activeSessionIsProcessing = currentSession?.status === "processing" || serverProcessingSessionId === sessionId;
   const composerBusy = isRunning || activeSessionIsProcessing;
 
@@ -593,12 +650,6 @@ function App(): JSX.Element {
   }, [currentSession, serverProcessingSessionId]);
 
   useEffect(() => {
-    if (selectedContainer && appPage === "chat") {
-      focusTerminalPrompt();
-    }
-  }, [appPage, selectedContainer?.containerId]);
-
-  useEffect(() => {
     if (!selectedContainer || appPage !== "chat") return;
 
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -616,8 +667,39 @@ function App(): JSX.Element {
   }, [appPage, selectedContainer]);
 
   useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (quickPromptOpen) return;
+      if (isTextEntryElement(document.activeElement)) return;
+
+      event.preventDefault();
+      focusVisiblePrompt();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [appPage, quickPromptOpen, selectedContainer]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key.toLowerCase() !== "p" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTextEntryElement(document.activeElement)) return;
+
+      event.preventDefault();
+      openQuickPrompt();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  useEffect(() => {
     setQuickFileSelectedIndex(0);
   }, [quickFileQuery, selectedContainer?.containerId]);
+
+  useEffect(() => {
+    setQuickPromptSelectedIndex(0);
+  }, [quickPromptQuery, quickPromptOpen, selectedContainer?.containerId, sessions.data]);
 
   useEffect(() => {
     if (quickFileSelectedIndex >= quickFileMatches.length) {
@@ -677,6 +759,34 @@ function App(): JSX.Element {
     });
   }
 
+  function focusVisiblePrompt(): void {
+    if (appPage !== "chat") {
+      setAppPage("chat");
+      window.requestAnimationFrame(() => promptInputRef.current?.focus());
+      return;
+    }
+    if (selectedContainer) {
+      focusTerminalPrompt();
+      return;
+    }
+    focusPrompt();
+  }
+
+  function openQuickPrompt(): void {
+    setQuickPromptOpen(true);
+    setQuickPromptQuery("");
+    setQuickPromptSelectedIndex(0);
+    window.requestAnimationFrame(() => {
+      quickPromptInputRef.current?.focus();
+    });
+  }
+
+  function closeQuickPrompt(): void {
+    setQuickPromptOpen(false);
+    setQuickPromptQuery("");
+    setQuickPromptSelectedIndex(0);
+  }
+
   function startDraftSession(options: { history?: "push" | "replace" | false } = {}): void {
     abortRun();
     followingAbortControllerRef.current?.abort();
@@ -693,7 +803,6 @@ function App(): JSX.Element {
     setError(null);
     setStatusText("Ready for first prompt");
     if (options.history !== false) updateBrowserRootPath(options.history ?? "push");
-    focusPrompt();
   }
 
   function openSettings(section: SettingsSection | null = null, options: { history?: "push" | "replace" | false } = {}): void {
@@ -716,7 +825,6 @@ function App(): JSX.Element {
     setSelectedFilePath(null);
     setMobileSessionsOpen(false);
     setStatusText(`Viewing ${next.containerId.slice(0, 12)}`);
-    focusTerminalPrompt();
   }
 
   function openContainerDirectory(path: string): void {
@@ -798,6 +906,49 @@ function App(): JSX.Element {
     }
     setTerminalCommand("");
     setStatusText(`${selectedMatch?.type === "directory" ? "Opened directory" : "Opened"} ${normalizedPath}`);
+  }
+
+  function openContainerFileLink(link: ContainerFileLink): void {
+    const normalizedPath = normalizeQuickFilePath(link.path);
+    if (!normalizedPath) return;
+    openContainerWorkspace({ sessionId, containerId: link.containerId });
+    if (normalizedPath.endsWith("/")) {
+      openContainerDirectory(normalizedPath);
+      setStatusText(`Opened directory ${normalizedPath}`);
+      return;
+    }
+    setContainerPath(parentContainerPath(normalizedPath));
+    setSelectedFilePath(normalizedPath);
+    setStatusText(`Opened ${normalizedPath}`);
+  }
+
+  function executeQuickPromptItem(item: QuickPromptItem | undefined): void {
+    if (!item) return;
+    closeQuickPrompt();
+
+    switch (item.kind) {
+      case "file":
+        if (item.fileType === "directory") {
+          openContainerDirectory(item.path);
+        } else {
+          setSelectedFilePath(item.path);
+        }
+        setStatusText(`${item.fileType === "directory" ? "Opened directory" : "Opened"} ${item.path}`);
+        return;
+      case "container":
+        openContainerWorkspace({ sessionId: item.sessionId, containerId: item.containerId });
+        return;
+      case "session":
+        void openSession(item.sessionId);
+        return;
+      case "prompt":
+        setAppPage("chat");
+        setMobileSessionsOpen(false);
+        closeContainerWorkspace();
+        focusPrompt();
+        void submitPromptContent(item.prompt);
+        return;
+    }
   }
 
   function rememberSessionContainers(targetSessionId: string, displayMessages: DisplayMessage[]): void {
@@ -930,7 +1081,6 @@ function App(): JSX.Element {
       setHistoryLoading(false);
       setError(session.status === "error" ? session.errorMessage ?? null : null);
       setStatusText(`Opened recent ${session.id.slice(0, 8)}`);
-      focusPrompt();
     } catch (cause) {
       showError(cause);
     }
@@ -1166,7 +1316,11 @@ function App(): JSX.Element {
   }
 
   async function submitPrompt(): Promise<void> {
-    const content = prompt.trim();
+    await submitPromptContent(prompt);
+  }
+
+  async function submitPromptContent(promptContent: string): Promise<void> {
+    const content = promptContent.trim();
     if (!content) return;
 
     if (handleCommand(content)) {
@@ -1324,6 +1478,19 @@ function App(): JSX.Element {
 
   return (
     <div className="flex h-dvh min-h-0 bg-shell-950 text-slate-100">
+      {quickPromptOpen ? (
+        <QuickPromptPalette
+          inputRef={quickPromptInputRef}
+          query={quickPromptQuery}
+          items={quickPromptItems}
+          selectedIndex={quickPromptSelectedIndex}
+          loadingFiles={quickFiles.isFetching && Boolean(selectedContainer)}
+          onQueryChange={setQuickPromptQuery}
+          onSelectedIndexChange={setQuickPromptSelectedIndex}
+          onClose={closeQuickPrompt}
+          onSelect={executeQuickPromptItem}
+        />
+      ) : null}
       <aside className={`hidden shrink-0 border-r border-shell-700 bg-shell-900/95 transition-[width] md:flex md:flex-col ${sessionsCollapsed ? "w-14" : "w-72"}`}>
         <SessionSidebar
           currentSessionId={sessionId}
@@ -1508,7 +1675,14 @@ function App(): JSX.Element {
                   ) : (
                     <>
                       <PromptHistoryReveal promptHistory={promptHistory} visibleMessages={messages} />
-                      {messages.map((message, index) => <ChatMessage key={`${index}-${message.role}`} message={message} />)}
+                      {messages.map((message, index) => (
+                        <ChatMessage
+                          key={`${index}-${message.role}`}
+                          message={message}
+                          containerIds={currentContainerIds}
+                          onOpenContainerFile={openContainerFileLink}
+                        />
+                      ))}
                     </>
                   )}
                   {composerBusy ? <Thinking /> : null}
@@ -1555,7 +1729,15 @@ function App(): JSX.Element {
                         }
                         if (quickFileMode && event.key === "Escape") {
                           event.preventDefault();
+                          event.stopPropagation();
                           setTerminalCommand("");
+                          blurTextEntryElement(event.currentTarget);
+                          return;
+                        }
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          blurTextEntryElement(event.currentTarget);
                           return;
                         }
                         if (quickFileMode && event.key === "Tab") {
@@ -1595,6 +1777,12 @@ function App(): JSX.Element {
                       setComposerRows(Math.min(8, Math.max(2, event.target.value.split("\n").length)));
                     }}
                     onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        blurTextEntryElement(event.currentTarget);
+                        return;
+                      }
                       if (event.key === "Enter" && !event.shiftKey) {
                         event.preventDefault();
                         void submitPrompt();
@@ -1973,6 +2161,105 @@ function TerminalOutput({ entries }: { entries: TerminalEntry[] }): JSX.Element 
   );
 }
 
+function QuickPromptPalette(props: {
+  inputRef: Ref<HTMLInputElement>;
+  query: string;
+  items: QuickPromptItem[];
+  selectedIndex: number;
+  loadingFiles: boolean;
+  onQueryChange: (query: string) => void;
+  onSelectedIndexChange: (index: number) => void;
+  onClose: () => void;
+  onSelect: (item: QuickPromptItem | undefined) => void;
+}): JSX.Element {
+  const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.items.length - 1));
+
+  return (
+    <div className="fixed inset-0 z-50 bg-shell-950/60 px-3 py-[10dvh] backdrop-blur-sm" onMouseDown={props.onClose}>
+      <div
+        className="mx-auto flex max-h-[min(34rem,80dvh)] max-w-2xl flex-col overflow-hidden rounded-lg border border-shell-600 bg-shell-900 shadow-panel"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="border-b border-shell-700 p-2">
+          <input
+            ref={props.inputRef}
+            className="h-11 w-full border-0 bg-transparent px-3 text-sm text-slate-100 outline-none placeholder:text-slate-500"
+            value={props.query}
+            placeholder="Open File: /path, Open Container: id, Enter Prompt: ask..., Open Session: name"
+            onChange={(event) => props.onQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                props.onClose();
+                return;
+              }
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                props.onSelectedIndexChange(Math.min(selectedIndex + 1, Math.max(0, props.items.length - 1)));
+                return;
+              }
+              if (event.key === "ArrowUp") {
+                event.preventDefault();
+                props.onSelectedIndexChange(Math.max(0, selectedIndex - 1));
+                return;
+              }
+              if (event.key === "Enter") {
+                event.preventDefault();
+                props.onSelect(props.items[selectedIndex]);
+              }
+            }}
+          />
+        </div>
+        <div className="flex items-center justify-between border-b border-shell-700 px-3 py-2 text-xs text-slate-500">
+          <span>Quick prompt</span>
+          {props.loadingFiles ? (
+            <span className="flex items-center gap-1">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Indexing files
+            </span>
+          ) : (
+            <span>{props.items.length} action{props.items.length === 1 ? "" : "s"}</span>
+          )}
+        </div>
+        <div className="scrollbar min-h-0 overflow-y-auto p-1">
+          {props.items.map((item, index) => (
+            <button
+              key={item.id}
+              className={`flex w-full min-w-0 items-center gap-3 rounded-md px-3 py-2 text-left transition ${
+                index === selectedIndex ? "bg-accent-600/15 text-accent-100" : "text-slate-300 hover:bg-shell-850"
+              }`}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                props.onSelect(item);
+              }}
+            >
+              <QuickPromptIcon item={item} />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm">{item.label}</span>
+                <span className="block truncate text-xs text-slate-500">{item.detail}</span>
+              </span>
+            </button>
+          ))}
+          {!props.loadingFiles && props.items.length === 0 ? (
+            <div className="px-3 py-8 text-sm text-slate-500">No actions match.</div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickPromptIcon({ item }: { item: QuickPromptItem }): JSX.Element {
+  if (item.kind === "file") {
+    return item.fileType === "directory"
+      ? <Folder className="h-4 w-4 shrink-0 text-accent-400" />
+      : <FileText className="h-4 w-4 shrink-0 text-slate-500" />;
+  }
+  if (item.kind === "container") return <Terminal className="h-4 w-4 shrink-0 text-accent-400" />;
+  if (item.kind === "session") return <MessageSquare className="h-4 w-4 shrink-0 text-slate-500" />;
+  return <Send className="h-4 w-4 shrink-0 text-accent-400" />;
+}
+
 function QuickFilePopup(props: {
   query: string;
   matches: ContainerFindResult[];
@@ -2190,6 +2477,145 @@ function isTextEntryElement(element: Element | null): boolean {
   return tagName === "input" || tagName === "textarea" || element.getAttribute("contenteditable") === "true";
 }
 
+function blurTextEntryElement(element: HTMLInputElement | HTMLTextAreaElement): void {
+  element.blur();
+}
+
+function buildQuickPromptItems(input: {
+  query: string;
+  sessions: SessionSummary[];
+  selectedContainer: SelectedContainer | null;
+  files: ContainerFindResult[];
+}): QuickPromptItem[] {
+  const query = input.query.trim();
+  const promptText = quickPromptEnteredPrompt(query);
+  const items: QuickPromptItem[] = [];
+
+  if (promptText) {
+    items.push({
+      id: `prompt:${promptText}`,
+      kind: "prompt",
+      label: `Enter Prompt: ${promptText}`,
+      detail: "Send this prompt to the current session",
+      prompt: promptText,
+    });
+  }
+
+  if (input.selectedContainer) {
+    const directPath = quickPromptEnteredPath(query, "open file");
+    if (directPath) {
+      items.push({
+        id: `file-direct:${input.selectedContainer.containerId}:${directPath}`,
+        kind: "file",
+        label: `Open File: ${directPath}`,
+        detail: `${input.selectedContainer.containerId} / try exact path`,
+        path: directPath,
+        fileType: "file",
+      });
+    }
+
+    for (const file of input.files) {
+      const action = file.type === "directory" ? "Open Directory" : "Open File";
+      items.push({
+        id: `file:${input.selectedContainer.containerId}:${file.path}`,
+        kind: "file",
+        label: `${action}: ${file.path}`,
+        detail: `${input.selectedContainer.containerId} / ${file.type === "directory" ? "directory" : formatBytes(file.size)}`,
+        path: file.path,
+        fileType: file.type,
+      });
+    }
+  }
+
+  for (const session of input.sessions) {
+    const sessionTitle = formatSessionTitle(session);
+    for (const containerId of sessionContainers(session)) {
+      items.push({
+        id: `container:${session.id}:${containerId}`,
+        kind: "container",
+        label: `Open Container: ${containerId}`,
+        detail: `Session: ${sessionTitle} (${session.id.slice(0, 8)})`,
+        sessionId: session.id,
+        containerId,
+      });
+    }
+
+    items.push({
+      id: `session:${session.id}`,
+      kind: "session",
+      label: `Open Session: ${sessionTitle}`,
+      detail: `${session.status} / ${session.id.slice(0, 8)} / ${session.messageCount} ${session.messageCount === 1 ? "event" : "events"}`,
+      sessionId: session.id,
+    });
+  }
+
+  return rankQuickPromptItems(items, query).slice(0, 80);
+}
+
+function rankQuickPromptItems(items: QuickPromptItem[], query: string): QuickPromptItem[] {
+  if (!query) return items;
+  return items
+    .map((item) => ({ item, score: quickPromptScore(`${item.label} ${item.detail}`, query) }))
+    .filter((entry) => entry.score < Number.POSITIVE_INFINITY)
+    .sort((a, b) => a.score - b.score)
+    .map((entry) => entry.item);
+}
+
+function quickPromptScore(label: string, query: string): number {
+  const normalizedLabel = normalizeSearchText(label);
+  const tokens = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return 0;
+
+  let total = 0;
+  for (const token of tokens) {
+    const index = normalizedLabel.indexOf(token);
+    if (index >= 0) {
+      total += index;
+      continue;
+    }
+
+    const fuzzy = fuzzySubsequenceScore(normalizedLabel, token);
+    if (fuzzy === null) return Number.POSITIVE_INFINITY;
+    total += fuzzy + 100;
+  }
+  return total;
+}
+
+function fuzzySubsequenceScore(label: string, token: string): number | null {
+  let labelIndex = 0;
+  let firstMatch = -1;
+  let lastMatch = -1;
+  let gaps = 0;
+
+  for (const char of token) {
+    const matchIndex = label.indexOf(char, labelIndex);
+    if (matchIndex < 0) return null;
+    if (firstMatch < 0) firstMatch = matchIndex;
+    if (lastMatch >= 0) gaps += matchIndex - lastMatch - 1;
+    lastMatch = matchIndex;
+    labelIndex = matchIndex + 1;
+  }
+
+  return firstMatch + gaps;
+}
+
+function normalizeSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/(^|\s)(?:\.\/|\/)+/g, "$1")
+    .replace(/[\\/_:-]+/g, " ");
+}
+
+function quickPromptEnteredPrompt(query: string): string {
+  return query.replace(/^enter\s+prompt\s*:\s*/i, "").trim();
+}
+
+function quickPromptEnteredPath(query: string, action: string): string {
+  const normalizedAction = action.replace(/\s+/g, "\\s+");
+  const match = query.match(new RegExp(`^${normalizedAction}\\s*:\\s*(.+)$`, "i"));
+  return match?.[1] ? normalizeQuickFilePath(match[1]) : "";
+}
+
 function filterQuickFiles(files: ContainerFindResult[], query: string): ContainerFindResult[] {
   const normalizedQuery = normalizeQuickFilePath(query).toLowerCase();
   const matches = normalizedQuery
@@ -2206,6 +2632,52 @@ function normalizeQuickFilePath(path: string): string {
   return withoutLeadingSlash.startsWith("workspace/")
     ? withoutLeadingSlash.slice("workspace/".length)
     : withoutLeadingSlash;
+}
+
+function createMarkdownComponents(
+  containerIds: string[],
+  onOpenContainerFile: (link: ContainerFileLink) => void,
+): Components {
+  return {
+    a({ href, children, ...props }) {
+      const containerLink = parseContainerFileLink(href, containerIds);
+      if (!containerLink) {
+        return <a href={href} {...props}>{children}</a>;
+      }
+      return (
+        <button
+          type="button"
+          className="font-medium text-accent-300 underline decoration-accent-400/50 underline-offset-2 transition hover:text-accent-200"
+          title={`${containerLink.containerId}:${containerLink.path}`}
+          onClick={() => onOpenContainerFile(containerLink)}
+        >
+          {children}
+        </button>
+      );
+    },
+  };
+}
+
+function parseContainerFileLink(href: string | undefined, containerIds: string[]): ContainerFileLink | null {
+  if (!href) return null;
+  const separatorIndex = href.indexOf(":");
+  if (separatorIndex <= 0) return null;
+  const containerId = href.slice(0, separatorIndex);
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(containerId) || !containerIds.includes(containerId)) return null;
+
+  const rawPath = href.slice(separatorIndex + 1);
+  const pathWithoutFragment = rawPath.split("#", 1)[0] ?? "";
+  const pathWithoutQuery = pathWithoutFragment.split("?", 1)[0] ?? "";
+  const path = normalizeQuickFilePath(decodeContainerLinkPath(pathWithoutQuery));
+  return path ? { containerId, path } : null;
+}
+
+function decodeContainerLinkPath(path: string): string {
+  try {
+    return decodeURI(path);
+  } catch {
+    return path;
+  }
 }
 
 function quickFileMatches(path: string, query: string): boolean {
@@ -2256,10 +2728,19 @@ function PromptHistoryBlock({ label, content }: { label: string; content: string
   );
 }
 
-function ChatMessage({ message }: { message: DisplayMessage }): JSX.Element {
+function ChatMessage({
+  message,
+  containerIds,
+  onOpenContainerFile,
+}: {
+  message: DisplayMessage;
+  containerIds: string[];
+  onOpenContainerFile: (link: ContainerFileLink) => void;
+}): JSX.Element {
   const isUser = message.role === "user";
   const isError = message.role === "error";
   const isSystem = message.role === "system";
+  const markdownComponents = createMarkdownComponents(containerIds, onOpenContainerFile);
   if (isSystem) return <PromptHistoryBlock label="System" content={message.content} />;
 
   if (isError) {
@@ -2267,7 +2748,7 @@ function ChatMessage({ message }: { message: DisplayMessage }): JSX.Element {
       <article className="flex justify-start gap-3">
         <Avatar role={message.role} />
         <div className="min-w-0 max-w-[84%] rounded-lg bg-red-950/55 px-4 py-3 text-red-100 ring-1 ring-red-800">
-          {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} className="markdown text-sm">{message.content}</ReactMarkdown> : null}
+          {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={(url) => url} className="markdown text-sm">{message.content}</ReactMarkdown> : null}
         </div>
       </article>
     );
@@ -2276,7 +2757,7 @@ function ChatMessage({ message }: { message: DisplayMessage }): JSX.Element {
   if (!isUser && !isError) {
     return (
       <article className="w-full min-w-0 py-1">
-        {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} className="markdown text-[0.95rem] text-slate-100">{message.content}</ReactMarkdown> : null}
+        {message.content ? <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={(url) => url} className="markdown text-[0.95rem] text-slate-100">{message.content}</ReactMarkdown> : null}
         {message.toolCalls?.length ? (
           <div className="mt-4 flex flex-col gap-2">
             {message.toolCalls.map((toolCall, index) => (

@@ -29,7 +29,7 @@ vi.mock("../../../src/data/index.js", () => ({
   SessionMessageRepository: vi.fn().mockImplementation(() => ({
     list: mocks.listMessages,
   })),
-  ContainerContextRepository: vi.fn(),
+  ContainerRepository: vi.fn(),
   InputQueueRepository: vi.fn(),
 }));
 

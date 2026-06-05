@@ -262,13 +262,30 @@ export const sessionTools = sqliteTable(
   })
 );
 
-export const containerContexts = sqliteTable("container_contexts", {
-  containerId: text("container_id").primaryKey(),
+export const containers = sqliteTable("containers", {
+  id: text("id").primaryKey(),
   workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["active", "destroyed"] }).notNull().default("active"),
+  description: text("description"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  deletedAt: integer("deleted_at"),
 });
+
+export const sessionContainer = sqliteTable(
+  "session_container",
+  {
+    sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+    containerId: text("container_id").notNull().references(() => containers.id, { onDelete: "cascade" }),
+    workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ["default", "attached"] }).notNull().default("attached"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.sessionId, table.containerId] }),
+  })
+);
 
 export const storedCode = sqliteTable(
   "stored_code",

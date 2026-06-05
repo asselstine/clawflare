@@ -356,20 +356,37 @@ CREATE TABLE session_run_steps (
 ) STRICT;
 
 -- =============================================================================
--- Container Contexts
+-- Containers
 -- =============================================================================
-CREATE TABLE container_contexts (
-  container_id TEXT PRIMARY KEY,
+CREATE TABLE containers (
+  id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'destroyed')),
+  description TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
-  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+  deleted_at INTEGER,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX idx_container_contexts_session ON container_contexts(session_id);
-CREATE INDEX idx_container_contexts_workspace ON container_contexts(workspace_id);
+CREATE INDEX idx_containers_workspace ON containers(workspace_id, deleted_at, updated_at DESC);
+CREATE INDEX idx_containers_status ON containers(status);
+
+CREATE TABLE session_container (
+  session_id TEXT NOT NULL,
+  container_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'attached' CHECK (role IN ('default', 'attached')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, container_id),
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_session_container_session ON session_container(workspace_id, session_id);
+CREATE INDEX idx_session_container_container ON session_container(workspace_id, container_id);
 
 -- =============================================================================
 -- Stored Code (workspace-scoped)

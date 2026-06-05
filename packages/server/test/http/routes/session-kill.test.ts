@@ -14,7 +14,9 @@ const mocks = vi.hoisted(() => ({
   requestCancelRun: vi.fn(),
   cancelRun: vi.fn(),
   listForSession: vi.fn(),
-  deleteForSession: vi.fn(),
+  unlinkSession: vi.fn(),
+  listLinksForContainer: vi.fn(),
+  markDestroyed: vi.fn(),
   destroyContainer: vi.fn(),
 }));
 
@@ -36,9 +38,11 @@ vi.mock("../../../src/data/index.js", () => ({
     requestCancel: mocks.requestCancelRun,
     cancel: mocks.cancelRun,
   })),
-  ContainerContextRepository: vi.fn().mockImplementation(() => ({
+  ContainerRepository: vi.fn().mockImplementation(() => ({
     listForSession: mocks.listForSession,
-    deleteForSession: mocks.deleteForSession,
+    unlinkSession: mocks.unlinkSession,
+    listLinksForContainer: mocks.listLinksForContainer,
+    markDestroyed: mocks.markDestroyed,
   })),
   InputQueueRepository: vi.fn(),
 }));
@@ -151,15 +155,17 @@ describe("handleKillSession", () => {
     });
     mocks.listForSession.mockResolvedValue([
       {
-        containerId: "container-1",
+        id: "container-1",
         workspaceId: "workspace-1",
-        sessionId: "session-1",
+        status: "active",
         createdAt: Date.now(),
         updatedAt: Date.now(),
       },
     ]);
+    mocks.listLinksForContainer.mockResolvedValue([{ sessionId: "session-1", containerId: "container-1" }]);
     mocks.destroyContainer.mockResolvedValue(undefined);
-    mocks.deleteForSession.mockResolvedValue(undefined);
+    mocks.unlinkSession.mockResolvedValue(undefined);
+    mocks.markDestroyed.mockResolvedValue(undefined);
     mocks.append.mockResolvedValue({ nextCursor: "1" });
     mocks.markClosed.mockResolvedValue(undefined);
     mocks.setActive.mockResolvedValue(undefined);
@@ -188,7 +194,8 @@ describe("handleKillSession", () => {
     expect(data.destroyedContainers).toEqual(["container-1"]);
     expect(mocks.cancelRun).toHaveBeenCalledWith("run-1");
     expect(mocks.destroyContainer).toHaveBeenCalledWith(env, "container-1");
-    expect(mocks.deleteForSession).toHaveBeenCalledWith("workspace-1", "session-1", "container-1");
+    expect(mocks.unlinkSession).toHaveBeenCalledWith("workspace-1", "session-1", "container-1");
+    expect(mocks.markDestroyed).toHaveBeenCalledWith("workspace-1", "container-1");
     expect(mocks.markClosed).toHaveBeenCalledWith("session-1", "user");
     expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
   });
@@ -215,9 +222,11 @@ describe("handleDeleteSession", () => {
       workspaceId: "workspace-1",
       status: "running",
     });
-    mocks.listForSession.mockResolvedValue([{ containerId: "container-1" }]);
+    mocks.listForSession.mockResolvedValue([{ id: "container-1" }]);
+    mocks.listLinksForContainer.mockResolvedValue([{ sessionId: "session-1", containerId: "container-1" }]);
     mocks.destroyContainer.mockResolvedValue(undefined);
-    mocks.deleteForSession.mockResolvedValue(undefined);
+    mocks.unlinkSession.mockResolvedValue(undefined);
+    mocks.markDestroyed.mockResolvedValue(undefined);
     mocks.append.mockResolvedValue({ nextCursor: "1" });
     mocks.markClosed.mockResolvedValue(undefined);
     mocks.setActive.mockResolvedValue(undefined);

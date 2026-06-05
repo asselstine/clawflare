@@ -128,14 +128,18 @@ export type {
 export { SessionToolRepository } from "./session-tools.js";
 
 // =============================================================================
-// Container Contexts
+// Containers
 // =============================================================================
 
 export type {
-  ContainerContext,
-  RegisterContainerContextParams,
-} from "./container-contexts.js";
-export { ContainerContextRepository } from "./container-contexts.js";
+  ContainerRecord,
+  ContainerStatus,
+  CreateContainerParams,
+  LinkSessionContainerParams,
+  SessionContainerLink,
+  SessionContainerRole,
+} from "./containers.js";
+export { ContainerRepository } from "./containers.js";
 
 // =============================================================================
 // Auth

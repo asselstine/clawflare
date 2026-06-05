@@ -1,0 +1,199 @@
+import { Hono } from "hono";
+import type { AppBindings } from "../../http/app-bindings.js";
+import type { RequestContext } from "../../http/request-context.js";
+import { badRequest, json, notFound, serverError } from "../../http/responses.js";
+import type { Env } from "../../internal-types/index.js";
+import { logger } from "../../lib/logger.js";
+import { requireAuth } from "../../middleware/auth.js";
+import {
+  createContainerModel,
+  destroyContainerModel,
+  getContainerModel,
+  linkContainerToSession,
+  listContainers,
+  listSessionContainers,
+  unlinkContainerFromSession,
+} from "./containers.service.js";
+
+export const containersRoutes = new Hono<AppBindings>();
+
+containersRoutes.use("*", requireAuth);
+containersRoutes.get("/", (c) => handleListContainers(c.env, c.get("requestContext")!));
+containersRoutes.post("/", (c) => handleCreateContainer(c.req.raw, c.env, c.get("requestContext")!));
+containersRoutes.get("/:id", (c) => handleGetContainer(c.env, c.get("requestContext")!, c.req.param("id")));
+containersRoutes.delete("/:id", (c) =>
+  handleDestroyContainer(c.env, c.get("requestContext")!, c.req.param("id"), c.req.raw.signal)
+);
+containersRoutes.post("/:id/sessions/:sessionId", (c) =>
+  handleLinkContainerSession(c.env, c.get("requestContext")!, c.req.param("id"), c.req.param("sessionId"))
+);
+containersRoutes.delete("/:id/sessions/:sessionId", (c) =>
+  handleUnlinkContainerSession(c.env, c.get("requestContext")!, c.req.param("id"), c.req.param("sessionId"))
+);
+
+interface CreateContainerRequest {
+  id?: string;
+  description?: string;
+  sessionId?: string;
+}
+
+export async function handleListContainers(
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  try {
+    return json({ containers: await listContainers(env, requestContext.workspace.id) });
+  } catch (error) {
+    logger.error("Container list failed", error, {
+      handler: "handleListContainers",
+      route: "GET /v1/containers",
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError("Container list failed. Check server logs for details.");
+  }
+}
+
+export async function handleCreateContainer(
+  request: Request,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const body = (await request.json().catch(() => ({}))) as CreateContainerRequest;
+  if (body.id !== undefined && typeof body.id !== "string") return badRequest("id must be a string");
+  if (body.description !== undefined && typeof body.description !== "string") {
+    return badRequest("description must be a string");
+  }
+  if (body.sessionId !== undefined && typeof body.sessionId !== "string") {
+    return badRequest("sessionId must be a string");
+  }
+
+  try {
+    const result = await createContainerModel(
+      env,
+      requestContext.workspace.id,
+      {
+        id: body.id,
+        description: body.description,
+        sessionId: body.sessionId,
+      },
+      request.signal
+    );
+    return json(result, { status: 201 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Session not found")) return notFound("Session");
+    logger.error("Container create failed", error, {
+      handler: "handleCreateContainer",
+      route: "POST /v1/containers",
+      workspaceId: requestContext.workspace.id,
+    });
+    return badRequest(message);
+  }
+}
+
+export async function handleGetContainer(
+  env: Env,
+  requestContext: RequestContext,
+  id: string
+): Promise<Response> {
+  try {
+    const container = await getContainerModel(env, requestContext.workspace.id, id);
+    if (!container) return notFound("Container");
+    return json({ container });
+  } catch (error) {
+    logger.error("Container get failed", error, {
+      handler: "handleGetContainer",
+      route: "GET /v1/containers/:id",
+      id,
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError("Container get failed. Check server logs for details.");
+  }
+}
+
+export async function handleDestroyContainer(
+  env: Env,
+  requestContext: RequestContext,
+  id: string,
+  signal?: AbortSignal
+): Promise<Response> {
+  try {
+    await destroyContainerModel(env, requestContext.workspace.id, id, signal);
+    return json({ ok: true, id });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("not found")) return notFound("Container");
+    logger.error("Container destroy failed", error, {
+      handler: "handleDestroyContainer",
+      route: "DELETE /v1/containers/:id",
+      id,
+      workspaceId: requestContext.workspace.id,
+    });
+    return badRequest(message);
+  }
+}
+
+export async function handleLinkContainerSession(
+  env: Env,
+  requestContext: RequestContext,
+  id: string,
+  sessionId: string
+): Promise<Response> {
+  try {
+    const link = await linkContainerToSession(env, requestContext.workspace.id, id, sessionId);
+    return json({ link });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Session not found")) return notFound("Session");
+    if (message.includes("Container not found")) return notFound("Container");
+    logger.error("Container link failed", error, {
+      handler: "handleLinkContainerSession",
+      route: "POST /v1/containers/:id/sessions/:sessionId",
+      id,
+      sessionId,
+      workspaceId: requestContext.workspace.id,
+    });
+    return badRequest(message);
+  }
+}
+
+export async function handleUnlinkContainerSession(
+  env: Env,
+  requestContext: RequestContext,
+  id: string,
+  sessionId: string
+): Promise<Response> {
+  try {
+    await unlinkContainerFromSession(env, requestContext.workspace.id, id, sessionId);
+    return json({ ok: true, id, sessionId });
+  } catch (error) {
+    logger.error("Container unlink failed", error, {
+      handler: "handleUnlinkContainerSession",
+      route: "DELETE /v1/containers/:id/sessions/:sessionId",
+      id,
+      sessionId,
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError("Container unlink failed. Check server logs for details.");
+  }
+}
+
+export async function handleListSessionContainers(
+  env: Env,
+  requestContext: RequestContext,
+  sessionId: string
+): Promise<Response> {
+  try {
+    return json({ containers: await listSessionContainers(env, requestContext.workspace.id, sessionId) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("Session not found")) return notFound("Session");
+    logger.error("Session container list failed", error, {
+      handler: "handleListSessionContainers",
+      route: "GET /v1/session/:id/containers",
+      sessionId,
+      workspaceId: requestContext.workspace.id,
+    });
+    return serverError("Session container list failed. Check server logs for details.");
+  }
+}

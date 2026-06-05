@@ -3,7 +3,7 @@ import type { AppBindings } from "../../http/app-bindings.js";
 import { requireAuth } from "../../middleware/auth.js";
 import type { Env } from "../../internal-types/index.js";
 import {
-  ContainerContextRepository,
+  ContainerRepository,
   SessionEventRepository,
   SessionMessageRepository,
   SessionRepository,
@@ -16,6 +16,7 @@ import { destroyContainer } from "../tools/container/client.js";
 import { badRequest, json, notFound, serverError } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelForNewSession } from "../models/models.service.js";
+import { handleListSessionContainers } from "../containers/containers.routes.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import type { AgentMessage, DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
@@ -39,6 +40,9 @@ sessionRoutes.get("/:id", (c) =>
 );
 sessionRoutes.get("/:id/tools", (c) =>
   handleListSessionTools(c.req.param("id"), c.env, c.get("requestContext")!)
+);
+sessionRoutes.get("/:id/containers", (c) =>
+  handleListSessionContainers(c.env, c.get("requestContext")!, c.req.param("id"))
 );
 sessionRoutes.post("/:id/name", (c) =>
   handleRenameSession(c.req.param("id"), c.req.raw, c.env, c.get("requestContext")!)
@@ -834,7 +838,7 @@ async function killSessionResources(
   const runtime = new SessionRuntimeRepository(env.DB);
   const events = new SessionEventRepository(env.DB);
   const runs = new SessionRunRepository(env.DB);
-  const containerContexts = new ContainerContextRepository(env.DB);
+  const containers = new ContainerRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
   const errors: string[] = [];
@@ -846,22 +850,21 @@ async function killSessionResources(
     runCancelled = true;
   }
 
-  const ownedContainers = await containerContexts.listForSession(effectiveWorkspaceId, sessionId);
+  const ownedContainers = await containers.listForSession(effectiveWorkspaceId, sessionId);
   const destroyedContainers: string[] = [];
 
   for (const container of ownedContainers) {
+    const linksBeforeUnlink = await containers.listLinksForContainer(effectiveWorkspaceId, container.id);
     try {
-      await destroyContainer(env, container.containerId);
-      destroyedContainers.push(container.containerId);
+      await containers.unlinkSession(effectiveWorkspaceId, sessionId, container.id);
+      if (linksBeforeUnlink.length <= 1) {
+        await destroyContainer(env, container.id);
+        await containers.markDestroyed(effectiveWorkspaceId, container.id);
+        destroyedContainers.push(container.id);
+      }
     } catch (error) {
       errors.push(
-        `Container ${container.containerId}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    } finally {
-      await containerContexts.deleteForSession(
-        effectiveWorkspaceId,
-        sessionId,
-        container.containerId
+        `Container ${container.id}: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -1040,7 +1043,7 @@ export async function handleListSessions(
   const sessionsRepo = new SessionRepository(env.DB);
   const events = new SessionEventRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
-  const containers = new ContainerContextRepository(env.DB);
+  const containers = new ContainerRepository(env.DB);
   // Use workspace from request context
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -1071,7 +1074,7 @@ export async function handleListSessions(
           messageCount,
           updatedAt: state.updatedAt,
           isActive,
-          containers: sessionContainers.map((container) => container.containerId),
+          containers: sessionContainers.map((container) => container.id),
         };
 
         const response: SessionListResponse = { sessions: [summary], total: 1 };
@@ -1091,7 +1094,7 @@ export async function handleListSessions(
     
     const sessions = await Promise.all((await sessionsRepo.list(filter)).map(async (session) => ({
       ...session,
-      containers: (await containers.listForSession(effectiveWorkspaceId, session.id)).map((container) => container.containerId),
+      containers: (await containers.listForSession(effectiveWorkspaceId, session.id)).map((container) => container.id),
     })));
     const total = await sessionsRepo.count(filter);
 

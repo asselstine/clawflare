@@ -9,7 +9,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "@earendil-works/pi-ai";
 import type { Env } from "../../../internal-types/index.js";
-import { ContainerContextRepository } from "../../../data/index.js";
+import { ContainerRepository } from "../../../data/index.js";
 import {
   requireBuiltinToolContext,
   type BuiltinToolRuntimeContext,
@@ -253,17 +253,24 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
-async function registerContainerContext(
+async function registerSessionContainer(
   env: Env,
   ctx: ContainerToolContext,
-  containerId: string
+  containerId: string,
+  description?: string
 ): Promise<void> {
   if (!ctx.workspaceId) return;
-  const contexts = new ContainerContextRepository(env.DB);
-  await contexts.register({
+  const containers = new ContainerRepository(env.DB);
+  await containers.create({
+    id: containerId,
+    workspaceId: ctx.workspaceId,
+    description,
+  });
+  await containers.linkSession({
     containerId,
     workspaceId: ctx.workspaceId,
     sessionId: ctx.sessionId,
+    role: "default",
   });
 }
 
@@ -310,7 +317,7 @@ export function createContainerCreateTool(
       const p = params as ContainerCreateParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId, p.description);
       
       // Get or start container
       const health = await getContainerHealth(runtime.env, containerId, signal);
@@ -380,7 +387,7 @@ export function createContainerBashTool(
       const p = params as ContainerBashParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerBash(
         runtime.env,
@@ -451,7 +458,7 @@ export function createContainerReadTool(
       const p = params as ContainerReadParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerRead(
         runtime.env,
@@ -518,7 +525,7 @@ export function createContainerWriteTool(
       const p = params as ContainerWriteParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerWrite(
         runtime.env,
@@ -578,7 +585,7 @@ export function createContainerEditTool(
       const p = params as ContainerEditParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerEdit(
         runtime.env,
@@ -643,7 +650,7 @@ export function createContainerGrepTool(
       const p = params as ContainerGrepParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerGrep(
         runtime.env,
@@ -705,7 +712,7 @@ export function createContainerFindTool(
       const p = params as ContainerFindParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerFind(
         runtime.env,
@@ -762,7 +769,7 @@ export function createContainerLsTool(
       const p = params as ContainerLsParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
 
       const result = await containerLs(
         runtime.env,
@@ -807,13 +814,14 @@ export function createContainerDestroyTool(
       const p = params as ContainerDestroyParams;
       const ctx = containerToolContext(runtime);
       const containerId = deriveContainerId(runtime.sessionId, p.containerId);
-      await registerContainerContext(runtime.env, ctx, containerId);
+      await registerSessionContainer(runtime.env, ctx, containerId);
       if (signal?.aborted) {
         throw new Error("Container destroy aborted");
       }
       await destroyContainer(runtime.env, containerId);
-      const contexts = new ContainerContextRepository(runtime.env.DB);
-      await contexts.deleteForSession(runtime.workspaceId, runtime.sessionId, containerId);
+      const containers = new ContainerRepository(runtime.env.DB);
+      await containers.unlinkSession(runtime.workspaceId, runtime.sessionId, containerId);
+      await containers.markDestroyed(runtime.workspaceId, containerId);
 
       return {
         content: [{ type: "text", text: `Destroyed container: ${containerId}` }],
