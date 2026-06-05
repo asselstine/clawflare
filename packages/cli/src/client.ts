@@ -23,6 +23,8 @@ import type {
   CreateSessionRequest,
   CreateSessionResponse,
   KillSessionResponse,
+  DeleteSessionResponse,
+  DeleteSessionsResponse,
   ProviderInfo,
   ProviderListResponse,
   ProviderModelInfo,
@@ -48,6 +50,8 @@ export type {
   CreateSessionRequest,
   CreateSessionResponse,
   KillSessionResponse,
+  DeleteSessionResponse,
+  DeleteSessionsResponse,
   ProviderInfo,
   ProviderListResponse,
   ProviderModelInfo,
@@ -226,6 +230,20 @@ export class AgentClient {
     return this.requestJson<KillSessionResponse>(
       `/v1/session/${sessionId}/kill`,
       { method: "POST" }
+    );
+  }
+
+  async deleteSession(sessionId: string): Promise<DeleteSessionResponse> {
+    return this.requestJson<DeleteSessionResponse>(
+      `/v1/session/${sessionId}`,
+      { method: "DELETE" }
+    );
+  }
+
+  async deleteSessions(): Promise<DeleteSessionsResponse> {
+    return this.requestJson<DeleteSessionsResponse>(
+      "/v1/sessions",
+      { method: "DELETE" }
     );
   }
 
@@ -891,9 +909,17 @@ function parseServerSentEvent(rawEvent: string): ParsedServerSentEvent | null {
   return { event, data: data.join("\n") };
 }
 
+function isRawQueryError(message: string): boolean {
+  return message.startsWith("Failed query:") || message.includes("\nparams:");
+}
+
 // Format API errors with rich context for display
-function formatApiError(status: number, errorData: ApiError): string {
+export function formatApiError(status: number, errorData: ApiError): string {
   const baseMessage = errorData.error || "Unknown error";
+
+  if (status >= 500 && isRawQueryError(baseMessage)) {
+    return "Server database query failed. Check server logs for query details.";
+  }
   
   // 413 Payload Too Large - storage quota exceeded
   if (status === 413 && errorData.details) {

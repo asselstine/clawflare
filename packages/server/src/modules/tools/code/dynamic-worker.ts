@@ -21,6 +21,8 @@ export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a
   return JSON.stringify({ message: "ok", input });
 }`;
 
+const WORKER_CACHE_PREFIX = "clawflare-execute-code";
+
 export async function executeDynamicWorker(
   env: Env,
   ctx: ExecutionContext | undefined,
@@ -102,7 +104,8 @@ export default {
 
     workerCode.globalOutbound = outbound ?? null;
 
-    const worker = await env.LOADER.load(workerCode);
+    const workerName = await getWorkerCacheName(workerCode, options);
+    const worker = await env.LOADER.get(workerName, () => workerCode);
     const entrypoint = worker.getEntrypoint();
     const response = await entrypoint.fetch(
       new Request("https://clawflare.local/execute", {
@@ -160,6 +163,33 @@ function createUserModule(code: string): string {
     throw new Error(`Dynamic Worker code must be an ES module with a default exported function.\n\n${USER_FUNCTION_CONTRACT}`);
   }
   return code;
+}
+
+async function getWorkerCacheName(
+  workerCode: WorkerLoaderWorkerCode,
+  options: DynamicExecutionOptions
+): Promise<string> {
+  const cacheScope = {
+    allowOutbound: options.allowOutbound !== false,
+    requestId: options.requestId ?? null,
+    sessionId: options.sessionId ?? null,
+    workspaceId: options.workspaceId ?? null,
+  };
+  const cachePayload = {
+    ...workerCode,
+    globalOutbound: Boolean(workerCode.globalOutbound),
+    cacheScope,
+  };
+  const hash = await sha256Hex(JSON.stringify(cachePayload));
+  return `${WORKER_CACHE_PREFIX}-${hash}`;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function hasDefaultExport(code: string): boolean {

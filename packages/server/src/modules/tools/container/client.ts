@@ -117,11 +117,19 @@ const DEFAULT_CONTAINER_TIMEOUT = 30000;
 const MAX_CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const MAX_ERROR_DETAIL_CHARS = 8000;
 const CONTAINER_START_MAX_ATTEMPTS = 2;
+const CONTAINER_READY_CACHE_TTL_MS = 10 * 60 * 1000;
 const CONTAINER_CODE_UPDATE_RESET_MESSAGE = "Durable Object reset because its code was updated";
 
 interface RuntimeCallOptions {
   allowRuntimeFailure?: boolean;
 }
+
+interface CachedContainerReadiness {
+  promise: Promise<ReturnType<typeof getContainerStub>>;
+  readyAt: number;
+}
+
+const containerReadinessCache = new Map<string, CachedContainerReadiness>();
 
 function truncateDetail(value: string): string {
   if (value.length <= MAX_ERROR_DETAIL_CHARS) return value;
@@ -206,7 +214,43 @@ function getContainerStub(env: Env, id: string) {
   return getContainer(env.CODING_CONTAINER, id);
 }
 
+function getCachedContainer(containerId: string): Promise<ReturnType<typeof getContainerStub>> | null {
+  const cached = containerReadinessCache.get(containerId);
+  if (!cached) return null;
+
+  if (Date.now() - cached.readyAt > CONTAINER_READY_CACHE_TTL_MS) {
+    containerReadinessCache.delete(containerId);
+    return null;
+  }
+
+  return cached.promise;
+}
+
 async function waitForContainerPort(
+  env: Env,
+  containerId: string,
+  signal?: AbortSignal,
+) {
+  const cached = getCachedContainer(containerId);
+  if (cached) return await cached;
+
+  const readyPromise = startContainerAndConfigureOutbound(env, containerId, signal);
+  containerReadinessCache.set(containerId, {
+    promise: readyPromise,
+    readyAt: Date.now(),
+  });
+
+  try {
+    return await readyPromise;
+  } catch (error) {
+    if (containerReadinessCache.get(containerId)?.promise === readyPromise) {
+      containerReadinessCache.delete(containerId);
+    }
+    throw error;
+  }
+}
+
+async function startContainerAndConfigureOutbound(
   env: Env,
   containerId: string,
   signal?: AbortSignal,
@@ -239,6 +283,10 @@ async function waitForContainerPort(
   throw new Error(buildContainerStartupFailureMessage(containerId, lastError));
 }
 
+function forgetContainerReadiness(containerId: string): void {
+  containerReadinessCache.delete(containerId);
+}
+
 /**
  * Call the container runtime server
  */
@@ -251,13 +299,25 @@ export async function callContainerRuntime(
   options: RuntimeCallOptions = {},
 ): Promise<ContainerRuntimeResponse> {
   const container = await waitForContainerPort(env, containerId, signal);
+  let response: Response;
 
-  const response = await container.containerFetch(`http://localhost${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
+  try {
+    response = await container.containerFetch(`http://localhost${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  } catch {
+    forgetContainerReadiness(containerId);
+    const restartedContainer = await waitForContainerPort(env, containerId, signal);
+    response = await restartedContainer.containerFetch(`http://localhost${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+  }
 
   const { payload, rawBody } = await readContainerRuntimeResponse(response);
 
@@ -279,6 +339,7 @@ export async function destroyContainer(
   env: Env,
   containerId: string
 ): Promise<void> {
+  forgetContainerReadiness(containerId);
   const container = getContainerStub(env, containerId);
   await container.destroy();
 }

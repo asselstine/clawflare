@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: #101114;
+  color: #edf0f5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    linear-gradient(180deg, rgba(27, 30, 35, 0.84), rgba(16, 17, 20, 1)),
+    #101114;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:disabled,
+input:disabled,
+textarea:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.scrollbar {
+  scrollbar-color: #454d5f transparent;
+  scrollbar-width: thin;
+}
+
+.scrollbar::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.scrollbar::-webkit-scrollbar-thumb {
+  background: #454d5f;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.markdown {
+  line-height: 1.65;
+}
+
+.markdown :where(h1, h2, h3) {
+  margin: 1.1rem 0 0.55rem;
+  font-weight: 700;
+}
+
+.markdown :where(p, ul, ol, pre, blockquote) {
+  margin: 0.65rem 0;
+}
+
+.markdown :where(ul, ol) {
+  padding-left: 1.25rem;
+}
+
+.markdown code {
+  border-radius: 6px;
+  background: #242831;
+  padding: 0.12rem 0.32rem;
+  color: #a8d8ff;
+}
+
+.markdown pre {
+  overflow: auto;
+  border: 1px solid #303644;
+  border-radius: 8px;
+  background: #111318;
+  padding: 1rem;
+}
+
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+  color: #dce4ef;
+}
+
+@layer components {
+  .input {
+    @apply h-10 w-full rounded-md border border-shell-600 bg-shell-850 px-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-accent-500;
+  }
+
+  .primary-btn {
+    @apply flex h-10 items-center justify-center gap-2 rounded-md bg-slate-100 px-3 text-sm font-medium text-shell-950 transition hover:bg-white disabled:bg-shell-700 disabled:text-slate-400;
+  }
+
+  .secondary-btn {
+    @apply flex h-10 items-center justify-center gap-2 rounded-md border border-shell-700 bg-shell-850 px-3 text-sm font-medium text-slate-200 transition hover:bg-shell-800 disabled:text-slate-500;
+  }
+}

@@ -18,6 +18,8 @@ export type {
   SessionSummary,
   SessionEvent,
   SessionListResponse,
+  DeleteSessionResponse,
+  DeleteSessionsResponse,
 } from "./types.js";
 
 // Export public types from data layer

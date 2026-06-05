@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { AgentClient } from "../src/client.js";
+import { AgentClient, formatApiError } from "../src/client.js";
+
+describe("formatApiError", () => {
+  it("sanitizes raw database query errors", () => {
+    expect(formatApiError(500, {
+      error: [
+        'Failed query: select "id" from "sessions" where "id" = ?',
+        "params: session-id",
+      ].join("\n"),
+    })).toBe("Server database query failed. Check server logs for query details.");
+  });
+});
 
 describe("AgentClient", () => {
   // Helper to create a mock fetch response

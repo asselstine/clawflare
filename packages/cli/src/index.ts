@@ -144,10 +144,11 @@ program
   .addCommand(
     new Command("add")
       .description("Add or configure an egress handler")
+      .argument("[egressHandlerId]", "Egress handler ID")
       .option("-s, --server <url>", "Clawflare server URL", DEFAULT_SERVER)
       .option("-t, --token <token>", "API token for authentication")
-      .action(async (options: { server?: string; token?: string }) => {
-        await egressAddCommand(options);
+      .action(async (egressHandlerId: string | undefined, options: { server?: string; token?: string }) => {
+        await egressAddCommand({ ...options, egressHandlerId });
       })
   )
   .addCommand(

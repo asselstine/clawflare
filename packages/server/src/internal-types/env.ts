@@ -19,6 +19,7 @@ export interface WorkerLoaderWorkerCode {
 // Additional interface augmentations
 declare global {
   interface WorkerLoader {
+    get(name: string | null, getCode: () => WorkerLoaderWorkerCode | Promise<WorkerLoaderWorkerCode>): Promise<Worker>;
     load(moduleCode: WorkerLoaderWorkerCode, options?: { signal?: AbortSignal }): Promise<Worker>;
   }
 

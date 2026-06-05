@@ -91,13 +91,13 @@ describe("container egress setup", () => {
   it("passes the logical container ID to the outbound handler", async () => {
     containerMocks.startAndWaitForPorts.mockResolvedValue(undefined);
     containerMocks.setOutboundHandler.mockResolvedValue(undefined);
-    containerMocks.containerFetch.mockResolvedValue(
+    containerMocks.containerFetch.mockImplementation(() => Promise.resolve(
       new Response(JSON.stringify({
         ok: true,
         status: "healthy",
         workspace: "/workspace",
       }))
-    );
+    ));
 
     await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-abc");
 
@@ -105,5 +105,24 @@ describe("container egress setup", () => {
       "clawflare",
       { containerId: "session-abc" }
     );
+  });
+
+  it("reuses readiness setup for warm containers", async () => {
+    containerMocks.startAndWaitForPorts.mockResolvedValue(undefined);
+    containerMocks.setOutboundHandler.mockResolvedValue(undefined);
+    containerMocks.containerFetch.mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({
+        ok: true,
+        status: "healthy",
+        workspace: "/workspace",
+      }))
+    ));
+
+    await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-cache");
+    await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-cache");
+
+    expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledTimes(1);
+    expect(containerMocks.setOutboundHandler).toHaveBeenCalledTimes(1);
+    expect(containerMocks.containerFetch).toHaveBeenCalledTimes(2);
   });
 });

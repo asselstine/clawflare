@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ClawflareTUIApp,
   applyAssistantPartialEvents,
+  getActiveToolCallStatusMessage,
   getEventDisplayMessage,
   getPersistedToolResultIsError,
   getToolCallVisualState,
   shouldShowTrailingThinking,
+  updateToolCallStatusesFromEvents,
 } from "../src/tui-app.js";
 
 describe("getPersistedToolResultIsError", () => {
@@ -29,11 +31,85 @@ describe("getToolCallVisualState", () => {
     });
   });
 
+  it("shows ended failed tool calls as errors before result messages arrive", () => {
+    expect(getToolCallVisualState("error", undefined)).toEqual({
+      hasError: true,
+      isComplete: false,
+    });
+  });
+
+  it("shows ended successful tool calls as complete before result messages arrive", () => {
+    expect(getToolCallVisualState("complete", undefined)).toEqual({
+      hasError: false,
+      isComplete: true,
+    });
+  });
+
   it("uses result errors even when the status was not updated", () => {
     expect(getToolCallVisualState("pending", { isError: true })).toEqual({
       hasError: true,
       isComplete: false,
     });
+  });
+});
+
+describe("updateToolCallStatusesFromEvents", () => {
+  it("marks tool calls as failed from end events", () => {
+    const toolCalls = [{
+      id: "tool-1",
+      name: "execute_code",
+      params: {},
+      status: "running" as const,
+    }];
+
+    updateToolCallStatusesFromEvents(toolCalls, [{
+      type: "tool_execution_end",
+      toolCallId: "tool-1",
+      toolName: "execute_code",
+      isError: true,
+      timestamp: Date.now(),
+      sequence: 1,
+    } as never]);
+
+    expect(toolCalls[0]?.status).toBe("error");
+  });
+});
+
+describe("getActiveToolCallStatusMessage", () => {
+  it("reports queued tool calls after an assistant response ends with tools", () => {
+    expect(getActiveToolCallStatusMessage([{
+      role: "assistant",
+      toolCalls: [{
+        id: "tool-1",
+        name: "execute_code",
+        params: {},
+        status: "pending",
+      }],
+    }])).toBe("Waiting to run execute_code");
+  });
+
+  it("reports running tool calls", () => {
+    expect(getActiveToolCallStatusMessage([{
+      role: "assistant",
+      toolCalls: [{
+        id: "tool-1",
+        name: "execute_code",
+        params: {},
+        status: "running",
+      }],
+    }])).toBe("Running execute_code");
+  });
+
+  it("ignores completed tool calls", () => {
+    expect(getActiveToolCallStatusMessage([{
+      role: "assistant",
+      toolCalls: [{
+        id: "tool-1",
+        name: "execute_code",
+        params: {},
+        status: "complete",
+      }],
+    }])).toBeNull();
   });
 });
 

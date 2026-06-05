@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   findByIdInWorkspace: vi.fn(),
   save: vi.fn(),
   listSince: vi.fn(),
+  listRecent: vi.fn(),
   getWorkflowSession: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("../../../src/data/index.js", () => ({
   })),
   SessionEventRepository: vi.fn().mockImplementation(() => ({
     listSince: mocks.listSince,
+    listRecent: mocks.listRecent,
   })),
   SessionRuntimeRepository: vi.fn().mockImplementation(() => ({
     getWorkflowSession: mocks.getWorkflowSession,
@@ -111,6 +113,77 @@ describe("handleGetSession timeout recovery", () => {
     expect(response.status).toBe(200);
     expect(data.messages).toBeUndefined();
     expect(data.events).toHaveLength(1);
+    expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
+  });
+
+  it("can load the recent event tail without loading full messages", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "workflow-1",
+      status: "idle",
+      nextEventCursor: "42",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.listRecent.mockResolvedValue([
+      {
+        type: "message_end",
+        timestamp: Date.now(),
+        sequence: 41,
+        message: { role: "user", content: "hello" },
+      },
+      {
+        type: "message_end",
+        timestamp: Date.now(),
+        sequence: 42,
+        message: { role: "assistant", content: "hi" },
+      },
+    ]);
+
+    const response = await handleGetSession(
+      "session-1",
+      new URL("https://example.com/v1/session/session-1?includeMessages=0&eventWindow=tail&eventLimit=100"),
+      {} as Env,
+      createRequestContext(),
+    );
+
+    const data = (await response.json()) as { messages?: unknown[]; events: unknown[]; nextEventCursor: string };
+
+    expect(response.status).toBe(200);
+    expect(data.messages).toBeUndefined();
+    expect(data.events).toHaveLength(2);
+    expect(data.nextEventCursor).toBe("42");
+    expect(mocks.listRecent).toHaveBeenCalledWith("session-1", 100);
+    expect(mocks.listSince).not.toHaveBeenCalled();
+    expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
+  });
+
+  it("does not return stale error messages for idle sessions", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "workflow-1",
+      status: "idle",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      errorMessage: '"undefined" is not valid JSON',
+      maxQueueSize: 100,
+    });
+    mocks.listSince.mockResolvedValue({ events: [], nextCursor: "0" });
+
+    const response = await handleGetSession(
+      "session-1",
+      new URL("https://example.com/v1/session/session-1?includeMessages=0"),
+      {} as Env,
+      createRequestContext(),
+    );
+
+    const data = (await response.json()) as { status: string; errorMessage?: string };
+
+    expect(response.status).toBe(200);
+    expect(data.status).toBe("idle");
+    expect(data.errorMessage).toBeUndefined();
     expect(mocks.getWorkflowSession).not.toHaveBeenCalled();
   });
 

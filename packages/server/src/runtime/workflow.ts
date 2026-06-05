@@ -512,7 +512,7 @@ async function saveSessionMetadata(
     status,
     nextEventCursor,
     updatedAt: Date.now(),
-    errorMessage,
+    errorMessage: status === "error" ? errorMessage : undefined,
     maxQueueSize: existingSession?.maxQueueSize ?? 100,
     idleTimeout: existingSession?.idleTimeout ?? "7 days",
   });

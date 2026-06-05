@@ -270,6 +270,15 @@ export class SessionRepository {
     return result.length > 0;
   }
 
+  async delete(sessionId: string, workspaceId: string): Promise<boolean> {
+    const result = await this.db
+      .delete(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.workspaceId, workspaceId)))
+      .returning({ id: sessions.id });
+
+    return result.length > 0;
+  }
+
   async list(filter: SessionListFilter): Promise<SessionSummary[]> {
     const limit = Math.min(filter.limit ?? 50, 100);
     const offset = filter.offset ?? 0;

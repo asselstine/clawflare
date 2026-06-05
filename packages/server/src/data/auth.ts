@@ -109,6 +109,7 @@ export interface DeviceAuthorization {
   accessTokenPlaintext: string | null;
   tokenRetrievedAt: number | null;
   oauthStateHash: string | null;
+  returnUrl: string | null;
   expiresAt: number;
   createdAt: number;
   approvedAt: number | null;
@@ -363,7 +364,8 @@ export class DeviceAuthorizationRepository {
     userCode: string,
     clientName: string,
     oauthStateHash: string,
-    expiresAt: number
+    expiresAt: number,
+    returnUrl?: string
   ): Promise<void> {
     await this.db.insert(deviceAuthorizations).values({
       deviceCode,
@@ -373,6 +375,7 @@ export class DeviceAuthorizationRepository {
       expiresAt,
       createdAt: Date.now(),
       oauthStateHash,
+      returnUrl,
     });
   }
 

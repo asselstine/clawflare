@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
-import { handleKillSession } from "../../../src/modules/sessions/sessions.routes.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { handleDeleteSession, handleDeleteSessions, handleKillSession } from "../../../src/modules/sessions/sessions.routes.js";
 import type { RequestContext } from "../../../src/http/request-context.js";
 import type { Env } from "../../../src/internal-types/index.js";
 
 const mocks = vi.hoisted(() => ({
   findByIdInWorkspace: vi.fn(),
+  listSessions: vi.fn(),
   markClosed: vi.fn(),
+  deleteSession: vi.fn(),
   append: vi.fn(),
   setActive: vi.fn(),
   findActiveForSession: vi.fn(),
@@ -18,7 +20,9 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../../src/data/index.js", () => ({
   SessionRepository: vi.fn().mockImplementation(() => ({
     findByIdInWorkspace: mocks.findByIdInWorkspace,
+    list: mocks.listSessions,
     markClosed: mocks.markClosed,
+    delete: mocks.deleteSession,
   })),
   SessionEventRepository: vi.fn().mockImplementation(() => ({
     append: mocks.append,
@@ -61,6 +65,10 @@ function createRequestContext(): RequestContext {
 }
 
 describe("handleKillSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("cancels the active run, destroys session containers, and closes the session", async () => {
     mocks.findByIdInWorkspace.mockResolvedValue({
       id: "session-1",
@@ -113,5 +121,137 @@ describe("handleKillSession", () => {
     expect(mocks.deleteForSession).toHaveBeenCalledWith("workspace-1", "session-1", "container-1");
     expect(mocks.markClosed).toHaveBeenCalledWith("session-1", "user");
     expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
+  });
+});
+
+describe("handleDeleteSession", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("kills an active session before deleting it", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "processing",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue({
+      id: "run-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      status: "running",
+    });
+    mocks.listForSession.mockResolvedValue([{ containerId: "container-1" }]);
+    mocks.destroyContainer.mockResolvedValue(undefined);
+    mocks.deleteForSession.mockResolvedValue(undefined);
+    mocks.append.mockResolvedValue({ nextCursor: "1" });
+    mocks.markClosed.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+    mocks.deleteSession.mockResolvedValue(true);
+
+    const env = {} as Env;
+    const response = await handleDeleteSession("session-1", env, createRequestContext());
+    const data = (await response.json()) as {
+      ok: boolean;
+      deleted: boolean;
+      killedBeforeDelete: boolean;
+      workflowTerminated: boolean;
+      destroyedContainers: string[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.deleted).toBe(true);
+    expect(data.killedBeforeDelete).toBe(true);
+    expect(data.workflowTerminated).toBe(true);
+    expect(data.destroyedContainers).toEqual(["container-1"]);
+    expect(mocks.cancelRun).toHaveBeenCalledWith("run-1");
+    expect(mocks.append).toHaveBeenCalled();
+    expect(mocks.markClosed).toHaveBeenCalledWith("session-1", "user");
+    expect(mocks.deleteSession).toHaveBeenCalledWith("session-1", "workspace-1");
+  });
+
+  it("deletes an already closed session without recording another kill event", async () => {
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "",
+      status: "closed",
+      nextEventCursor: "0",
+      updatedAt: Date.now(),
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue(null);
+    mocks.listForSession.mockResolvedValue([]);
+    mocks.markClosed.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+    mocks.deleteSession.mockResolvedValue(true);
+
+    const response = await handleDeleteSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as { deleted: boolean; killedBeforeDelete: boolean };
+
+    expect(response.status).toBe(200);
+    expect(data.deleted).toBe(true);
+    expect(data.killedBeforeDelete).toBe(false);
+    expect(mocks.append).not.toHaveBeenCalled();
+    expect(mocks.deleteSession).toHaveBeenCalledWith("session-1", "workspace-1");
+  });
+});
+
+describe("handleDeleteSessions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("deletes all workspace sessions with one collection handler call", async () => {
+    mocks.listSessions.mockResolvedValueOnce([
+      { id: "session-1", status: "processing" },
+      { id: "session-2", status: "closed" },
+    ]).mockResolvedValueOnce([]);
+    mocks.findByIdInWorkspace
+      .mockResolvedValueOnce({
+        id: "session-1",
+        workspaceId: "workspace-1",
+        workflowId: "run-1",
+        status: "processing",
+        nextEventCursor: "0",
+        updatedAt: Date.now(),
+        maxQueueSize: 100,
+      })
+      .mockResolvedValueOnce({
+        id: "session-2",
+        workspaceId: "workspace-1",
+        workflowId: "",
+        status: "closed",
+        nextEventCursor: "0",
+        updatedAt: Date.now(),
+        maxQueueSize: 100,
+      });
+    mocks.findActiveForSession.mockResolvedValue(null);
+    mocks.listForSession.mockResolvedValue([]);
+    mocks.append.mockResolvedValue({ nextCursor: "1" });
+    mocks.markClosed.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+    mocks.deleteSession.mockResolvedValue(true);
+
+    const response = await handleDeleteSessions({} as Env, createRequestContext());
+    const data = (await response.json()) as { ok: boolean; deleted: number; total: number };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.deleted).toBe(2);
+    expect(data.total).toBe(2);
+    expect(mocks.listSessions).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      status: "all",
+      limit: 100,
+      offset: 0,
+    });
+    expect(mocks.deleteSession).toHaveBeenCalledWith("session-1", "workspace-1");
+    expect(mocks.deleteSession).toHaveBeenCalledWith("session-2", "workspace-1");
   });
 });

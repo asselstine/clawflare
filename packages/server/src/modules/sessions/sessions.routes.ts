@@ -18,7 +18,7 @@ import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelConnectionForNewSession } from "../model-connections/model-connections.service.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
-import type { SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
+import type { DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
@@ -49,10 +49,16 @@ sessionRoutes.post("/:id/close", (c) =>
 sessionRoutes.post("/:id/kill", (c) =>
   handleKillSession(c.req.param("id"), c.env, c.get("requestContext")!)
 );
+sessionRoutes.delete("/:id", (c) =>
+  handleDeleteSession(c.req.param("id"), c.env, c.get("requestContext")!)
+);
 
 sessionsRoutes.use("*", requireAuth);
 sessionsRoutes.get("/", (c) =>
   handleListSessions(new URL(c.req.url), c.env, c.get("requestContext")!)
+);
+sessionsRoutes.delete("/", (c) =>
+  handleDeleteSessions(c.env, c.get("requestContext")!)
 );
 
 // Session Create Route Handler - POST /v1/session
@@ -179,7 +185,7 @@ export async function handleListSessionTools(
       sessionId,
       workspaceId: requestContext.workspace.id,
     });
-    return serverError(error instanceof Error ? error.message : "Unknown error");
+    return serverError("List session tools failed. Check server logs for details.");
   }
 }
 
@@ -188,6 +194,7 @@ export async function handleListSessionTools(
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const SESSION_EVENT_PAGE_SIZE = 100;
+const SESSION_EVENT_TAIL_PAGE_SIZE = 80;
 const SESSION_EVENT_STREAM_POLL_MS = 100;
 const SESSION_EVENT_STREAM_FAST_POLL_MS = 50;
 const SESSION_EVENT_STREAM_FAST_POLL_WINDOW_MS = 1500;
@@ -207,6 +214,12 @@ interface BuiltSessionResponse {
   shouldIncludeMessages: boolean;
   eventCount: number;
   status: SessionStatus;
+}
+
+function sessionEventLimit(url: URL, fallback: number): number {
+  const parsed = Number.parseInt(url.searchParams.get("eventLimit") ?? "", 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, SESSION_EVENT_PAGE_SIZE);
 }
 
 async function buildSessionResponse(
@@ -251,15 +264,27 @@ async function buildSessionResponse(
   }
 
   const sinceCursor = url.searchParams.get("since");
-  const eventsStart = timingStart();
-  const { events, nextCursor } = await eventsRepo.listSince(
-    sessionId,
-    sinceCursor || undefined,
-    SESSION_EVENT_PAGE_SIZE
+  const eventWindow = url.searchParams.get("eventWindow");
+  const shouldLoadTailEvents = !sinceCursor && eventWindow === "tail";
+  const eventLimit = sessionEventLimit(
+    url,
+    shouldLoadTailEvents ? SESSION_EVENT_TAIL_PAGE_SIZE : SESSION_EVENT_PAGE_SIZE,
   );
+  const eventsStart = timingStart();
+  const { events, nextCursor } = shouldLoadTailEvents
+    ? {
+        events: await eventsRepo.listRecent(sessionId, eventLimit),
+        nextCursor: sessionState.nextEventCursor,
+      }
+    : await eventsRepo.listSince(
+        sessionId,
+        sinceCursor || undefined,
+        eventLimit
+      );
   logTiming(env, sessionId, "session.poll.events_loaded", eventsStart, {
     workspaceId: effectiveWorkspaceId,
     since: sinceCursor || undefined,
+    eventWindow: eventWindow ?? undefined,
     eventCount: events.length,
     nextCursor,
   });
@@ -284,7 +309,7 @@ async function buildSessionResponse(
     status: sessionState.status,
     events,
     nextEventCursor: nextCursor,
-    errorMessage: sessionState.errorMessage,
+    errorMessage: sessionState.status === "error" ? sessionState.errorMessage : undefined,
     workspaceId: sessionState.workspaceId,
   };
 
@@ -345,7 +370,7 @@ export async function handleGetSession(
       sessionId,
       workspaceId: effectiveWorkspaceId,
     });
-    return serverError(error instanceof Error ? error.message : "Unknown error");
+    return serverError("Session poll failed. Check server logs for details.");
   }
 }
 
@@ -469,7 +494,7 @@ export async function handleStreamSessionEvents(
           });
           if (!closed) {
             controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({
-              error: error instanceof Error ? error.message : "Unknown error",
+              error: "Session event stream failed. Check server logs for details.",
             })}\n\n`));
           }
         } finally {
@@ -497,7 +522,7 @@ export async function handleStreamSessionEvents(
       sessionId,
       workspaceId: effectiveWorkspaceId,
     });
-    return serverError(error instanceof Error ? error.message : "Unknown error");
+    return serverError("Session event stream failed. Check server logs for details.");
   }
 }
 
@@ -751,16 +776,79 @@ export async function handleCloseSession(
 /**
  * Force-kill a session by cancelling its durable run and destroying owned containers.
  */
+async function killSessionResources(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext,
+  session: SessionMetadataState,
+  options: { appendKillEvent: boolean },
+): Promise<KillSessionResponse> {
+  const runtime = new SessionRuntimeRepository(env.DB);
+  const events = new SessionEventRepository(env.DB);
+  const runs = new SessionRunRepository(env.DB);
+  const containerContexts = new ContainerContextRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  const errors: string[] = [];
+  let runCancelled = false;
+
+  const activeRun = await runs.findActiveForSession(sessionId);
+  if (activeRun) {
+    await runs.cancel(activeRun.id);
+    runCancelled = true;
+  }
+
+  const ownedContainers = await containerContexts.listForSession(effectiveWorkspaceId, sessionId);
+  const destroyedContainers: string[] = [];
+
+  for (const container of ownedContainers) {
+    try {
+      await destroyContainer(env, container.containerId);
+      destroyedContainers.push(container.containerId);
+    } catch (error) {
+      errors.push(
+        `Container ${container.containerId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      await containerContexts.deleteForSession(
+        effectiveWorkspaceId,
+        sessionId,
+        container.containerId
+      );
+    }
+  }
+
+  if (options.appendKillEvent) {
+    await events.append(sessionId, [
+      {
+        type: "error",
+        timestamp: Date.now(),
+        errorMessage: "Session killed by user.",
+      },
+    ]);
+  }
+  await new SessionRepository(env.DB).markClosed(sessionId, "user");
+  await runtime.setActive(sessionId, false);
+
+  return {
+    ok: errors.length === 0,
+    sessionId,
+    status: "closed",
+    workspaceId: effectiveWorkspaceId,
+    workflowId: session.workflowId,
+    workflowStatusBefore: activeRun?.status,
+    workflowTerminated: runCancelled,
+    destroyedContainers,
+    errors,
+  };
+}
+
 export async function handleKillSession(
   sessionId: string,
   env: Env,
   requestContext: RequestContext
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
-  const runtime = new SessionRuntimeRepository(env.DB);
-  const events = new SessionEventRepository(env.DB);
-  const runs = new SessionRunRepository(env.DB);
-  const containerContexts = new ContainerContextRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
   try {
@@ -770,61 +858,123 @@ export async function handleKillSession(
       return notFound("Session");
     }
 
-    const errors: string[] = [];
-    let runCancelled = false;
-
-    const activeRun = await runs.findActiveForSession(sessionId);
-    if (activeRun) {
-      await runs.cancel(activeRun.id);
-      runCancelled = true;
-    }
-
-    const ownedContainers = await containerContexts.listForSession(effectiveWorkspaceId, sessionId);
-    const destroyedContainers: string[] = [];
-
-    for (const container of ownedContainers) {
-      try {
-        await destroyContainer(env, container.containerId);
-        destroyedContainers.push(container.containerId);
-      } catch (error) {
-        errors.push(
-          `Container ${container.containerId}: ${error instanceof Error ? error.message : String(error)}`
-        );
-      } finally {
-        await containerContexts.deleteForSession(
-          effectiveWorkspaceId,
-          sessionId,
-          container.containerId
-        );
-      }
-    }
-
-    await events.append(sessionId, [
-      {
-        type: "error",
-        timestamp: Date.now(),
-        errorMessage: "Session killed by user.",
-      },
-    ]);
-    await sessions.markClosed(sessionId, "user");
-    await runtime.setActive(sessionId, false);
-
-    return json({
-      ok: errors.length === 0,
-      sessionId,
-      status: "closed",
-      workspaceId: effectiveWorkspaceId,
-      workflowId: session.workflowId,
-      workflowStatusBefore: activeRun?.status,
-      workflowTerminated: runCancelled,
-      destroyedContainers,
-      errors,
+    const killed = await killSessionResources(sessionId, env, requestContext, session, {
+      appendKillEvent: true,
     });
+
+    return json(killed);
   } catch (error) {
     logger.error("Session kill failed", error, {
       handler: "handleKillSession",
       route: "POST /v1/session/:id/kill",
       sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+/**
+ * Delete a session after releasing any active resources.
+ */
+export async function handleDeleteSession(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const sessions = new SessionRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  try {
+    const session = await sessions.findByIdInWorkspace(effectiveWorkspaceId, sessionId);
+
+    if (!session) {
+      return notFound("Session");
+    }
+
+    return json(await deleteSessionAfterCleanup(sessionId, env, requestContext, session));
+  } catch (error) {
+    logger.error("Session delete failed", error, {
+      handler: "handleDeleteSession",
+      route: "DELETE /v1/session/:id",
+      sessionId,
+      workspaceId: effectiveWorkspaceId,
+    });
+    return serverError(error instanceof Error ? error.message : "Unknown error");
+  }
+}
+
+async function deleteSessionAfterCleanup(
+  sessionId: string,
+  env: Env,
+  requestContext: RequestContext,
+  session: SessionMetadataState,
+): Promise<DeleteSessionResponse> {
+  const sessions = new SessionRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+  const alreadyTerminal = session.status === "closed" || session.status === "expired";
+  const killed = await killSessionResources(sessionId, env, requestContext, session, {
+    appendKillEvent: !alreadyTerminal,
+  });
+  const deleted = await sessions.delete(sessionId, effectiveWorkspaceId);
+
+  return {
+    ok: killed.ok && deleted,
+    sessionId,
+    workspaceId: effectiveWorkspaceId,
+    deleted,
+    killedBeforeDelete: !alreadyTerminal,
+    workflowTerminated: killed.workflowTerminated,
+    destroyedContainers: killed.destroyedContainers,
+    errors: killed.errors,
+  };
+}
+
+/**
+ * Delete every session in the workspace after releasing active resources.
+ */
+export async function handleDeleteSessions(
+  env: Env,
+  requestContext: RequestContext
+): Promise<Response> {
+  const sessions = new SessionRepository(env.DB);
+  const effectiveWorkspaceId = requestContext.workspace.id;
+
+  try {
+    const targets: Array<SessionMetadataState | null> = [];
+    const pageSize = 100;
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await sessions.list({
+        workspaceId: effectiveWorkspaceId,
+        status: "all",
+        limit: pageSize,
+        offset,
+      });
+      targets.push(...await Promise.all(page.map((session) => sessions.findByIdInWorkspace(effectiveWorkspaceId, session.id))));
+      if (page.length < pageSize) break;
+    }
+
+    const results: DeleteSessionResponse[] = [];
+    for (const target of targets) {
+      if (!target) continue;
+      results.push(await deleteSessionAfterCleanup(target.id, env, requestContext, target));
+    }
+
+    const errors = results.flatMap((result) => result.errors.map((error) => `${result.sessionId}: ${error}`));
+    const response: DeleteSessionsResponse = {
+      ok: results.every((result) => result.ok && result.deleted),
+      workspaceId: effectiveWorkspaceId,
+      deleted: results.filter((result) => result.deleted).length,
+      total: results.length,
+      results,
+      errors,
+    };
+
+    return json(response);
+  } catch (error) {
+    logger.error("Bulk session delete failed", error, {
+      handler: "handleDeleteSessions",
+      route: "DELETE /v1/sessions",
       workspaceId: effectiveWorkspaceId,
     });
     return serverError(error instanceof Error ? error.message : "Unknown error");

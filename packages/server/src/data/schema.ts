@@ -90,6 +90,7 @@ export const deviceAuthorizations = sqliteTable("device_authorizations", {
   approvedAt: integer("approved_at"),
   createdAt: integer("created_at").notNull(),
   oauthStateHash: text("oauth_state_hash"),
+  returnUrl: text("return_url"),
   accessTokenPlaintext: text("access_token_plaintext"),
   tokenRetrievedAt: integer("token_retrieved_at"),
 });

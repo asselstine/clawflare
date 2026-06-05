@@ -95,6 +95,26 @@ export interface KillSessionResponse {
   errors: string[];
 }
 
+export interface DeleteSessionResponse {
+  ok: boolean;
+  sessionId: string;
+  workspaceId: string;
+  deleted: boolean;
+  killedBeforeDelete: boolean;
+  workflowTerminated: boolean;
+  destroyedContainers: string[];
+  errors: string[];
+}
+
+export interface DeleteSessionsResponse {
+  ok: boolean;
+  workspaceId: string;
+  deleted: number;
+  total: number;
+  results: DeleteSessionResponse[];
+  errors: string[];
+}
+
 export interface ToolDefinition {
   name: string;
   description: string;

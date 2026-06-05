@@ -48,7 +48,8 @@ function generateUserCode(): string {
  */
 export async function createDeviceAuthorization(
   env: Env,
-  clientName: string
+  clientName: string,
+  returnUrl?: string
 ): Promise<{
   deviceCode: string;
   userCode: string;
@@ -64,7 +65,7 @@ export async function createDeviceAuthorization(
     const expiresAt = now + DEVICE_CODE_TTL_MS;
 
     const deviceAuthorizations = new DeviceAuthorizationRepository(env.DB);
-    await deviceAuthorizations.create(deviceCode, userCode, clientName, oauthStateHash, expiresAt);
+    await deviceAuthorizations.create(deviceCode, userCode, clientName, oauthStateHash, expiresAt, returnUrl);
 
     return { deviceCode, userCode, oauthState, expiresAt };
   } catch (error) {
@@ -88,6 +89,7 @@ export async function getDeviceAuthorizationByOAuthState(
   clientName: string;
   status: string;
   expiresAt: number;
+  returnUrl?: string;
 } | null> {
   try {
     const oauthStateHash = await hashToken(oauthState);
@@ -108,6 +110,7 @@ export async function getDeviceAuthorizationByOAuthState(
       clientName: row.clientName,
       status: row.status,
       expiresAt: row.expiresAt,
+      returnUrl: row.returnUrl ?? undefined,
     };
   } catch (error) {
     logger.error("Get device authorization by OAuth state failed", error, {

@@ -17,6 +17,7 @@ import { toolsRoutes } from "../modules/tools/tools.routes.js";
 import { errorMiddleware } from "../middleware/error.js";
 import { requireAuth } from "../middleware/auth.js";
 import { timingMiddleware } from "../middleware/timing.js";
+import { corsMiddleware } from "../middleware/cors.js";
 
 const app = new Hono<AppBindings>();
 
@@ -24,6 +25,7 @@ app.onError(errorMiddleware);
 app.notFound(() => notFound());
 
 app.use("*", timingMiddleware);
+app.use("/v1/*", corsMiddleware);
 
 app.use("*", async (c, next) => {
   const url = new URL(c.req.url);

@@ -22,6 +22,10 @@ interface ToggleOptions extends BaseOptions {
   egressHandlerId?: string;
 }
 
+interface AddOptions extends BaseOptions {
+  egressHandlerId?: string;
+}
+
 async function getClient(options: BaseOptions): Promise<AgentClient> {
   const config = await loadConfig();
 
@@ -77,7 +81,15 @@ async function promptForConfig(handler: EgressHandlerInfo): Promise<Record<strin
   return config;
 }
 
-export async function egressAddCommand(options: BaseOptions): Promise<void> {
+function findAvailableHandler(
+  handlers: EgressHandlerInfo[],
+  egressHandlerId?: string
+): EgressHandlerInfo | undefined {
+  if (!egressHandlerId) return undefined;
+  return handlers.find((handler) => handler.egressHandlerId === egressHandlerId);
+}
+
+export async function egressAddCommand(options: AddOptions): Promise<void> {
   const client = await getClient(options);
 
   console.log("Fetching available egress handlers...\n");
@@ -87,14 +99,22 @@ export async function egressAddCommand(options: BaseOptions): Promise<void> {
     return;
   }
 
-  const selected = await select({
-    message: "Select an egress handler:",
-    choices: handlers.map((handler) => ({
-      name: handler.name,
-      value: handler,
-      description: `${handler.domains.join(", ")} • ${formatSecretSummary(handler)}`,
-    })),
-  });
+  const selected = options.egressHandlerId
+    ? findAvailableHandler(handlers, options.egressHandlerId)
+    : await select({
+        message: "Select an egress handler:",
+        choices: handlers.map((handler) => ({
+          name: handler.name,
+          value: handler,
+          description: `${handler.domains.join(", ")} • ${formatSecretSummary(handler)}`,
+        })),
+      });
+
+  if (!selected) {
+    console.error(`Error: Unknown egress handler "${options.egressHandlerId}".`);
+    console.error(`Available handlers: ${handlers.map((handler) => handler.egressHandlerId).join(", ")}`);
+    process.exit(1);
+  }
 
   console.log(`\nConfiguring ${selected.name}...\n`);
 

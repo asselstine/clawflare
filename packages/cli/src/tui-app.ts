@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse } from "./client.js";
+import type { AgentClient, AgentMessage, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse, DeleteSessionResponse, DeleteSessionsResponse } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -82,6 +82,7 @@ const slashCommands = [
   { name: "sessions", description: "Show recent sessions" },
   { name: "open", description: "Open an existing session" },
   { name: "kill", description: "Terminate session workflows and containers" },
+  { name: "delete", description: "Delete sessions after cleanup" },
   { name: "name", description: "Name the current session" },
   { name: "tools", description: "List available tools" },
   { name: "models", description: "Select workspace default model" },
@@ -333,7 +334,7 @@ function createMarkdown(content: string, theme: MarkdownTheme): Markdown {
 
 type DisplayMessageRole = "user" | "assistant" | "toolResult" | "error";
 
-export type ToolCallStatus = "pending" | "running";
+export type ToolCallStatus = "pending" | "running" | "complete" | "error";
 
 export function getPersistedToolResultIsError(toolResult: { isError?: boolean; details?: unknown }): boolean {
   const details = toolResult.details;
@@ -345,10 +346,59 @@ export function getToolCallVisualState(
   status: ToolCallStatus,
   toolResult: { isError?: boolean } | undefined
 ): { hasError: boolean; isComplete: boolean } {
-  void status;
+  if (!toolResult) {
+    return {
+      hasError: status === "error",
+      isComplete: status === "complete",
+    };
+  }
+
   const hasError = toolResult?.isError === true;
   const isComplete = toolResult !== undefined && !hasError;
   return { hasError, isComplete };
+}
+
+export function updateToolCallStatusesFromEvents(
+  toolCalls: ToolCallInfo[],
+  events: SessionEvent[]
+): void {
+  for (const event of events) {
+    if (!("toolCallId" in event) || !event.toolCallId) continue;
+
+    const toolCall = toolCalls.find((tc) => tc.id === event.toolCallId);
+    if (!toolCall) continue;
+
+    if (event.type === "tool_execution_start") {
+      toolCall.status = "running";
+    } else if (event.type === "tool_execution_update" && "status" in event) {
+      const status = event.status;
+      if (status === "running" || status === "complete" || status === "error") {
+        toolCall.status = status;
+      }
+    } else if (event.type === "tool_execution_end") {
+      toolCall.status = event.isError ? "error" : "complete";
+    }
+  }
+}
+
+export function getActiveToolCallStatusMessage(
+  messages: Array<{ role: DisplayMessageRole; toolCalls?: ToolCallInfo[] }>
+): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.role !== "assistant" || !message.toolCalls?.length) continue;
+
+    const active = message.toolCalls.find((toolCall) =>
+      toolCall.status === "pending" || toolCall.status === "running"
+    );
+    if (!active) return null;
+
+    return active.status === "running"
+      ? `Running ${active.name}`
+      : `Waiting to run ${active.name}`;
+  }
+
+  return null;
 }
 
 export function shouldShowTrailingThinking(
@@ -377,7 +427,7 @@ export function shouldShowTrailingThinking(
   return followingToolResults >= expectedToolResults;
 }
 
-interface ToolCallInfo {
+export interface ToolCallInfo {
   id: string;
   name: string;
   params: Record<string, unknown>;
@@ -485,6 +535,10 @@ type SessionSelectorState = {
 type KillAllSessionsResult = {
   killed: KillSessionResponse[];
   skipped: SessionSummary[];
+};
+
+type DeleteAllSessionsResult = {
+  response: DeleteSessionsResponse;
 };
 
 // Helper to create user message block with full-width background and padding
@@ -1313,7 +1367,11 @@ export class ClawflareTUIApp {
     if (lastEvent) {
       const statusText = getEventDisplayMessage(lastEvent);
       if (statusText) {
-        this.setStatus(statusText, "yellow");
+        const activeToolStatus = getActiveToolCallStatusMessage(this.messages);
+        const effectiveStatusText = activeToolStatus && lastEvent.type.startsWith("message_")
+          ? activeToolStatus
+          : statusText;
+        this.setStatus(effectiveStatusText, "yellow");
       }
     }
   }
@@ -1324,15 +1382,7 @@ export class ClawflareTUIApp {
 
     const msg = this.messages[lastAssistantIdx]!;
     if (!msg.toolCalls) return;
-
-    for (const event of events) {
-      if (event.type === "tool_execution_start" && event.toolCallId) {
-        const toolCall = msg.toolCalls.find((tc) => tc.id === event.toolCallId);
-        if (toolCall) {
-          toolCall.status = "running";
-        }
-      }
-    }
+    updateToolCallStatusesFromEvents(msg.toolCalls, events);
   }
 
   private getLastAssistantMessageIndex(): number {
@@ -1429,6 +1479,7 @@ export class ClawflareTUIApp {
       
       // Update messages (conversation history)
       // If we have a pending optimistic message, check if server caught up
+      const hasAuthoritativeMessages = Boolean(update.session.messages);
       if (update.session.messages) {
         const serverMessages = update.session.messages.map((m) => this.formatMessageForDisplay(m));
 
@@ -1442,13 +1493,16 @@ export class ClawflareTUIApp {
           }
           this.messages = serverMessages;
         }
+        this.assistantPartialState = { active: false };
       }
       
       // Update events for progress display
       if (update.newEvents.length > 0) {
-        const partial = applyAssistantPartialEvents(this.messages, update.newEvents, this.assistantPartialState);
-        this.messages = partial.messages;
-        this.assistantPartialState = partial.state;
+        if (!hasAuthoritativeMessages) {
+          const partial = applyAssistantPartialEvents(this.messages, update.newEvents, this.assistantPartialState);
+          this.messages = partial.messages;
+          this.assistantPartialState = partial.state;
+        }
         this.updateAgentEvents(update.newEvents);
       }
       
@@ -1587,6 +1641,19 @@ export class ClawflareTUIApp {
     return details.join("\n");
   }
 
+  private formatDeletedSession(deleted: DeleteSessionResponse): string {
+    const details = [
+      `Session ${deleted.sessionId.slice(0, 8)} ${deleted.deleted ? "deleted" : "was not deleted"}.`,
+      deleted.killedBeforeDelete ? "Cleanup ran before delete." : "Session was already closed.",
+      deleted.workflowTerminated ? "Workflow terminated." : "Workflow was not running.",
+      deleted.destroyedContainers.length > 0
+        ? `Destroyed containers: ${deleted.destroyedContainers.join(", ")}`
+        : "No containers to destroy.",
+      ...deleted.errors.map((error) => `Error: ${error}`),
+    ];
+    return details.join("\n");
+  }
+
   private async listAllSessions(): Promise<SessionSummary[]> {
     const pageSize = 100;
     const sessions: SessionSummary[] = [];
@@ -1624,6 +1691,19 @@ export class ClawflareTUIApp {
     return { killed, skipped };
   }
 
+  private async deleteAllSessions(): Promise<DeleteAllSessionsResult> {
+    const response = await this.client.deleteSessions();
+    if (this.sessionId && response.results.some((session) => session.sessionId === this.sessionId && session.deleted)) {
+      this.resetKilledCurrentSession();
+      this.sessionId = "";
+      this.sessionName = "new";
+      this.client.setCurrentSessionId("");
+      this.messages = [];
+    }
+
+    return { response };
+  }
+
   private formatKillAllSessionsResult(result: KillAllSessionsResult): string {
     const okCount = result.killed.filter((session) => session.ok).length;
     const errorCount = result.killed.length - okCount;
@@ -1640,6 +1720,24 @@ export class ClawflareTUIApp {
     if (result.killed.length > 0) {
       lines.push("");
       lines.push(...result.killed.map((session) => this.formatKilledSession(session)));
+    }
+
+    return lines.join("\n");
+  }
+
+  private formatDeleteAllSessionsResult(result: DeleteAllSessionsResult): string {
+    const okCount = result.response.deleted;
+    const errorCount = result.response.total - okCount;
+    const lines = [
+      `Deleted ${okCount} session${okCount === 1 ? "" : "s"}.`,
+    ];
+
+    if (errorCount > 0) {
+      lines.push(`${errorCount} session${errorCount === 1 ? "" : "s"} had cleanup or delete errors.`);
+    }
+    if (result.response.results.length > 0) {
+      lines.push("");
+      lines.push(...result.response.results.map((session) => this.formatDeletedSession(session)));
     }
 
     return lines.join("\n");
@@ -1828,6 +1926,54 @@ export class ClawflareTUIApp {
           break;
         }
 
+        case "delete":
+        case "rm": {
+          const target = args.trim();
+          this.setStatus(target === "all" ? "Deleting all sessions..." : "Deleting session...", "yellow");
+          try {
+            if (target === "all") {
+              const result = await this.deleteAllSessions();
+              const hasErrors = !result.response.ok;
+              this.messages.push({
+                role: hasErrors ? "error" : "assistant",
+                content: this.formatDeleteAllSessionsResult(result),
+              });
+              this.renderMessages();
+              this.setStatus(hasErrors ? "Sessions deleted with errors" : "Sessions deleted", hasErrors ? "red" : "green");
+              break;
+            }
+
+            const targetSessionId = target
+              ? await this.resolveSessionIdForOpen(target)
+              : this.sessionId;
+            if (!targetSessionId) {
+              throw new Error("Usage: /delete [session-id|all]");
+            }
+
+            const deleted = await this.client.deleteSession(targetSessionId);
+            const deletedCurrentSession = targetSessionId === this.sessionId;
+            if (deletedCurrentSession) {
+              this.resetKilledCurrentSession();
+              this.sessionId = "";
+              this.sessionName = "new";
+              this.client.setCurrentSessionId("");
+              this.messages = [];
+            }
+
+            this.messages.push({
+              role: deleted.ok && deleted.deleted ? "assistant" : "error",
+              content: this.formatDeletedSession(deleted),
+            });
+            this.renderMessages();
+            this.setStatus(deleted.ok && deleted.deleted ? "Session deleted" : "Session deleted with errors", deleted.ok && deleted.deleted ? "green" : "red");
+          } catch (e) {
+            this.error = e instanceof Error ? e.message : "Failed to delete session";
+            this.renderMessages();
+            this.setStatus(`Error: ${this.error}`, "red");
+          }
+          break;
+        }
+
         case "name":
           if (!args) {
             this.error = "Usage: /name <session-name>";
@@ -1921,6 +2067,7 @@ export class ClawflareTUIApp {
 /sessions [status] - Show recent sessions
 /open [session-id] - Open an existing session
 /kill [session-id|all] - Terminate session workflows and containers
+/delete [session-id|all] - Delete sessions after cleanup
 /name <name> - Name the current session
 /tools - List available tools
 /models - Show available model connections

@@ -187,6 +187,22 @@ function sanitizeClientName(name: unknown): string {
   return sanitized.length > 0 ? sanitized : "Unknown application";
 }
 
+function sanitizeDeviceReturnUrl(value: unknown, request: Request): string | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+
+  try {
+    const returnUrl = new URL(value);
+    if (returnUrl.protocol !== "https:" && returnUrl.protocol !== "http:") return undefined;
+
+    const origin = request.headers.get("Origin");
+    if (origin && returnUrl.origin !== origin) return undefined;
+
+    return returnUrl.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 // Escape HTML for safe display
 function escapeHtml(text: string): string {
   return text
@@ -442,9 +458,10 @@ export async function handleDeviceAuthStart(
   env: Env
 ): Promise<Response> {
   try {
-    const body = await request.json() as { clientName?: string; provider?: string };
+    const body = await request.json() as { clientName?: string; provider?: string; returnUrl?: string };
     const clientName = sanitizeClientName(body.clientName);
     const provider = body.provider || "github";
+    const returnUrl = sanitizeDeviceReturnUrl(body.returnUrl, request);
 
     // Validate provider
     if (provider !== "github" && provider !== "mock") {
@@ -456,7 +473,7 @@ export async function handleDeviceAuthStart(
       return badRequest("Mock OAuth is only available in test mode");
     }
 
-    const result = await createDeviceAuthorization(env, clientName);
+    const result = await createDeviceAuthorization(env, clientName, returnUrl);
     if (!result) {
       return serverError(
         "Failed to create device authorization. The server database may need auth migrations applied."
@@ -1101,6 +1118,21 @@ export async function handleGithubCallback(
       );
     }
 
+    const returnUrl = deviceAuth.returnUrl;
+    const successInstructions = returnUrl
+      ? `<p>Returning you to Clawflare Web...</p>
+<p><a href="${escapeHtml(returnUrl)}">Continue to Clawflare Web</a></p>`
+      : `<p>You can close this window and return to your terminal.</p>
+<p>Run <code>clawflare open</code> to start using Clawflare.</p>`;
+    const redirectScript = returnUrl
+      ? `<script>
+setTimeout(() => {
+  window.location.replace(${JSON.stringify(returnUrl)});
+}, 900);
+</script>`
+      : "";
+    const successClientLabel = returnUrl ? "Clawflare Web authentication successful" : "Clawflare CLI authentication successful";
+
     // Return success HTML
     return new Response(
       `<!DOCTYPE html>
@@ -1114,16 +1146,16 @@ h1 { color: #4CAF50; }
 .instructions { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; }
 code { background: #e0e0e0; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
 </style>
+${redirectScript}
 </head>
 <body>
-<h1>Authentication Complete</h1>
+<h1>Approved!</h1>
 <div class="success-icon">✓</div>
 <p>You are now authenticated with Clawflare.</p>
 <div class="instructions">
-<p>You can close this window and return to your terminal.</p>
-<p>Run <code>clawflare open</code> to start using Clawflare.</p>
+${successInstructions}
 </div>
-<p><small>Clawflare CLI authentication successful</small></p>
+<p><small>${escapeHtml(successClientLabel)}</small></p>
 </body>
 </html>`,
       { headers: HTML_HEADERS }
