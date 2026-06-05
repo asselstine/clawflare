@@ -219,8 +219,8 @@ clawflare open --server <url> --token <token>
 | Endpoint | Auth | Description |
 |----------|------|-------------|
 | `POST /v1/auth/login` | No | Start OAuth flow or CLI password login |
-| `GET /v1/me` | Yes | Get current user info |
-| `GET /v1/workspaces` | Yes | List user's workspaces |
+| `GET /v1/users/me` | Yes | Get current user and workspace info |
+| `GET /v1/workspace` | Yes | Get current workspace |
 | `POST /v1/chat` | Yes | Start/resume D1-backed workflow session |
 | `GET /v1/session/:id` | Yes | Poll session messages/events |
 | `POST /v1/session/:id/close` | Yes | Mark session closed |

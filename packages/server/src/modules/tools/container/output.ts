@@ -20,10 +20,8 @@ export function tailToolOutput(text: string, limit: number): TruncatedOutput {
     return { text, truncated: false, originalLength: text.length, limit };
   }
 
-  const prefix = `[Tool output truncated. Showing the tail of the response. Original length: ${text.length} characters. Limit: ${limit} characters.]\n`;
-  const tailLength = Math.max(0, limit - prefix.length);
   return {
-    text: `${prefix}${text.slice(-tailLength)}`,
+    text: text.slice(-limit),
     truncated: true,
     originalLength: text.length,
     limit,

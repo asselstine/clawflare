@@ -1,13 +1,11 @@
 import { Hono } from "hono";
 import type { AppBindings } from "./app-bindings.js";
 import { notFound, json } from "./responses.js";
-import { authRoutes, meRoutes } from "../modules/auth/auth.routes.js";
+import { authRoutes, usersRoutes } from "../modules/auth/auth.routes.js";
 import { chatRoutes } from "../modules/chat/chat.routes.js";
-import { contextRoutes } from "../modules/context/context.routes.js";
 import { containersRoutes } from "../modules/containers/containers.routes.js";
 import { debugRoutes } from "../modules/debug/debug.routes.js";
 import { egressHandlersRoutes } from "../modules/egress-handlers/egress-handlers.routes.js";
-import { infoRoutes } from "../modules/info/info.routes.js";
 import {
   modelsRoutes,
   workspaceRoutes,
@@ -41,14 +39,12 @@ app.use("*", async (c, next) => {
 app.get("/health", () => json({ status: "ok" }));
 
 app.route("/v1/auth", authRoutes);
-app.route("/v1/me", meRoutes);
+app.route("/v1/users", usersRoutes);
 app.route("/v1/chat", chatRoutes);
 app.route("/v1/session", sessionRoutes);
 app.route("/v1/sessions", sessionsRoutes);
-app.route("/v1/context", contextRoutes);
 app.route("/v1/containers", containersRoutes);
 app.route("/v1/tools", toolsRoutes);
-app.route("/v1/info", infoRoutes);
 app.route("/v1/cf_debug", debugRoutes);
 app.route("/v1/egress-handlers", egressHandlersRoutes);
 app.route("/v1/providers", providersRoutes);

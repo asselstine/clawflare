@@ -7,7 +7,7 @@ import { password, select, confirm } from "@inquirer/prompts";
 import { loadConfig } from "./login.js";
 import { DEFAULT_SERVER } from "../constants.js";
 import { AgentClient } from "../client.js";
-import type { Model, ProviderInfo, ProviderModelInfo } from "@clawflare/types";
+import type { Model, ProviderInfo, ProviderModelInfo, WorkspaceProvider } from "@clawflare/types";
 
 interface AddOptions {
   server?: string;
@@ -63,6 +63,10 @@ async function fetchProviderModels(
 async function fetchModels(client: AgentClient): Promise<Model[]> {
   const { models } = await client.listModels();
   return models;
+}
+
+async function fetchConfiguredProviders(client: AgentClient): Promise<WorkspaceProvider[]> {
+  return client.listConfiguredProviders();
 }
 
 /**
@@ -165,26 +169,31 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
     default: true,
   });
 
-  console.log("\nCreating model...");
+  console.log("\nCreating provider...");
 
   try {
-    const model = await client.createModel({
+    const result = await client.createProvider({
       provider: selectedProvider.id,
-      modelName: selectedModel.id,
       secrets,
+      defaultModelName: selectedModel.id,
+      createDefaultModel: true,
       setAsDefault,
     });
+    const model = result.model;
 
-    console.log(`\n✓ Model created successfully!`);
-    console.log(`  ID: ${model.id}`);
-    console.log(`  Provider: ${model.provider}`);
-    console.log(`  Model: ${model.modelName}`);
+    console.log(`\n✓ Provider created successfully!`);
+    console.log(`  Provider ID: ${result.provider.id}`);
+    console.log(`  Provider: ${result.provider.provider}`);
+    if (model) {
+      console.log(`  Model ID: ${model.id}`);
+      console.log(`  Model: ${model.modelName}`);
+    }
     if (setAsDefault) {
       console.log(`  Set as default: Yes`);
     }
   } catch (error) {
     console.error(
-      `\n✗ Failed to create model: ${
+      `\n✗ Failed to create provider: ${
         error instanceof Error ? error.message : String(error)
       }`
     );
@@ -198,41 +207,39 @@ export async function providersAddCommand(options: AddOptions): Promise<void> {
 export async function providersRemoveCommand(options: RemoveOptions): Promise<void> {
   const client = await getClient(options);
 
-  const models = await fetchModels(client);
+  const providers = await fetchConfiguredProviders(client);
 
-  if (models.length === 0) {
-    console.log("No models to remove.");
+  if (providers.length === 0) {
+    console.log("No providers to remove.");
     return;
   }
 
-  let modelId: string;
+  let providerId: string;
 
   if (options.name) {
-    // Find by display name or id
-    const match = models.find(
-      (c) => c.displayName === options.name || c.id === options.name
+    const match = providers.find(
+      (provider) => provider.providerDisplayName === options.name || provider.provider === options.name || provider.id === options.name
     );
     if (!match) {
-      console.error(`Error: Model "${options.name}" not found.`);
+      console.error(`Error: Provider "${options.name}" not found.`);
       process.exit(1);
     }
-    modelId = match.id;
+    providerId = match.id;
   } else {
-    // Interactive selection
-    const choices = models.map((c) => ({
-      name: c.displayName || `${c.provider} - ${c.modelName}`,
-      value: c.id,
-      description: `ID: ${c.id.slice(0, 8)}...`,
+    const choices = providers.map((provider) => ({
+      name: provider.providerDisplayName || provider.provider,
+      value: provider.id,
+      description: `ID: ${provider.id.slice(0, 8)}...`,
     }));
 
-    modelId = await select({
-      message: "Select a model to remove:",
+    providerId = await select({
+      message: "Select a provider to remove:",
       choices,
     });
   }
 
   const confirmDelete = await confirm({
-    message: "Are you sure you want to remove this model?",
+    message: "Remove this provider and all associated models?",
     default: false,
   });
 
@@ -241,14 +248,16 @@ export async function providersRemoveCommand(options: RemoveOptions): Promise<vo
     return;
   }
 
-  console.log("\nRemoving model...");
+  console.log("\nRemoving provider...");
 
   try {
-    await client.deleteModel(modelId);
-    console.log("\n✓ Model removed successfully!");
+    const result = await client.deleteProvider(providerId);
+    console.log("\n✓ Provider removed successfully!");
+    console.log(`  Models removed: ${result.deletedModelIds.length}`);
+    if (result.clearedDefaultModelId) console.log("  Cleared default model: Yes");
   } catch (error) {
     console.error(
-      `\n✗ Failed to remove model: ${
+      `\n✗ Failed to remove provider: ${
         error instanceof Error ? error.message : String(error)
       }`
     );

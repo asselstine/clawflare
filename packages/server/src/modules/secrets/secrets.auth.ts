@@ -145,3 +145,27 @@ export async function validateSessionAuthorization(
     },
   };
 }
+
+/**
+ * Validate workspace-scoped service authorization.
+ * Service bindings authenticate the caller; this only verifies the workspace
+ * still exists before allowing workspace-keyed secret reads.
+ */
+export async function validateWorkspaceAuthorization(
+  env: Env,
+  workspaceId: string
+): Promise<{ valid: true; result: VerifiedAuth } | { valid: false; error: string }> {
+  const workspaceExists = await verifyWorkspaceExists(env, workspaceId);
+  if (!workspaceExists) {
+    return { valid: false, error: "Workspace not found" };
+  }
+
+  return {
+    valid: true,
+    result: {
+      userId: "",
+      workspaceId,
+      isSessionAuth: false,
+    },
+  };
+}

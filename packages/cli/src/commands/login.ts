@@ -27,7 +27,9 @@ export interface AuthConfig {
     id: string;
     slug: string;
     name: string;
+    description?: string | null;
     role?: string;
+    defaultModelId?: string | null;
   };
   tokenCreatedAt?: number;
 }
@@ -66,14 +68,16 @@ interface MeResponse {
     id: string;
     slug: string;
     name: string;
-    description?: string;
+    description?: string | null;
     role?: string;
   }>;
   currentWorkspace: {
     id: string;
     slug: string;
     name: string;
+    description?: string;
     role: string;
+    defaultModelId?: string | null;
   };
 }
 
@@ -363,7 +367,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
   
   console.log("✓ Authentication successful\n");
   
-  // Get user info from /v1/me
+  // Get user info from /v1/users/me
   console.log("Fetching user information...");
   
   let me: MeResponse;
@@ -371,7 +375,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     me = await authenticatedRequestJson<MeResponse>(
       server,
       authResult.accessToken,
-      "/v1/me"
+      "/v1/users/me"
     );
   } catch (error) {
     if (error instanceof Error && error.message.includes("401")) {
@@ -466,7 +470,7 @@ export async function whoamiCommand(options: WhoamiOptions = {}): Promise<void> 
     const me = await authenticatedRequestJson<MeResponse>(
       server,
       config.token,
-      "/v1/me"
+      "/v1/users/me"
     );
     
     console.log(`\nUser:      ${me.user.displayName || me.user.email}`);

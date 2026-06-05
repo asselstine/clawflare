@@ -98,11 +98,6 @@ export async function verifyAccessToken(
       return null;
     }
 
-    // logger.debug("Access token verified", { tokenId: row.id, userId: row.userId });
-
-    // Update last_used_at
-    await accessTokens.updateLastUsedAt(row.id);
-
     return { tokenId: row.id, userId: row.userId };
   } catch (error) {
     logger.error("Failed to verify access token", { error: error instanceof Error ? error.message : String(error) });

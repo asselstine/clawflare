@@ -147,4 +147,55 @@ describe("D1 SessionRunRepository", () => {
       await dispose();
     }
   });
+
+  it("can delete a completed step so a pending async tool poll can rerun", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new SessionRunRepository(db);
+      await repo.create({
+        id: "run-1",
+        sessionId: "session-1",
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        input: { type: "prompt", content: "hello" },
+      });
+
+      await repo.completeStep("run-1", "step-1", 1, { value: "pending" });
+      expect(await repo.getCompletedStep("run-1", "step-1")).toEqual({ value: "pending" });
+
+      await repo.deleteCompletedStep("run-1", "step-1");
+
+      expect(await repo.getCompletedStep("run-1", "step-1")).toBeUndefined();
+    } finally {
+      await dispose();
+    }
+  });
+
+  it("does not list delayed runnable runs until their due time", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const repo = new SessionRunRepository(db);
+      await repo.create({
+        id: "run-1",
+        sessionId: "session-1",
+        workspaceId: DEFAULT_WORKSPACE_ID,
+        input: { type: "prompt", content: "hello" },
+      });
+      expect(await repo.claim({ runId: "run-1", workerId: "worker-1", leaseMs: 30_000 })).toBeTruthy();
+
+      await repo.releaseRunnable("run-1", "worker-1", 10_000);
+
+      expect(await repo.listDue()).toEqual([]);
+
+      await db
+        .prepare("UPDATE session_runs SET lease_expires_at = ? WHERE id = ?")
+        .bind(Date.now() - 1, "run-1")
+        .run();
+
+      expect(await repo.listDue()).toEqual([{ id: "run-1", sessionId: "session-1" }]);
+    } finally {
+      await dispose();
+    }
+  });
 });

@@ -5,9 +5,10 @@ import { badRequest, json, notFound } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
 import type { Env } from "../../internal-types/index.js";
 import { logger } from "../../lib/logger.js";
+import { logTiming, timingStart } from "../../lib/timing.js";
 import type { AuthSession } from "../secrets/index.js";
-import { createProvider, listProviders as listWorkspaceProviders } from "../models/models.service.js";
-import { redactProvider, type PublicProvider } from "../models/models.validation.js";
+import { createProvider, deleteProvider, listProviders as listWorkspaceProviders } from "../models/models.service.js";
+import { redactModel, redactProvider, type PublicModel, type PublicProvider } from "../models/models.validation.js";
 import {
   getModelsForProvider,
   getSupportedProviders,
@@ -23,6 +24,7 @@ providersRoutes.get("/", () => handleListProviders());
 providersRoutes.post("/", (c) => handleCreateProvider(c.req.raw, c.env, c.get("requestContext")!));
 providersRoutes.get("/configured", (c) => handleListConfiguredProviders(c.env, c.get("requestContext")!));
 providersRoutes.get("/:id/models", (c) => handleListProviderModels(c.req.param("id")));
+providersRoutes.delete("/:id", (c) => handleDeleteProvider(c.env, c.get("requestContext")!, c.req.param("id")));
 
 // AI Providers HTTP Routes
 // Returns supported AI providers with their required secrets
@@ -54,6 +56,15 @@ interface ConfiguredProviderListResponse {
 
 interface ConfiguredProviderResponse {
   provider: PublicProvider;
+  model?: PublicModel;
+  defaultModelId?: string;
+}
+
+interface DeleteProviderResponse {
+  ok: boolean;
+  providerId: string;
+  deletedModelIds: string[];
+  clearedDefaultModelId?: string;
 }
 
 interface CreateProviderRequest {
@@ -61,6 +72,11 @@ interface CreateProviderRequest {
   providerDisplayName?: string;
   secrets?: Record<string, string>;
   config?: Record<string, unknown>;
+  defaultModelName?: string;
+  createDefaultModel?: boolean;
+  modelDisplayName?: string;
+  modelConfig?: Record<string, unknown>;
+  setAsDefault?: boolean;
 }
 
 function createAuthSession(ctx: RequestContext): AuthSession {
@@ -100,9 +116,24 @@ export async function handleListProviders(): Promise<Response> {
 }
 
 export async function handleListConfiguredProviders(env: Env, requestContext: RequestContext): Promise<Response> {
+  const routeStart = timingStart();
   try {
+    const listStart = timingStart();
     const providers = await listWorkspaceProviders(env, requestContext.workspace.id);
-    return json({ providers: providers.map(redactProvider) } satisfies ConfiguredProviderListResponse);
+    logTiming(env, undefined, "providers.configured.db_list", listStart, {
+      workspaceId: requestContext.workspace.id,
+      providerCount: providers.length,
+    });
+
+    const responseBody = { providers: providers.map(redactProvider) } satisfies ConfiguredProviderListResponse;
+    const response = json(responseBody);
+    response.headers.append("Server-Timing", `providers-db;dur=${Date.now() - listStart}`);
+    response.headers.append("Server-Timing", `providers-total;dur=${Date.now() - routeStart}`);
+    logTiming(env, undefined, "providers.configured.response", routeStart, {
+      workspaceId: requestContext.workspace.id,
+      providerCount: providers.length,
+    });
+    return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("Configured provider list failed", error, {
@@ -131,14 +162,50 @@ export async function handleCreateProvider(
       providerDisplayName: body.providerDisplayName,
       secrets: body.secrets ?? {},
       config: body.config,
+      defaultModelName: body.defaultModelName,
+      createDefaultModel: body.createDefaultModel,
+      modelDisplayName: body.modelDisplayName,
+      modelConfig: body.modelConfig,
+      setAsDefault: body.setAsDefault,
     });
 
-    return json({ provider: redactProvider(result.provider) } satisfies ConfiguredProviderResponse, { status: 201 });
+    return json({
+      provider: redactProvider(result.provider),
+      model: result.model ? redactModel(result.model) : undefined,
+      defaultModelId: result.model && body.setAsDefault ? result.model.id : undefined,
+    } satisfies ConfiguredProviderResponse, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     logger.error("Configured provider creation failed", error, {
       handler: "handleCreateProvider",
       route: "POST /v1/providers",
+      workspaceId: requestContext.workspace.id,
+    });
+    return badRequest(message);
+  }
+}
+
+export async function handleDeleteProvider(
+  env: Env,
+  requestContext: RequestContext,
+  id: string
+): Promise<Response> {
+  try {
+    const result = await deleteProvider(env, requestContext.workspace.id, id);
+    return json({
+      ok: true,
+      providerId: result.providerId,
+      deletedModelIds: result.deletedModelIds,
+      clearedDefaultModelId: result.clearedDefaultModelId,
+    } satisfies DeleteProviderResponse);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("not found")) return notFound("Provider");
+    if (message.includes("active session")) return badRequest(message);
+    logger.error("Configured provider deletion failed", error, {
+      handler: "handleDeleteProvider",
+      route: "DELETE /v1/providers/:id",
+      id,
       workspaceId: requestContext.workspace.id,
     });
     return badRequest(message);

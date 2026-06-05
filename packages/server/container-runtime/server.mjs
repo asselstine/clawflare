@@ -11,6 +11,7 @@
 
 import { createServer } from "http";
 import { spawn } from "child_process";
+import { randomUUID } from "crypto";
 import {
   readFile,
   writeFile,
@@ -28,6 +29,9 @@ const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT || "/workspace";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes
 const DEFAULT_MAX_OUTPUT_CHARS = 8000;
+const MAX_COMMAND_BUFFER_CHARS = 1_000_000;
+
+const commands = new Map();
 
 // Ensure workspace exists
 async function ensureWorkspace() {
@@ -148,6 +152,152 @@ async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, m
       });
     });
   });
+}
+
+function appendCommandOutput(record, stream, value) {
+  record[stream] += value;
+  if (record[stream].length > MAX_COMMAND_BUFFER_CHARS) {
+    record[stream] = record[stream].slice(-MAX_COMMAND_BUFFER_CHARS);
+    record.outputBufferTruncated = true;
+  }
+}
+
+function formatCommandOutput(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
+  const fullStdout = record.stdout;
+  const fullStderr = record.stderr;
+  const combined = fullStdout + (fullStderr ? `\nStderr:\n${fullStderr}` : "");
+  let truncatedOutput = combined;
+  let truncated = Boolean(record.outputBufferTruncated);
+
+  if (combined.length > maxOutputChars) {
+    const prefix = `[Output truncated. Showing tail. Original length: ${combined.length} chars. Limit: ${maxOutputChars} chars.]\n`;
+    truncatedOutput = prefix + combined.slice(-(maxOutputChars - prefix.length));
+    truncated = true;
+  }
+
+  return {
+    stdout: fullStdout,
+    stderr: fullStderr,
+    truncated,
+    output: truncatedOutput,
+  };
+}
+
+function commandResult(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
+  const output = formatCommandOutput(record, maxOutputChars);
+  const durationMs = (record.finishedAt || Date.now()) - record.startedAt;
+  const isRunning = record.state === "running";
+  const ok = isRunning ? true : record.exitCode === 0 && !record.killed;
+
+  return {
+    ok,
+    commandId: record.id,
+    state: record.state,
+    exitCode: isRunning ? null : record.exitCode,
+    signal: isRunning ? null : record.signal,
+    stdout: output.stdout,
+    stderr: output.stderr,
+    durationMs,
+    truncated: output.truncated,
+    killed: record.killed,
+    output: output.output,
+  };
+}
+
+function startBashCommand(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
+  const resolvedCwd = sanitizePath(cwd);
+  const effectiveTimeout = Math.min(Math.max(1000, timeoutMs), MAX_TIMEOUT_MS);
+  const commandId = randomUUID();
+  const startedAt = Date.now();
+
+  const record = {
+    id: commandId,
+    command,
+    cwd: resolvedCwd,
+    startedAt,
+    finishedAt: null,
+    timeoutMs: effectiveTimeout,
+    maxOutputChars,
+    stdout: "",
+    stderr: "",
+    outputBufferTruncated: false,
+    killed: false,
+    exitCode: null,
+    signal: null,
+    state: "running",
+    proc: null,
+  };
+
+  const proc = spawn("/bin/bash", ["-lc", command], {
+    cwd: resolvedCwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, HOME: process.env.HOME || "/root" },
+  });
+  record.proc = proc;
+  commands.set(commandId, record);
+
+  const timeoutId = setTimeout(() => {
+    record.killed = true;
+    proc.kill("SIGTERM");
+    setTimeout(() => {
+      if (!proc.killed) {
+        proc.kill("SIGKILL");
+      }
+    }, 5000);
+  }, effectiveTimeout);
+
+  proc.stdout.on("data", (data) => {
+    appendCommandOutput(record, "stdout", data.toString("utf-8"));
+  });
+
+  proc.stderr.on("data", (data) => {
+    appendCommandOutput(record, "stderr", data.toString("utf-8"));
+  });
+
+  proc.on("error", (error) => {
+    clearTimeout(timeoutId);
+    record.finishedAt = Date.now();
+    record.stderr ||= error.message;
+    record.error = error.message;
+    record.state = "error";
+    record.proc = null;
+  });
+
+  proc.on("close", (code, signal) => {
+    clearTimeout(timeoutId);
+    record.finishedAt = Date.now();
+    record.exitCode = code;
+    record.signal = signal || null;
+    record.state = code === 0 && !record.killed ? "complete" : "error";
+    record.proc = null;
+  });
+
+  return {
+    ok: true,
+    commandId,
+    state: "running",
+    startedAt,
+    timeoutMs: effectiveTimeout,
+  };
+}
+
+function getCommand(commandId) {
+  const record = commands.get(commandId);
+  if (!record) {
+    throw new Error(`Unknown commandId: ${commandId}`);
+  }
+  return record;
+}
+
+function cancelCommand(commandId) {
+  const record = getCommand(commandId);
+  if (record.state !== "running") return commandResult(record);
+
+  record.killed = true;
+  record.state = "cancelled";
+  record.finishedAt = Date.now();
+  record.proc?.kill("SIGTERM");
+  return commandResult(record);
 }
 
 // Read a file
@@ -453,6 +603,39 @@ const handlers = {
     }
 
     return await executeBash(command, cwd, timeoutMs, maxOutputChars);
+  },
+
+  "/bash/start": async (req) => {
+    const body = await parseBody(req);
+    const { command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS } = body;
+
+    if (!command || typeof command !== "string") {
+      throw new Error("command is required");
+    }
+
+    return startBashCommand(command, cwd, timeoutMs, maxOutputChars);
+  },
+
+  "/bash/status": async (req) => {
+    const body = await parseBody(req);
+    const { commandId, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS } = body;
+
+    if (!commandId || typeof commandId !== "string") {
+      throw new Error("commandId is required");
+    }
+
+    return commandResult(getCommand(commandId), maxOutputChars);
+  },
+
+  "/bash/cancel": async (req) => {
+    const body = await parseBody(req);
+    const { commandId } = body;
+
+    if (!commandId || typeof commandId !== "string") {
+      throw new Error("commandId is required");
+    }
+
+    return cancelCommand(commandId);
   },
 
   "/read": async (req) => {

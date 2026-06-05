@@ -1,11 +1,10 @@
-import * as z from "zod";
 import { getModel, getModels, getProviders } from "@earendil-works/pi-ai";
 
 export interface ProviderDefinition {
   provider: string;
   requiredSecrets: string[];
   optionalSecrets: string[];
-  configSchema: Record<string, z.ZodTypeAny>;
+  configSchema: Record<string, unknown>;
   defaultModel?: string;
 }
 
@@ -14,7 +13,7 @@ const PROVIDER_SECRET_DEFINITIONS: Record<string, Pick<ProviderDefinition, "requ
     requiredSecrets: ["AWS_BEARER_TOKEN_BEDROCK"],
     optionalSecrets: [],
     configSchema: {
-      region: z.string().optional().default("us-east-1"),
+      region: { type: "string", default: "us-east-1" },
     },
   },
   anthropic: {
@@ -31,7 +30,7 @@ const PROVIDER_SECRET_DEFINITIONS: Record<string, Pick<ProviderDefinition, "requ
     requiredSecrets: ["CLOUDFLARE_API_KEY"],
     optionalSecrets: [],
     configSchema: {
-      account_id: z.string().optional(),
+      account_id: { type: "string" },
     },
   },
   "azure-openai-responses": {

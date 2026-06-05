@@ -76,6 +76,7 @@ export type {
   ModelProvider,
   CreateProviderParams,
   UpdateProviderParams,
+  DeleteProviderResult,
   CreateModelParams,
   UpdateModelParams,
 } from "./models.js";
@@ -133,6 +134,7 @@ export { SessionToolRepository } from "./session-tools.js";
 
 export type {
   ContainerRecord,
+  ContainerSleepStatus,
   ContainerStatus,
   CreateContainerParams,
   LinkSessionContainerParams,
@@ -149,6 +151,7 @@ export type {
   AccessToken,
   AccessTokenListItem,
   CreateAccessTokenParams,
+  ResolvedBearerAuthContext,
   VerifiedAccessToken,
   WebSession,
   CreateWebSessionResult,
@@ -164,6 +167,7 @@ export type {
 } from "./auth.js";
 export {
   AccessTokenRepository,
+  AuthContextRepository,
   DeviceAuthorizationRepository,
   EmailVerificationTokenRepository,
   PasswordResetTokenRepository,

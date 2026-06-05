@@ -80,8 +80,27 @@ export function decorateGithubHeaders(
   }
 }
 
+const responseHopByHopHeaders = [
+  "Connection",
+  "Keep-Alive",
+  "Proxy-Authenticate",
+  "Proxy-Authorization",
+  "TE",
+  "Trailer",
+  "Transfer-Encoding",
+  "Upgrade",
+];
+
 function withDiagnosticHeaders(response: Response, kind: GithubTrafficKind): Response {
   const headers = new Headers(response.headers);
+  for (const header of responseHopByHopHeaders) {
+    headers.delete(header);
+  }
+
+  if (kind === "git-smart-http") {
+    headers.delete("Content-Length");
+  }
+
   headers.set("X-Clawflare-Egress-Handler", metadata.name);
   headers.set("X-Clawflare-Egress-Kind", kind);
   return new Response(response.body, {
@@ -92,12 +111,14 @@ function withDiagnosticHeaders(response: Response, kind: GithubTrafficKind): Res
 }
 
 function createOutboundRequest(request: Request, headers: Headers): Request {
+  const hasBody = request.method !== "GET" && request.method !== "HEAD";
   return new Request(request.url, {
     method: request.method,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    body: hasBody ? request.body : undefined,
+    duplex: hasBody ? "half" : undefined,
     redirect: request.redirect,
-  });
+  } as RequestInit & { duplex?: "half" });
 }
 
 function createGithubSmartHttpAuthorization(username: string, token: string): string {
@@ -156,6 +177,7 @@ export const githubHandler = {
       headers.delete("Sec-Fetch-Site");
       headers.delete("Sec-Fetch-User");
       headers.delete("Authorization");
+      headers.set("Accept-Encoding", "identity");
       if (handlerEnv.GITHUB_USERNAME && handlerEnv.GITHUB_TOKEN) {
         headers.set(
           "Authorization",

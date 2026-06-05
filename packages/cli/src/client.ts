@@ -34,6 +34,8 @@ import type {
   EgressHandlerListResponse,
   ConfigureEgressHandlerRequest,
   UpdateEgressHandlerRequest,
+  WorkspaceProvider,
+  WorkspaceProviderListResponse,
 } from "@clawflare/types";
 
 export type {
@@ -62,6 +64,8 @@ export type {
   EgressHandlerListResponse,
   ConfigureEgressHandlerRequest,
   UpdateEgressHandlerRequest,
+  WorkspaceProvider,
+  WorkspaceProviderListResponse,
 };
 
 export interface StorageQuotaErrorDetails {
@@ -91,18 +95,60 @@ export interface ToolInfo {
   parameters: unknown;
 }
 
-export interface ServerInfo {
-  contextWindow: number;
-  supportsWorkspaceModels: boolean;
-  supportedProviders: string[];
-  workspace?: {
-    hasModels: boolean;
+export interface WorkspaceResponse {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  role: string;
+  defaultModelId?: string | null;
+}
+
+export interface CurrentUserResponse {
+  user: {
+    id: string;
+    email: string;
+    displayName?: string;
+    createdAt: number;
   };
+  workspaces: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description?: string | null;
+    role?: string;
+  }>;
+  currentWorkspace: WorkspaceResponse;
 }
 
 interface DeleteEgressHandlerResponse {
   ok: boolean;
   egressHandlerId: string;
+}
+
+interface CreateWorkspaceProviderRequest {
+  provider: string;
+  providerDisplayName?: string;
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  defaultModelName?: string;
+  createDefaultModel?: boolean;
+  modelDisplayName?: string;
+  modelConfig?: Record<string, unknown>;
+  setAsDefault?: boolean;
+}
+
+interface CreateWorkspaceProviderResponse {
+  provider: WorkspaceProvider;
+  model?: Model;
+  defaultModelId?: string;
+}
+
+interface DeleteWorkspaceProviderResponse {
+  ok: boolean;
+  providerId: string;
+  deletedModelIds: string[];
+  clearedDefaultModelId?: string;
 }
 
 const SESSION_EVENT_PAGE_SIZE = 100;
@@ -649,13 +695,36 @@ export class AgentClient {
     return this.token;
   }
 
-  async getServerInfo(): Promise<ServerInfo> {
-    return this.requestJson<ServerInfo>("/v1/info");
+  async getCurrentUser(): Promise<CurrentUserResponse> {
+    return this.requestJson<CurrentUserResponse>("/v1/users/me");
+  }
+
+  async getWorkspace(): Promise<WorkspaceResponse> {
+    return this.requestJson<WorkspaceResponse>("/v1/workspace");
   }
 
   async listProviders(): Promise<ProviderInfo[]> {
     const data = await this.requestJson<ProviderListResponse>("/v1/providers");
     return data.providers || [];
+  }
+
+  async listConfiguredProviders(): Promise<WorkspaceProvider[]> {
+    const data = await this.requestJson<WorkspaceProviderListResponse>("/v1/providers/configured");
+    return data.providers || [];
+  }
+
+  async createProvider(input: CreateWorkspaceProviderRequest): Promise<CreateWorkspaceProviderResponse> {
+    return this.requestJson<CreateWorkspaceProviderResponse>("/v1/providers", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
+  async deleteProvider(id: string): Promise<DeleteWorkspaceProviderResponse> {
+    return this.requestJson<DeleteWorkspaceProviderResponse>(
+      `/v1/providers/${encodeURIComponent(id)}`,
+      { method: "DELETE" }
+    );
   }
 
   async listProviderModels(providerId: string): Promise<ProviderModelInfo[]> {

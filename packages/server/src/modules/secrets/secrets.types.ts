@@ -38,8 +38,8 @@ export interface StoreSecretRequest {
 }
 
 export interface GetSecretRequest {
-  /** Authorization context or session reference */
-  auth: AuthorizationContext | { sessionId: string };
+  /** Authorization context, session reference, or workspace-scoped service reference */
+  auth: AuthorizationContext | { sessionId: string } | { workspaceId: string };
   /** Secret key */
   key: string;
 }

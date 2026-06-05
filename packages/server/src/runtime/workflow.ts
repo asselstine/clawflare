@@ -40,6 +40,8 @@ const DEFAULT_SYSTEM_PROMPT = `You are Clawflare, an AI agent running as a web s
 
 When using container_bash, do not specify the timeoutMs parameter unless you specifically need a shorter timeout than the default 30 minutes. Let the system use its default timeout. Do not guess or make up timeouts. If you need longer than 30 minutes, you may specify up to 60 minutes (3600000ms).
 
+When cloning a Git repository in a container, do not assume /workspace is empty. Use container_ls or a shell check when the destination matters, and clone to an explicit destination path. If the destination already exists, inspect it before deciding whether to reuse it, fetch/update it, choose another directory, or remove it.
+
 When referencing files in a container, you may emit markdown links whose URL protocol is the container ID and whose path is the file path, for example [src/index.ts](container-id:/workspace/src/index.ts). Clawflare clients can recognize these links and open the file in the matching container workspace.`;
 
 type JsonValue = null | string | number | boolean | JsonValue[] | { [key: string]: JsonValue };
@@ -561,8 +563,10 @@ export interface RunSessionRunOptions {
 }
 
 const DEFAULT_RUN_BUDGET_MS = 20_000;
-const DEFAULT_RUN_LEASE_MS = 30_000;
+const DEFAULT_RUN_LEASE_MS = 65 * 60_000;
 const RUN_BUDGET_BUFFER_MS = 1_500;
+const PENDING_TOOL_FAST_POLL_WINDOW_MS = 5_000;
+const PENDING_TOOL_INLINE_CONTINUATION_MAX_DELAY_MS = 25_000;
 
 class TimeBudgetExceeded extends Error {
   constructor() {
@@ -570,10 +574,53 @@ class TimeBudgetExceeded extends Error {
   }
 }
 
+class PendingToolYield extends Error {
+  constructor(readonly delayMs: number) {
+    super("Session run yielded while waiting for a detached tool command");
+  }
+}
+
 class SessionRunCancelled extends Error {
   constructor() {
     super("Session run was cancelled");
   }
+}
+
+function isAsyncStateRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asyncStateStartedAt(asyncState: unknown): number | undefined {
+  return isAsyncStateRecord(asyncState) && typeof asyncState.startedAt === "number" ? asyncState.startedAt : undefined;
+}
+
+export function pendingToolPollDelayMs(startedAt: number | undefined, now = Date.now()): number {
+  if (startedAt === undefined) return 250;
+  const elapsedMs = Math.max(0, now - startedAt);
+
+  if (elapsedMs < PENDING_TOOL_FAST_POLL_WINDOW_MS) return 250;
+  if (elapsedMs < 15_000) return 500;
+  if (elapsedMs < 30_000) return 1_000;
+  if (elapsedMs < 60_000) return 2_000;
+  if (elapsedMs < 2 * 60_000) return 5_000;
+  if (elapsedMs < 5 * 60_000) return 10_000;
+  return 25_000;
+}
+
+function runningAsyncToolPollDelay(session: AgentSessionState, toolCallIds?: string[]): number | undefined {
+  const ids = toolCallIds ?? Object.keys(session.toolCalls);
+  const delays = ids.flatMap((toolCallId) => {
+    const toolCall = session.toolCalls[toolCallId];
+    if (toolCall?.status !== "running" || toolCall.asyncState === undefined) return [];
+    return [pendingToolPollDelayMs(asyncStateStartedAt(toolCall.asyncState))];
+  });
+  return delays.length > 0 ? Math.min(...delays) : undefined;
+}
+
+function cachedStepHasRunningAsyncTool(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const session = value.session;
+  return isAgentSessionState(session) && runningAsyncToolPollDelay(session) !== undefined;
 }
 
 class SessionRunCheckpointContext {
@@ -602,15 +649,20 @@ class SessionRunCheckpointContext {
     await this.assertCanContinue();
     const cached = await this.repo.getCompletedStep(this.run.id, name);
     if (cached !== undefined) {
-      this.timing("workflow.step.replayed", undefined, { stepName: name });
-      return cached as T;
+      if (cachedStepHasRunningAsyncTool(cached)) {
+        await this.repo.deleteCompletedStep(this.run.id, name);
+        this.timing("workflow.step.pending_cache_discarded", undefined, { stepName: name });
+      } else {
+        this.timing("workflow.step.replayed", undefined, { stepName: name });
+        return cached as T;
+      }
     }
 
     const stepStart = timingStart();
     const result = await callback();
-    await this.assertCanContinue();
     await this.repo.completeStep(this.run.id, name, this.run.attempt, serializeForWorkflow(result));
     this.timing("workflow.step.completed", stepStart, { stepName: name });
+    await this.assertCanContinue();
     return result;
   }
 }
@@ -686,6 +738,29 @@ export async function runSessionRun(
         leaseMs,
         ctx: options.ctx,
       }));
+      return;
+    }
+
+    if (error instanceof PendingToolYield) {
+      await repo.releaseRunnable(runId, workerId, error.delayMs);
+      const continuationScheduled = Boolean(options.ctx) &&
+        error.delayMs <= PENDING_TOOL_INLINE_CONTINUATION_MAX_DELAY_MS;
+      timing("workflow.run.yielded", undefined, {
+        runId,
+        reason: "pending_tool",
+        pollDelayMs: error.delayMs,
+        continuationScheduled,
+      });
+      if (continuationScheduled) {
+        options.ctx?.waitUntil((async () => {
+          await new Promise((resolve) => setTimeout(resolve, error.delayMs));
+          await runSessionRun(env, runId, {
+            budgetMs,
+            leaseMs,
+            ctx: options.ctx,
+          });
+        })());
+      }
       return;
     }
 
@@ -838,6 +913,16 @@ async function processPrompt(
     agentSession = requireAgentSessionState(enqueued.session);
     nextStep = optionalNextStepInfo(enqueued.nextStep);
 
+    const replayedRuntime = await new SessionRuntimeRepository(env.DB).getWorkflowSession(sessionId);
+    if (isAgentSessionState(replayedRuntime) && runningAsyncToolPollDelay(replayedRuntime) !== undefined) {
+      agentSession = replayedRuntime;
+      nextStep = Agent.determineNextStep(agentSession);
+      timing("workflow.session.replayed_runtime_pending_tool", undefined, {
+        nextStepType: nextStep?.type,
+        nextStepId: nextStep?.stepId,
+      });
+    }
+
     while (nextStep) {
       await checkpoints.assertCanContinue();
       const currentStep = nextStep;
@@ -894,7 +979,6 @@ async function processPrompt(
             nextStepId: result.nextStep?.stepId,
             sessionStatus: result.session.status,
           });
-          await checkpoints.assertCanContinue();
 
           const saveStart = timingStart();
           const savedSession = await runtime.saveWorkflowSession(sessionId, result.session);
@@ -916,6 +1000,11 @@ async function processPrompt(
             stepType: currentStep.type,
             stepId: currentStep.stepId,
           });
+
+          if (currentStep.type === "tool") {
+            const delayMs = runningAsyncToolPollDelay(result.session, currentStep.toolCallIds);
+            if (delayMs !== undefined) throw new PendingToolYield(delayMs);
+          }
 
           return {
             session: deserializeForWorkflow(savedSession.serializedJson),
@@ -987,7 +1076,7 @@ async function processPrompt(
       });
     });
   } catch (error) {
-    if (error instanceof TimeBudgetExceeded) {
+    if (error instanceof TimeBudgetExceeded || error instanceof PendingToolYield) {
       throw error;
     }
 

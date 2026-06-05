@@ -15,6 +15,8 @@ export interface ContainerRuntimeResponse {
 // Container API response types
 export interface BashResult {
   ok: boolean;
+  commandId?: string;
+  state?: "running" | "complete" | "error" | "cancelled";
   exitCode: number | null;
   signal: string | null;
   stdout: string;
@@ -24,6 +26,15 @@ export interface BashResult {
   killed: boolean;
   output?: string;
   error?: string;
+  [key: string]: unknown;
+}
+
+export interface BashStartResult {
+  ok: boolean;
+  commandId: string;
+  state: "running";
+  startedAt: number;
+  timeoutMs: number;
   [key: string]: unknown;
 }
 
@@ -113,8 +124,9 @@ export interface HealthResult {
 }
 
 // Default timeout for container operations
-const DEFAULT_CONTAINER_TIMEOUT = 30000;
-const MAX_CONTAINER_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const CONTAINER_START_TIMEOUT = 30_000;
+const DEFAULT_CONTAINER_BASH_TIMEOUT = 30 * 60 * 1000; // 30 minutes
+const MAX_CONTAINER_BASH_TIMEOUT = 60 * 60 * 1000; // 60 minutes
 const MAX_ERROR_DETAIL_CHARS = 8000;
 const CONTAINER_START_MAX_ATTEMPTS = 2;
 const CONTAINER_READY_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -264,7 +276,7 @@ async function startContainerAndConfigureOutbound(
       await container.startAndWaitForPorts({
         ports: [8080],
         startOptions: { enableInternet: false },
-        cancellationOptions: { portReadyTimeoutMS: DEFAULT_CONTAINER_TIMEOUT, abort: signal },
+        cancellationOptions: { portReadyTimeoutMS: CONTAINER_START_TIMEOUT, abort: signal },
       });
       await container.setOutboundHandler("clawflare", { containerId });
       return container;
@@ -377,8 +389,8 @@ export async function containerBash(
   signal?: AbortSignal
 ): Promise<BashResult> {
   const effectiveTimeout = Math.min(
-    Math.max(1000, timeoutMs || DEFAULT_CONTAINER_TIMEOUT),
-    MAX_CONTAINER_TIMEOUT
+    Math.max(1000, timeoutMs || DEFAULT_CONTAINER_BASH_TIMEOUT),
+    MAX_CONTAINER_BASH_TIMEOUT
   );
 
   const result = await callContainerRuntime(
@@ -391,6 +403,76 @@ export async function containerBash(
       timeoutMs: effectiveTimeout,
       maxOutputChars: maxOutputChars || 8000,
     },
+    signal,
+    { allowRuntimeFailure: true }
+  );
+
+  return result as BashResult;
+}
+
+export async function containerBashStart(
+  env: Env,
+  containerId: string,
+  command: string,
+  cwd?: string,
+  timeoutMs?: number,
+  maxOutputChars?: number,
+  signal?: AbortSignal
+): Promise<BashStartResult> {
+  const effectiveTimeout = Math.min(
+    Math.max(1000, timeoutMs || DEFAULT_CONTAINER_BASH_TIMEOUT),
+    MAX_CONTAINER_BASH_TIMEOUT
+  );
+
+  const result = await callContainerRuntime(
+    env,
+    containerId,
+    "/bash/start",
+    {
+      command,
+      cwd: cwd || ".",
+      timeoutMs: effectiveTimeout,
+      maxOutputChars: maxOutputChars || 8000,
+    },
+    signal
+  );
+
+  return result as BashStartResult;
+}
+
+export async function containerBashStatus(
+  env: Env,
+  containerId: string,
+  commandId: string,
+  maxOutputChars?: number,
+  signal?: AbortSignal
+): Promise<BashResult> {
+  const result = await callContainerRuntime(
+    env,
+    containerId,
+    "/bash/status",
+    {
+      commandId,
+      maxOutputChars: maxOutputChars || 8000,
+    },
+    signal,
+    { allowRuntimeFailure: true }
+  );
+
+  return result as BashResult;
+}
+
+export async function containerBashCancel(
+  env: Env,
+  containerId: string,
+  commandId: string,
+  signal?: AbortSignal
+): Promise<BashResult> {
+  const result = await callContainerRuntime(
+    env,
+    containerId,
+    "/bash/cancel",
+    { commandId },
     signal,
     { allowRuntimeFailure: true }
   );

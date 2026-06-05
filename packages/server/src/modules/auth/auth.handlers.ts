@@ -1385,43 +1385,6 @@ export async function handleVerifyEmail(
 // =============================================================================
 
 /**
- * GET /v1/auth/session
- * Get current session info
- */
-export async function handleGetAuthSession(
-  _request: Request,
-  env: Env,
-  ctx: RequestContext
-): Promise<Response> {
-  try {
-    const workspacesRepo = new WorkspaceRepository(env.DB);
-    const workspaces = await workspacesRepo.listForUser(ctx.user.id);
-
-    return json({
-      user: {
-        id: ctx.user.id,
-        email: ctx.user.email,
-        displayName: ctx.user.displayName,
-        createdAt: ctx.user.createdAt,
-      },
-      workspaces: workspaces.map((w) => ({
-        id: w.id,
-        slug: w.slug,
-        name: w.name,
-        description: w.description,
-        role: "owner",
-      })),
-    });
-  } catch (error) {
-    logger.error("Get auth session failed", error, {
-      handler: "handleGetAuthSession",
-      route: "GET /v1/auth/session",
-    });
-    return serverError(error instanceof Error ? error.message : "Unknown error");
-  }
-}
-
-/**
  * POST /v1/auth/logout
  * Logout user
  */
@@ -1464,10 +1427,10 @@ export async function handleLogout(
 }
 
 /**
- * GET /v1/me
- * Get current user info
+ * GET /v1/users/me
+ * Get current user and workspace info
  */
-export async function handleGetMe(
+export async function handleGetCurrentUser(
   _request: Request,
   env: Env,
   ctx: RequestContext
@@ -1494,13 +1457,15 @@ export async function handleGetMe(
         id: ctx.workspace.id,
         slug: ctx.workspace.slug,
         name: ctx.workspace.name,
+        description: ctx.workspace.description,
         role: ctx.role,
+        defaultModelId: ctx.workspace.defaultModelId,
       },
     });
   } catch (error) {
     logger.error("Get current user failed", error, {
-      handler: "handleGetMe",
-      route: "GET /v1/me",
+      handler: "handleGetCurrentUser",
+      route: "GET /v1/users/me",
     });
     return serverError(error instanceof Error ? error.message : "Unknown error");
   }

@@ -11,15 +11,16 @@ import type { AuthorizationContext } from "./secrets.types.js";
 
 export type AuthSession =
   | { type: "immediate"; context: AuthorizationContext }
-  | { type: "session"; sessionId: string };
+  | { type: "session"; sessionId: string }
+  | { type: "workspace"; workspaceId: string };
 
 export class SecretBrokerClient {
   constructor(private readonly env: Env) {}
 
-  private authParam(auth: AuthSession): AuthorizationContext | { sessionId: string } {
-    return auth.type === "immediate"
-      ? auth.context
-      : { sessionId: auth.sessionId };
+  private authParam(auth: AuthSession): AuthorizationContext | { sessionId: string } | { workspaceId: string } {
+    if (auth.type === "immediate") return auth.context;
+    if (auth.type === "session") return { sessionId: auth.sessionId };
+    return { workspaceId: auth.workspaceId };
   }
 
   private async callBroker(

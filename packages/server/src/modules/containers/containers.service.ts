@@ -8,7 +8,7 @@ import type { Env } from "../../internal-types/index.js";
 import { destroyContainer, getContainerHealth } from "../tools/container/client.js";
 
 export interface CreateContainerInput {
-  id?: string;
+  name?: string;
   description?: string;
   sessionId?: string;
 }
@@ -25,11 +25,12 @@ export async function createContainerModel(
   input: CreateContainerInput,
   signal?: AbortSignal
 ): Promise<CreateContainerResult> {
-  const id = input.id || crypto.randomUUID();
+  const id = crypto.randomUUID();
   const repository = new ContainerRepository(env.DB);
   const container = await repository.create({
     id,
     workspaceId,
+    name: input.name,
     description: input.description,
   });
 
@@ -61,6 +62,21 @@ export async function getContainerModel(
   id: string
 ): Promise<ContainerRecord | null> {
   return new ContainerRepository(env.DB).get(workspaceId, id);
+}
+
+export async function renameContainerModel(
+  env: Env,
+  workspaceId: string,
+  id: string,
+  name: string
+): Promise<ContainerRecord> {
+  const repository = new ContainerRepository(env.DB);
+  const existing = await repository.get(workspaceId, id);
+  if (!existing) throw new Error("Container not found");
+  await repository.touch(workspaceId, id, undefined, name);
+  const updated = await repository.get(workspaceId, id);
+  if (!updated) throw new Error("Container not found");
+  return updated;
 }
 
 export async function listSessionContainers(

@@ -21,7 +21,7 @@ import {
   type AutocompleteItem,
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
-import type { AgentClient, AgentMessage, Message, ToolInfo, ServerInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse, DeleteSessionResponse, DeleteSessionsResponse } from "./client.js";
+import type { AgentClient, AgentMessage, Message, ToolInfo, SessionResponse, SessionEvent, SessionSummary, KillSessionResponse, DeleteSessionResponse, DeleteSessionsResponse } from "./client.js";
 import { expandSkill, formatSkillsForPrompt, loadSkills, type AgentSkill } from "./skills.js";
 
 const chalk = new Chalk({ level: 3 });
@@ -266,13 +266,9 @@ function formatToolCallHeader(toolName: string, params: Record<string, unknown>)
     }
 
     case "container_create": {
-      const containerId = params.containerId as string | undefined;
       const description = params.description as string | undefined;
       if (description) {
         return `container_create: ${description}`;
-      }
-      if (containerId) {
-        return `container_create: ${containerId.slice(0, 16)}...`;
       }
       return "container_create";
     }
@@ -474,13 +470,38 @@ function formatSessionUpdatedAt(updatedAt: number): string {
   });
 }
 
+function formatContainerCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatSessionContainers(session: SessionSummary): string {
+  const containers = session.containerDetails?.length
+    ? session.containerDetails
+    : (session.containers ?? []).map((id) => ({ id, status: "active" as const }));
+  if (containers.length === 0) return "";
+
+  const now = Date.now();
+  const labels = containers.map((container) => {
+    const name = container.name || container.id.slice(0, 12);
+    if (container.status === "destroyed") return `${name} removed`;
+    if (container.sleepAt !== undefined && now >= container.sleepAt) return `${name} sleep`;
+    if (container.sleepAt !== undefined) return `${name} ${formatContainerCountdown(container.sleepAt - now)}`;
+    return name;
+  });
+
+  return `, containers: ${labels.join(", ")}`;
+}
+
 function formatSessionSummary(session: SessionSummary, currentSessionId: string): string {
   const current = session.id === currentSessionId ? " [current]" : "";
   const active = session.isActive ? " active" : "";
   const name = session.name ? ` ${session.name}` : "";
   const countLabel = session.messageCount === 1 ? "event" : "events";
 
-  return `- ${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}`;
+  return `- ${session.id.slice(0, 8)}${name} ${session.status}${active}${current} - ${session.messageCount} ${countLabel}, updated ${formatSessionUpdatedAt(session.updatedAt)}${formatSessionContainers(session)}`;
 }
 
 function formatSessionList(sessions: SessionSummary[], total: number, currentSessionId: string, filter: string): string {
@@ -661,8 +682,6 @@ export class ClawflareTUIApp {
   private serverInfo: {
     url: string;
     contextTotal?: number;
-    supportedProviders?: string[];
-    supportsWorkspaceModels?: boolean;
   } = { url: "" };
   private lastUsage: { totalTokens: number; messageIndex: number } | null = null;
   private abortController: AbortController | null = null;
@@ -827,23 +846,16 @@ export class ClawflareTUIApp {
       this.skills = loadSkills();
       this.skillsPrompt = formatSkillsForPrompt(this.skills);
 
-      const serverInfo = await this.client.getServerInfo();
-      this.serverInfo.contextTotal = serverInfo.contextWindow;
-      this.serverInfo.supportedProviders = serverInfo.supportedProviders;
-      this.serverInfo.supportsWorkspaceModels = serverInfo.supportsWorkspaceModels;
-
-      // Check if workspace has models configured
-      const hasModels = serverInfo.workspace?.hasModels ?? true;
-
-      if (!hasModels) {
-        // Show helpful message when no models configured
+      const configuredProviders = await this.client.listConfiguredProviders();
+      if (configuredProviders.length === 0) {
+        // Show helpful message when no providers are configured
         this.messages.push({
           role: "assistant",
-          content: `Model not configured. Use \`clawflare providers add\` to add model providers. Use /models to choose your model shortlist.`,
+          content: `Provider not configured. Use \`clawflare providers add\` to add a provider, then use /models to choose your model shortlist.`,
         });
         this.updateHeader();
         this.renderMessages();
-        this.setStatus("No model configured", "yellow");
+        this.setStatus("No provider configured", "yellow");
         return;
       }
       

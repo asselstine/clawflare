@@ -207,17 +207,15 @@ export async function deleteEgressHandler(
 
 export async function resolveEgressHandler(
   env: Env,
-  auth: AuthSession | undefined,
+  workspaceId: string,
   handler: EgressHandlerMetadata
 ): Promise<ResolvedEgressHandler> {
   const secrets: Record<string, string> = {};
-  if (auth) {
-    const secretBroker = getSecretBrokerClient(env);
-    for (const [key, ref] of Object.entries(handler.secretRefs)) {
-      const value = await secretBroker.get(auth, ref);
-      if (value) {
-        secrets[key] = value;
-      }
+  const secretBroker = getSecretBrokerClient(env);
+  for (const [key, ref] of Object.entries(handler.secretRefs)) {
+    const value = await secretBroker.get({ type: "workspace", workspaceId }, ref);
+    if (value) {
+      secrets[key] = value;
     }
   }
 

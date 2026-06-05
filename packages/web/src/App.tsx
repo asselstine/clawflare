@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
@@ -46,7 +46,7 @@ import type {
   WorkspaceProvider,
 } from "@clawflare/types";
 import { z } from "zod";
-import { ClawflareApiClient } from "./lib/api";
+import { ApiError, ClawflareApiClient } from "./lib/api";
 import {
   applyAssistantPartialEvents,
   attachToolResults,
@@ -137,6 +137,30 @@ interface ContainerBashDetails {
   killed?: boolean;
 }
 
+type QuickPromptCommandId =
+  | "open-file"
+  | "open-directory"
+  | "open-container"
+  | "open-session"
+  | "rename-session"
+  | "rename-container";
+
+interface QuickPromptCommandDefinition {
+  id: QuickPromptCommandId;
+  prefix: string;
+  aliases?: string[];
+  detail: string;
+}
+
+const quickPromptCommands: readonly QuickPromptCommandDefinition[] = [
+  { id: "open-file", prefix: "Open File: ", detail: "Open a file in the selected container" },
+  { id: "open-directory", prefix: "Open Directory: ", detail: "Open a directory in the selected container" },
+  { id: "open-container", prefix: "Open Container: ", detail: "Open a container workspace" },
+  { id: "open-session", prefix: "Open Session: ", detail: "Open a session" },
+  { id: "rename-session", prefix: "Rename Session: ", aliases: ["rename", "name"], detail: "Rename the current session" },
+  { id: "rename-container", prefix: "Rename Container: ", detail: "Rename a container" },
+] as const;
+
 type QuickPromptItem =
   | {
       id: string;
@@ -175,11 +199,14 @@ type QuickPromptItem =
       kind: "command";
       label: string;
       detail: string;
-      command: "rename-session";
-      name: string;
+      command: QuickPromptCommandId;
+      argument: string;
+      sessionId?: string;
+      containerId?: string;
     };
 
 const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", "account", "data"];
+const DEFAULT_CONTAINER_SLEEP_AFTER_MS = 20 * 60 * 1000;
 
 function sessionIdFromLocation(): string | null {
   const match = window.location.pathname.match(/^\/session\/([^/]+)$/);
@@ -241,12 +268,8 @@ function updateBrowserRootPath(mode: "push" | "replace" = "push"): void {
 
 const providerFormSchema = z.object({
   provider: z.string().min(1),
-  modelName: z.string().optional(),
-  setAsDefault: z.boolean(),
+  modelName: z.string().min(1),
   secrets: z.record(z.string()),
-}).refine((value) => !value.setAsDefault || Boolean(value.modelName), {
-  message: "modelName is required when choosing a default model",
-  path: ["modelName"],
 });
 
 const egressFormSchema = z.object({
@@ -285,10 +308,10 @@ function App(): JSX.Element {
   const [quickPromptOpen, setQuickPromptOpen] = useState(false);
   const [quickPromptQuery, setQuickPromptQuery] = useState("");
   const [quickPromptSelectedIndex, setQuickPromptSelectedIndex] = useState(0);
+  const [containerClock, setContainerClock] = useState(() => Date.now());
   const [selectedProvider, setSelectedProvider] = useState("");
   const [showModelForm, setShowModelForm] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
-  const [setCreatedModelAsDefault, setSetCreatedModelAsDefault] = useState(false);
   const [modelSecrets, setModelSecrets] = useState<Record<string, string>>({});
   const [selectedEgress, setSelectedEgress] = useState("");
   const [showEgressForm, setShowEgressForm] = useState(false);
@@ -303,6 +326,7 @@ function App(): JSX.Element {
   const quickPromptInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
+  const pendingPromptFocusRef = useRef(false);
   const oldestLoadedEventSequenceRef = useRef<number | null>(null);
   const historyLoadingRef = useRef(false);
   const latestEventCursorRef = useRef<string | null>(null);
@@ -319,16 +343,23 @@ function App(): JSX.Element {
   );
   const isConfigured = Boolean(settings.token);
 
-  const info = useQuery({
-    queryKey: ["info", settings.serverUrl, settings.token],
-    queryFn: () => client.getInfo(),
+  useEffect(() => {
+    const timer = window.setInterval(() => setContainerClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const currentUser = useQuery({
+    queryKey: ["current-user", settings.serverUrl, settings.token],
+    queryFn: () => client.getCurrentUser(),
     enabled: isConfigured,
   });
+  const hasInvalidAuth = currentUser.error instanceof ApiError && currentUser.error.status === 401;
+  const hasUsableAuth = isConfigured && !hasInvalidAuth;
 
   const sessions = useQuery({
     queryKey: ["sessions", settings.serverUrl, settings.token],
     queryFn: () => client.listSessions({ status: "all", limit: 80 }),
-    enabled: isConfigured,
+    enabled: hasUsableAuth,
     refetchInterval: (query) => {
       const activeSession = query.state.data?.sessions.find((session) => session.id === sessionId);
       return isRunning || serverProcessingSessionId === sessionId || activeSession?.status === "processing" ? 2000 : 15_000;
@@ -347,7 +378,7 @@ function App(): JSX.Element {
       if (!response.result.details) throw new Error("Container listing did not include details");
       return response.result.details;
     },
-    enabled: isConfigured && Boolean(selectedContainer),
+    enabled: hasUsableAuth && Boolean(selectedContainer),
   });
 
   const selectedFile = useQuery({
@@ -395,10 +426,16 @@ function App(): JSX.Element {
         size: details?.size ?? content.length,
       };
     },
-    enabled: isConfigured && Boolean(selectedContainer && selectedFilePath),
+    enabled: hasUsableAuth && Boolean(selectedContainer && selectedFilePath),
   });
 
   const currentSession = sessions.data?.sessions.find((session) => session.id === sessionId);
+  const selectedContainerSession = selectedContainer
+    ? sessions.data?.sessions.find((session) => session.id === selectedContainer.sessionId)
+    : undefined;
+  const selectedContainerSummary = selectedContainer && selectedContainerSession
+    ? allSessionContainers(selectedContainerSession).find((container) => container.id === selectedContainer.containerId)
+    : undefined;
   const currentContainerIds = useMemo(
     () => (
       sessionId
@@ -450,7 +487,7 @@ function App(): JSX.Element {
       );
       return results.flat();
     },
-    enabled: isConfigured && quickPromptContainers.length > 0,
+    enabled: hasUsableAuth && quickPromptContainers.length > 0,
     placeholderData: (previous) => previous ?? [],
     refetchOnWindowFocus: false,
   });
@@ -472,43 +509,85 @@ function App(): JSX.Element {
   const providers = useQuery({
     queryKey: ["providers", settings.serverUrl, settings.token],
     queryFn: () => client.listProviders(),
-    enabled: isConfigured && appPage === "settings",
+    enabled: hasUsableAuth && appPage === "settings",
   });
 
   const workspaceProviders = useQuery({
     queryKey: ["workspace-providers", settings.serverUrl, settings.token],
-    queryFn: () => client.listConfiguredProviders(),
-    enabled: isConfigured && appPage === "settings",
+    queryFn: async () => {
+      const startedAt = performance.now();
+      try {
+        const providers = await client.listConfiguredProviders();
+        console.info("[clawflare-web-timing] workspace providers loaded", {
+          elapsedMs: Math.round(performance.now() - startedAt),
+          providerCount: providers.length,
+        });
+        return providers;
+      } catch (cause) {
+        console.warn("[clawflare-web-timing] workspace providers failed", {
+          elapsedMs: Math.round(performance.now() - startedAt),
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+        throw cause;
+      }
+    },
+    enabled: hasUsableAuth,
   });
 
   const providerModels = useQuery({
     queryKey: ["provider-models", settings.serverUrl, settings.token, selectedProvider],
     queryFn: () => client.listProviderModels(selectedProvider),
-    enabled: isConfigured && appPage === "settings" && Boolean(selectedProvider),
+    enabled: hasUsableAuth && appPage === "settings" && Boolean(selectedProvider),
   });
 
   const models = useQuery({
     queryKey: ["models", settings.serverUrl, settings.token],
     queryFn: () => client.listModels(),
-    enabled: isConfigured && appPage === "settings",
+    enabled: hasUsableAuth && appPage === "settings",
   });
 
   const availableEgress = useQuery({
     queryKey: ["available-egress", settings.serverUrl, settings.token],
     queryFn: () => client.listAvailableEgressHandlers(),
-    enabled: isConfigured && appPage === "settings",
+    enabled: hasUsableAuth && appPage === "settings",
   });
 
   const configuredEgress = useQuery({
     queryKey: ["egress", settings.serverUrl, settings.token],
     queryFn: () => client.listEgressHandlers({ enabledOnly: false }),
-    enabled: isConfigured && appPage === "settings",
+    enabled: hasUsableAuth && appPage === "settings",
   });
 
   const renameSession = useMutation({
     mutationFn: (name: string) => client.renameSession(sessionId, name),
     onSuccess: () => {
       setStatusText("Session renamed");
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+    onError: showError,
+  });
+
+  const renameContainer = useMutation({
+    mutationFn: ({ containerId, name }: { containerId: string; name: string }) => client.renameContainer(containerId, name),
+    onSuccess: (result) => {
+      setStatusText(`Container renamed to ${result.name}`);
+      queryClient.setQueryData(
+        ["sessions", settings.serverUrl, settings.token],
+        (current: SessionListResponse | undefined) => current
+          ? {
+              ...current,
+              sessions: current.sessions.map((session) => {
+                if (!allSessionContainers(session).some((container) => container.id === result.container.id)) return session;
+                return {
+                  ...session,
+                  containerDetails: allSessionContainers(session).map((container) => (
+                    container.id === result.container.id ? result.container : container
+                  )),
+                };
+              }),
+            }
+          : current,
+      );
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
     },
     onError: showError,
@@ -561,31 +640,46 @@ function App(): JSX.Element {
     mutationFn: () => {
       const parsed = providerFormSchema.parse({
         provider: selectedProvider,
-        modelName: selectedModel || undefined,
-        setAsDefault: setCreatedModelAsDefault,
+        modelName: selectedModel,
         secrets: pruneEmpty(modelSecrets),
       });
-      if (!parsed.setAsDefault) {
-        return client.createProvider({
-          provider: parsed.provider,
-          secrets: parsed.secrets,
-        });
-      }
-      return client.createModel({
+      return client.createProvider({
         provider: parsed.provider,
-        modelName: parsed.modelName!,
         secrets: parsed.secrets,
+        defaultModelName: parsed.modelName,
+        createDefaultModel: true,
         setAsDefault: true,
       });
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       setModelSecrets({});
-      setSetCreatedModelAsDefault(false);
       setShowModelForm(false);
       setStatusText("Provider configured");
+      queryClient.setQueryData(
+        ["workspace-providers", settings.serverUrl, settings.token],
+        (current: WorkspaceProvider[] | undefined) => {
+          const providers = current ?? [];
+          const filtered = providers.filter((provider) => provider.id !== result.provider.id);
+          return [result.provider, ...filtered];
+        },
+      );
+      if (result.model) {
+        queryClient.setQueryData(
+          ["models", settings.serverUrl, settings.token],
+          (current: { models: Model[]; defaultModelId?: string } | undefined) => {
+            const models = current?.models ?? [];
+            const filtered = models.filter((model) => model.id !== result.model!.id);
+            return {
+              models: [result.model!, ...filtered],
+              defaultModelId: result.defaultModelId ?? current?.defaultModelId,
+            };
+          },
+        );
+      }
       void queryClient.invalidateQueries({ queryKey: ["workspace-providers"] });
       void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void info.refetch();
+      void workspaceProviders.refetch();
+      void models.refetch();
     },
     onError: showError,
   });
@@ -595,7 +689,31 @@ function App(): JSX.Element {
     onSuccess: () => {
       setStatusText("Model removed");
       void queryClient.invalidateQueries({ queryKey: ["models"] });
-      void info.refetch();
+    },
+    onError: showError,
+  });
+
+  const deleteProvider = useMutation({
+    mutationFn: (id: string) => client.deleteProvider(id),
+    onSuccess: (result) => {
+      setStatusText("Provider removed");
+      queryClient.setQueryData(
+        ["workspace-providers", settings.serverUrl, settings.token],
+        (current: WorkspaceProvider[] | undefined) => (current ?? []).filter((provider) => provider.id !== result.providerId),
+      );
+      queryClient.setQueryData(
+        ["models", settings.serverUrl, settings.token],
+        (current: { models: Model[]; defaultModelId?: string } | undefined) => {
+          if (!current) return current;
+          const deleted = new Set(result.deletedModelIds);
+          return {
+            models: current.models.filter((model) => !deleted.has(model.id)),
+            defaultModelId: result.clearedDefaultModelId === current.defaultModelId ? undefined : current.defaultModelId,
+          };
+        },
+      );
+      void queryClient.invalidateQueries({ queryKey: ["workspace-providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["models"] });
     },
     onError: showError,
   });
@@ -650,8 +768,28 @@ function App(): JSX.Element {
   const activeSessionIsProcessing = currentSession?.status === "processing" || serverProcessingSessionId === sessionId;
   const activeSessionIsStopping = Boolean(stoppingSessionId && stoppingSessionId === sessionId && activeSessionIsProcessing);
   const composerBusy = isRunning || activeSessionIsProcessing;
+  const checkingProviderSetup = hasUsableAuth && workspaceProviders.isPending;
+  const needsProviderSetup = hasUsableAuth && (workspaceProviders.data?.length ?? 0) === 0 && !workspaceProviders.isPending;
 
-  useEffect(() => {
+  function scrollMessagesToBottom(): void {
+    const scroller = messageScrollerRef.current;
+    if (!scroller) {
+      messageEndRef.current?.scrollIntoView({ block: "end" });
+      return;
+    }
+
+    const scroll = (): void => {
+      if (!shouldStickToBottomRef.current) return;
+      scroller.scrollTop = scroller.scrollHeight;
+    };
+    scroll();
+    window.requestAnimationFrame(() => {
+      scroll();
+      window.requestAnimationFrame(scroll);
+    });
+  }
+
+  useLayoutEffect(() => {
     const restore = restoreScrollRef.current;
     if (restore) {
       const scroller = messageScrollerRef.current;
@@ -662,12 +800,18 @@ function App(): JSX.Element {
       return;
     }
     if (shouldStickToBottomRef.current) {
-      messageEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      scrollMessagesToBottom();
     }
-  }, [messages, composerBusy]);
+  }, [messages, composerBusy, promptHistory]);
+
+  useLayoutEffect(() => {
+    if (!pendingPromptFocusRef.current) return;
+    if (appPage !== "chat" || selectedContainer || quickPromptOpen || !hasUsableAuth || checkingProviderSetup || needsProviderSetup) return;
+    focusPromptNow();
+  }, [appPage, checkingProviderSetup, hasUsableAuth, needsProviderSetup, quickPromptOpen, selectedContainer, sessionId]);
 
   useEffect(() => {
-    if (!isConfigured) return;
+    if (!hasUsableAuth) return;
     const pathContainerEntry = containerEntryFromLocation();
     if (pathContainerEntry) {
       if (!sessions.data) return;
@@ -688,7 +832,7 @@ function App(): JSX.Element {
     if (!pathSessionId || pathSessionId === sessionId || initialPathSessionRef.current === pathSessionId) return;
     initialPathSessionRef.current = pathSessionId;
     void openSession(pathSessionId, { history: "replace" });
-  }, [containerPath, isConfigured, selectedContainer?.containerId, selectedFilePath, sessions.data, settings.serverUrl, settings.token]);
+  }, [containerPath, hasUsableAuth, selectedContainer?.containerId, selectedFilePath, sessions.data, settings.serverUrl, settings.token]);
 
   useEffect(() => {
     const onPopState = (): void => {
@@ -765,7 +909,7 @@ function App(): JSX.Element {
   }, [containerListing.error, quickFiles.error, selectedFile.error]);
 
   useEffect(() => {
-    if (!isConfigured || !sessionId || appPage !== "chat" || isRunning || !activeSessionIsProcessing) return;
+    if (!hasUsableAuth || !sessionId || appPage !== "chat" || isRunning || !activeSessionIsProcessing) return;
     if (followingSessionRef.current === sessionId) return;
 
     const controller = new AbortController();
@@ -781,7 +925,7 @@ function App(): JSX.Element {
       if (followingSessionRef.current === sessionId) followingSessionRef.current = null;
       if (followingAbortControllerRef.current === controller) followingAbortControllerRef.current = null;
     };
-  }, [activeSessionIsProcessing, appPage, isConfigured, isRunning, sessionId, settings.serverUrl, settings.token]);
+  }, [activeSessionIsProcessing, appPage, hasUsableAuth, isRunning, sessionId, settings.serverUrl, settings.token]);
 
   function showError(cause: unknown): void {
     const message = cause instanceof Error ? cause.message : String(cause);
@@ -799,9 +943,22 @@ function App(): JSX.Element {
     setHistoryLoading(false);
   }
 
+  function focusPromptNow(): boolean {
+    const input = promptInputRef.current;
+    if (!input) return false;
+    input.focus({ preventScroll: true });
+    pendingPromptFocusRef.current = false;
+    return true;
+  }
+
   function focusPrompt(): void {
+    pendingPromptFocusRef.current = true;
     window.requestAnimationFrame(() => {
-      promptInputRef.current?.focus();
+      if (!focusPromptNow()) {
+        window.requestAnimationFrame(() => {
+          focusPromptNow();
+        });
+      }
     });
   }
 
@@ -935,8 +1092,18 @@ function App(): JSX.Element {
     );
   }
 
-  function executeQuickPromptItem(item: QuickPromptItem | undefined): void {
+  async function executeQuickPromptItem(item: QuickPromptItem | undefined): Promise<void> {
     if (!item) return;
+
+    if (item.kind === "command" && !item.argument) {
+      const prefix = quickPromptItemCommandPrefix(item);
+      if (prefix) {
+        setQuickPromptQuery(prefix);
+        window.requestAnimationFrame(() => quickPromptInputRef.current?.focus());
+      }
+      return;
+    }
+
     closeQuickPrompt();
 
     switch (item.kind) {
@@ -951,7 +1118,8 @@ function App(): JSX.Element {
         openContainerWorkspace({ sessionId: item.sessionId, containerId: item.containerId });
         return;
       case "session":
-        void openSession(item.sessionId);
+        await openSession(item.sessionId);
+        focusPrompt();
         return;
       case "prompt":
         setAppPage("chat");
@@ -965,7 +1133,9 @@ function App(): JSX.Element {
           setAppPage("chat");
           setMobileSessionsOpen(false);
           closeContainerWorkspace();
-          renameSession.mutate(item.name);
+          renameSession.mutate(item.argument);
+        } else if (item.command === "rename-container" && item.containerId) {
+          renameContainer.mutate({ containerId: item.containerId, name: item.argument });
         }
         return;
     }
@@ -1102,6 +1272,7 @@ function App(): JSX.Element {
       setHistoryLoading(false);
       setError(session.status === "error" ? session.errorMessage ?? null : null);
       setStatusText(`Opened recent ${session.id.slice(0, 8)}`);
+      focusPrompt();
     } catch (cause) {
       showError(cause);
     }
@@ -1503,7 +1674,7 @@ function App(): JSX.Element {
     setLoginMessage("");
     setLoginUser(null);
     setStatusText("Signed out");
-    openSettings("account", { history: "replace" });
+    updateBrowserRootPath("replace");
     void queryClient.clear();
   }
 
@@ -1516,7 +1687,19 @@ function App(): JSX.Element {
 
   const selectedProviderInfo = providers.data?.find((provider) => provider.id === selectedProvider);
   const selectedEgressInfo = availableEgress.data?.find((handler) => handler.egressHandlerId === selectedEgress);
-  const connected = isConfigured && !info.isError;
+  const connected = hasUsableAuth && !currentUser.isError;
+
+  if (!isConfigured || hasInvalidAuth) {
+    return (
+      <LoginScreen
+        settingsError={settingsError}
+        loginStatus={loginStatus === "idle" && hasInvalidAuth ? "error" : loginStatus}
+        loginMessage={loginMessage || (hasInvalidAuth ? "Your session expired or token is invalid. Log in with GitHub to continue." : "")}
+        loginUser={loginUser}
+        onLogin={() => void loginWithGithub()}
+      />
+    );
+  }
 
   return (
     <div className="flex h-dvh min-h-0 bg-shell-950 text-slate-100">
@@ -1537,6 +1720,7 @@ function App(): JSX.Element {
         <SessionSidebar
           currentSessionId={sessionId}
           sessions={sessions.data?.sessions ?? []}
+          now={containerClock}
           collapsed={sessionsCollapsed}
           selectedContainer={selectedContainer}
           onNew={startDraftSession}
@@ -1592,6 +1776,7 @@ function App(): JSX.Element {
             <SessionSidebar
               currentSessionId={sessionId}
               sessions={sessions.data?.sessions ?? []}
+              now={containerClock}
               collapsed={false}
               selectedContainer={selectedContainer}
               onNew={startDraftSession}
@@ -1616,7 +1801,6 @@ function App(): JSX.Element {
             loginStatus={loginStatus}
             loginMessage={loginMessage}
             loginUser={loginUser}
-            serverInfo={info.data}
             providers={providers.data ?? []}
             workspaceProviders={workspaceProviders.data ?? []}
             providerModels={providerModels.data ?? []}
@@ -1626,7 +1810,6 @@ function App(): JSX.Element {
             selectedProviderInfo={selectedProviderInfo}
             models={models.data?.models ?? []}
             defaultModelId={models.data?.defaultModelId}
-            setCreatedModelAsDefault={setCreatedModelAsDefault}
             modelSecrets={modelSecrets}
             availableEgress={availableEgress.data ?? []}
             configuredEgress={configuredEgress.data ?? []}
@@ -1644,9 +1827,9 @@ function App(): JSX.Element {
             onProviderChange={setSelectedProvider}
             onModelChange={setSelectedModel}
             onToggleModelForm={() => setShowModelForm((current) => !current)}
-            onSetCreatedModelAsDefaultChange={setSetCreatedModelAsDefault}
             onModelSecretChange={(key, value) => setModelSecrets((current) => ({ ...current, [key]: value }))}
             onCreateModel={() => addProvider.mutate()}
+            onDeleteProvider={(id) => deleteProvider.mutate(id)}
             onDeleteModel={(id) => deleteModel.mutate(id)}
             onSetDefaultModel={(id) => setDefaultModel.mutate(id)}
             onEgressChange={setSelectedEgress}
@@ -1664,6 +1847,7 @@ function App(): JSX.Element {
             {selectedContainer ? (
               <ContainerWorkspaceView
                 selectedContainer={selectedContainer}
+                selectedContainerSummary={selectedContainerSummary}
                 path={containerPath}
                 listing={containerListing.data}
                 listingLoading={containerListing.isFetching}
@@ -1714,6 +1898,24 @@ function App(): JSX.Element {
                       title="Add your Clawflare endpoint and token"
                       body="The web client stores them locally in this browser and sends requests directly to the Clawflare API."
                     />
+                  ) : checkingProviderSetup ? (
+                    <EmptyState
+                      icon={<Loader2 className="h-7 w-7 animate-spin" />}
+                      title="Checking workspace setup"
+                      body="Looking for a configured provider before starting a new agent turn."
+                    />
+                  ) : needsProviderSetup ? (
+                    <EmptyState
+                      icon={<KeyRound className="h-7 w-7" />}
+                      title="Configure a provider to start"
+                      body="Add a provider and choose a model before starting a new agent turn."
+                      action={(
+                        <button className="primary-btn mx-auto mt-5" onClick={() => openSettings("providers")}>
+                          <KeyRound className="h-4 w-4" />
+                          Configure providers
+                        </button>
+                      )}
+                    />
                   ) : messages.length === 0 ? (
                     <EmptyState
                       icon={<MessageSquare className="h-7 w-7" />}
@@ -1749,8 +1951,8 @@ function App(): JSX.Element {
                     className="scrollbar min-h-11 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                     rows={composerRows}
                     value={prompt}
-                    placeholder={activeSessionIsStopping ? "Stopping agent..." : composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
-                    disabled={!isConfigured}
+                    placeholder={checkingProviderSetup ? "Checking workspace setup..." : needsProviderSetup ? "Configure a provider before chatting" : activeSessionIsStopping ? "Stopping agent..." : composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
+                    disabled={!hasUsableAuth || checkingProviderSetup || needsProviderSetup}
                     onChange={(event) => {
                       setPrompt(event.target.value);
                       setComposerRows(Math.min(8, Math.max(2, event.target.value.split("\n").length)));
@@ -1775,7 +1977,7 @@ function App(): JSX.Element {
                   ) : (
                     <button
                       className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-600 text-white transition hover:bg-accent-500 disabled:bg-shell-700"
-                      disabled={!prompt.trim() || !isConfigured || composerBusy}
+                      disabled={!prompt.trim() || !hasUsableAuth || checkingProviderSetup || needsProviderSetup || composerBusy}
                       title="Send"
                       onClick={() => void submitPrompt()}
                     >
@@ -1796,6 +1998,7 @@ function App(): JSX.Element {
 interface SessionSidebarProps {
   currentSessionId: string;
   sessions: SessionSummary[];
+  now: number;
   collapsed: boolean;
   selectedContainer: SelectedContainer | null;
   onNew: () => void;
@@ -1869,35 +2072,27 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
               {props.collapsed ? (
                 <div className="mb-1 flex flex-col items-center gap-1">
                   {sessionContainers.map((container) => (
-                    <button
+                    <ContainerIconButton
                       key={container.id}
-                      className={`flex h-8 w-8 items-center justify-center rounded-md transition hover:bg-shell-800 ${
-                        props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id ? "bg-accent-600/15 text-accent-300" : container.status === "destroyed" ? "text-slate-700" : "text-slate-500"
-                      }`}
-                      title={container.status === "destroyed" ? `${container.id} (removed)` : container.id}
-                      disabled={container.status === "destroyed"}
-                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId: container.id })}
-                    >
-                      {container.status === "destroyed" ? <Trash2 className="h-4 w-4" /> : <FileText className="h-4 w-4" />}
-                    </button>
+                      container={container}
+                      sessionId={session.id}
+                      selected={props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id}
+                      now={props.now}
+                      onOpen={props.onOpenContainer}
+                    />
                   ))}
                 </div>
               ) : (
                 <div className="mb-1 flex flex-col gap-0.5">
                   {sessionContainers.map((container) => (
-                    <button
+                    <ContainerRowButton
                       key={container.id}
-                      className={`flex h-9 min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition hover:bg-shell-850 ${
-                        props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id ? "bg-accent-600/15 text-accent-200" : container.status === "destroyed" ? "text-slate-600" : "text-slate-400"
-                      }`}
-                      title={container.status === "destroyed" ? `${container.id} (removed)` : container.id}
-                      disabled={container.status === "destroyed"}
-                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId: container.id })}
-                    >
-                      {container.status === "destroyed" ? <Trash2 className="h-4 w-4 shrink-0" /> : <Folder className="h-4 w-4 shrink-0" />}
-                      <span className="truncate">{container.id}</span>
-                      {container.status === "destroyed" ? <span className="ml-auto shrink-0 text-xs">removed</span> : null}
-                    </button>
+                      container={container}
+                      sessionId={session.id}
+                      selected={props.selectedContainer?.sessionId === session.id && props.selectedContainer.containerId === container.id}
+                      now={props.now}
+                      onOpen={props.onOpenContainer}
+                    />
                   ))}
                 </div>
               )}
@@ -1924,8 +2119,71 @@ function SessionSidebar(props: SessionSidebarProps): JSX.Element {
   );
 }
 
+function ContainerIconButton(props: {
+  container: ContainerSummary;
+  sessionId: string;
+  selected: boolean;
+  now: number;
+  onOpen: (container: SelectedContainer) => void;
+}): JSX.Element {
+  const disabled = props.container.status === "destroyed";
+  const sleeping = isContainerSleeping(props.container, props.now);
+  const label = containerDisplayName(props.container);
+
+  return (
+    <button
+      className={`flex h-8 w-8 items-center justify-center rounded-md transition hover:bg-shell-800 ${
+        props.selected ? "bg-accent-600/15 text-accent-300" : disabled || sleeping ? "text-slate-700" : "text-slate-500"
+      }`}
+      title={containerTitle(props.container, props.now)}
+      disabled={disabled}
+      onClick={() => props.onOpen({ sessionId: props.sessionId, containerId: props.container.id })}
+    >
+      {disabled ? <Trash2 className="h-4 w-4" /> : <Terminal className="h-4 w-4" aria-label={label} />}
+    </button>
+  );
+}
+
+function ContainerRowButton(props: {
+  container: ContainerSummary;
+  sessionId: string;
+  selected: boolean;
+  now: number;
+  onOpen: (container: SelectedContainer) => void;
+}): JSX.Element {
+  const disabled = props.container.status === "destroyed";
+  const sleeping = isContainerSleeping(props.container, props.now);
+  const status = containerStatusInfo(props.container, props.now);
+
+  return (
+    <button
+      className={`flex min-h-10 min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition hover:bg-shell-850 ${
+        props.selected ? "bg-accent-600/15 text-accent-200" : disabled || sleeping ? "text-slate-600" : "text-slate-400"
+      }`}
+      title={containerTitle(props.container, props.now)}
+      disabled={disabled}
+      onClick={() => props.onOpen({ sessionId: props.sessionId, containerId: props.container.id })}
+    >
+      {disabled ? <Trash2 className="h-4 w-4 shrink-0" /> : <Terminal className="h-4 w-4 shrink-0" />}
+      <span className="truncate">{containerDisplayName(props.container)}</span>
+      <span className={`ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[0.68rem] font-medium leading-none ${
+        status.tone === "awake"
+          ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+          : status.tone === "sleeping"
+            ? "border-slate-700 bg-shell-950 text-slate-500"
+            : status.tone === "removed"
+              ? "border-slate-700 bg-shell-950 text-slate-600"
+              : "border-shell-700 bg-shell-950 text-slate-500"
+      }`}>
+        {status.label}
+      </span>
+    </button>
+  );
+}
+
 function ContainerWorkspaceView(props: {
   selectedContainer: SelectedContainer;
+  selectedContainerSummary?: ContainerSummary;
   path: string;
   listing?: ContainerLsDetails;
   listingLoading: boolean;
@@ -1946,7 +2204,9 @@ function ContainerWorkspaceView(props: {
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-xs text-slate-500">
               <Terminal className="h-3.5 w-3.5 text-accent-500" />
-              <span className="truncate">{props.selectedContainer.containerId}</span>
+              <span className="truncate" title={props.selectedContainer.containerId}>
+                {props.selectedContainerSummary ? containerDisplayName(props.selectedContainerSummary) : props.selectedContainer.containerId.slice(0, 12)}
+              </span>
             </div>
             <h2 className="truncate font-mono text-sm font-semibold text-slate-100">/workspace/{props.path === "." ? "" : props.path}</h2>
           </div>
@@ -2115,7 +2375,7 @@ function QuickPromptPalette(props: {
   onQueryChange: (query: string) => void;
   onSelectedIndexChange: (index: number) => void;
   onClose: () => void;
-  onSelect: (item: QuickPromptItem | undefined) => void;
+  onSelect: (item: QuickPromptItem | undefined) => void | Promise<void>;
 }): JSX.Element {
   const selectedIndex = Math.min(props.selectedIndex, Math.max(0, props.items.length - 1));
 
@@ -2130,7 +2390,7 @@ function QuickPromptPalette(props: {
             ref={props.inputRef}
             className="h-11 w-full border-0 bg-transparent px-3 text-sm text-slate-100 outline-none placeholder:text-slate-500"
             value={props.query}
-            placeholder="Open File: /path, Open Container: id, Rename Session: name, Open Session: name"
+            placeholder="Open File: /path, Open Container: id, Rename Session: name, Rename Container: name"
             onChange={(event) => props.onQueryChange(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -2155,25 +2415,28 @@ function QuickPromptPalette(props: {
                   event.preventDefault();
                   props.onQueryChange(completion.query);
                   window.requestAnimationFrame(() => {
-                    input.setSelectionRange(completion.selectionStart, completion.selectionEnd);
+                    input.focus();
+                    input.setSelectionRange(completion.cursor, completion.cursor);
                   });
                 }
                 return;
               }
-              if ((event.key === "Backspace" || event.key === "Delete") && quickPromptCommandSelection(event.currentTarget)) {
+              if (event.key === "Backspace" || event.key === "Delete") {
                 const input = event.currentTarget;
-                const cursor = input.selectionStart ?? 0;
-                event.preventDefault();
-                const nextQuery = input.value.slice(0, cursor) + input.value.slice(input.selectionEnd ?? 0);
-                props.onQueryChange(nextQuery);
-                window.requestAnimationFrame(() => {
-                  input.setSelectionRange(cursor, cursor);
-                });
-                return;
+                const deletion = quickPromptCommandDeletion(input, event.key);
+                if (deletion) {
+                  event.preventDefault();
+                  props.onQueryChange(deletion.query);
+                  window.requestAnimationFrame(() => {
+                    input.focus();
+                    input.setSelectionRange(deletion.cursor, deletion.cursor);
+                  });
+                  return;
+                }
               }
               if (event.key === "Enter") {
                 event.preventDefault();
-                props.onSelect(props.items[selectedIndex]);
+                void props.onSelect(props.items[selectedIndex]);
               }
             }}
           />
@@ -2198,7 +2461,7 @@ function QuickPromptPalette(props: {
               }`}
               onMouseDown={(event) => {
                 event.preventDefault();
-                props.onSelect(item);
+                void props.onSelect(item);
               }}
             >
               <QuickPromptIcon item={item} />
@@ -2363,10 +2626,8 @@ function inferContainerIds(_sessionId: string, displayMessages: DisplayMessage[]
   for (const message of displayMessages) {
     for (const toolCall of message.toolCalls ?? []) {
       if (!toolCall.name.startsWith("container_")) continue;
-      const explicitId = stringValue(toolCall.params.containerId);
       const detailsId = detailsContainerId(toolCall.result?.details);
-      const containerId = detailsId ?? explicitId;
-      if (containerId) containers.add(containerId);
+      if (detailsId) containers.add(detailsId);
     }
   }
   return [...containers];
@@ -2380,6 +2641,46 @@ function detailsContainerId(value: unknown): string | undefined {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function containerDisplayName(container: ContainerSummary): string {
+  return container.name || container.id.slice(0, 12);
+}
+
+function isContainerSleeping(container: ContainerSummary, now: number): boolean {
+  const sleepAt = containerSleepAt(container);
+  return container.status === "active" && sleepAt !== undefined && now >= sleepAt;
+}
+
+function containerStatusInfo(container: ContainerSummary, now: number): {
+  label: string;
+  tone: "awake" | "sleeping" | "removed" | "unknown";
+} {
+  if (container.status === "destroyed") return { label: "removed", tone: "removed" };
+  const sleepAt = containerSleepAt(container);
+  if (sleepAt === undefined) return { label: "active", tone: "unknown" };
+  const remaining = sleepAt - now;
+  if (remaining <= 0) return { label: "sleep", tone: "sleeping" };
+  return { label: `awake ${formatCountdown(remaining)}`, tone: "awake" };
+}
+
+function containerSleepAt(container: ContainerSummary): number | undefined {
+  if (container.sleepAt !== undefined) return container.sleepAt;
+  const lastActivityAt = container.lastActivityAt ?? (container.updatedAt > 0 ? container.updatedAt : undefined);
+  if (lastActivityAt === undefined) return undefined;
+  return lastActivityAt + (container.sleepAfterMs ?? DEFAULT_CONTAINER_SLEEP_AFTER_MS);
+}
+
+function containerTitle(container: ContainerSummary, now: number): string {
+  const status = containerStatusInfo(container, now);
+  return `${containerDisplayName(container)} (${status.label})\n${container.id}`;
+}
+
+function formatCountdown(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function allSessionContainers(session: SessionSummary): ContainerSummary[] {
@@ -2431,9 +2732,41 @@ function buildQuickPromptItems(input: {
   files: QuickPromptFileResult[];
 }): QuickPromptItem[] {
   const query = input.query.trim();
-  const promptText = quickPromptEnteredPrompt(query);
-  const renameSessionName = quickPromptEnteredSessionName(query);
+  const renameSessionName = quickPromptEnteredCommandArgument(query, "rename-session");
+  const renameContainerName = quickPromptEnteredCommandArgument(query, "rename-container");
   const items: QuickPromptItem[] = [];
+  const commandQuery = quickPromptMatchedCommandDefinition(query) !== null || quickPromptCommandScoreQuery(query);
+
+  if (commandQuery && !renameSessionName && !renameContainerName) {
+    const renameSessionCommand = quickPromptCommandDefinition("rename-session");
+    const renameContainerCommand = quickPromptCommandDefinition("rename-container");
+
+    if (input.currentSessionId && renameSessionCommand) {
+      items.push({
+        id: "command-template:rename-session",
+        kind: "command",
+        label: renameSessionCommand.prefix.trimEnd(),
+        detail: renameSessionCommand.detail,
+        command: "rename-session",
+        argument: "",
+      });
+    }
+
+    if (renameContainerCommand) {
+      for (const container of input.containers) {
+        items.push({
+          id: `command-template:rename-container:${container.containerId}`,
+          kind: "command",
+          label: renameContainerCommand.prefix.trimEnd(),
+          detail: `${renameContainerCommand.detail}: ${container.containerId.slice(0, 12)}`,
+          command: "rename-container",
+          argument: "",
+          sessionId: container.sessionId,
+          containerId: container.containerId,
+        });
+      }
+    }
+  }
 
   if (input.currentSessionId && renameSessionName) {
     items.push({
@@ -2442,18 +2775,23 @@ function buildQuickPromptItems(input: {
       label: `Rename Session: ${renameSessionName}`,
       detail: `Current session ${input.currentSessionId.slice(0, 8)}`,
       command: "rename-session",
-      name: renameSessionName,
+      argument: renameSessionName,
     });
   }
 
-  if (promptText) {
-    items.push({
-      id: `prompt:${promptText}`,
-      kind: "prompt",
-      label: `Enter Prompt: ${promptText}`,
-      detail: "Send this prompt to the current session",
-      prompt: promptText,
-    });
+  if (renameContainerName) {
+    for (const container of input.containers) {
+      items.push({
+        id: `command:rename-container:${container.containerId}:${renameContainerName}`,
+        kind: "command",
+        label: `Rename Container: ${renameContainerName}`,
+        detail: `Container ${container.containerId.slice(0, 12)}`,
+        command: "rename-container",
+        argument: renameContainerName,
+        sessionId: container.sessionId,
+        containerId: container.containerId,
+      });
+    }
   }
 
   if (input.containers.length > 0) {
@@ -2490,14 +2828,15 @@ function buildQuickPromptItems(input: {
 
   for (const session of input.sessions) {
     const sessionTitle = formatSessionTitle(session);
-    for (const containerId of activeSessionContainerIds(session)) {
+    for (const container of allSessionContainers(session).filter((container) => container.status === "active" && container.deletedAt === undefined)) {
+      const displayName = containerDisplayName(container);
       items.push({
-        id: `container:${session.id}:${containerId}`,
+        id: `container:${session.id}:${container.id}`,
         kind: "container",
-        label: `Open Container: ${containerId}`,
-        detail: `Session: ${sessionTitle} (${session.id.slice(0, 8)})`,
+        label: `Open Container: ${displayName}`,
+        detail: `Session: ${sessionTitle} (${session.id.slice(0, 8)}) / ${container.id}`,
         sessionId: session.id,
-        containerId,
+        containerId: container.id,
       });
     }
 
@@ -2567,7 +2906,7 @@ function normalizeSearchText(value: string): string {
     .replace(/[\\/_:-]+/g, " ");
 }
 
-function quickPromptCommandCompletion(query: string, item: QuickPromptItem | undefined): { query: string; selectionStart: number; selectionEnd: number } | null {
+function quickPromptCommandCompletion(query: string, item: QuickPromptItem | undefined): { query: string; cursor: number } | null {
   const command = quickPromptItemCommandPrefix(item) ?? quickPromptMatchedCommandPrefix(query);
   if (!command) return null;
 
@@ -2575,16 +2914,38 @@ function quickPromptCommandCompletion(query: string, item: QuickPromptItem | und
   const completedQuery = `${command}${argument}`;
   return {
     query: completedQuery,
-    selectionStart: 0,
-    selectionEnd: command.length,
+    cursor: argument ? completedQuery.length : command.length,
   };
 }
 
-function quickPromptCommandSelection(input: HTMLInputElement): boolean {
+function quickPromptCommandDeletion(input: HTMLInputElement, key: "Backspace" | "Delete"): { query: string; cursor: number } | null {
   const selectionStart = input.selectionStart ?? 0;
   const selectionEnd = input.selectionEnd ?? 0;
-  if (selectionStart !== 0 || selectionEnd <= 0) return false;
-  return quickPromptCommandPrefixes().some((command) => input.value.startsWith(command) && selectionEnd === command.length);
+  const command = quickPromptCommandPrefixes().find((prefix) => input.value.startsWith(prefix));
+  if (!command) return null;
+
+  if (selectionStart === 0 && selectionEnd === command.length) {
+    return {
+      query: input.value.slice(command.length),
+      cursor: 0,
+    };
+  }
+
+  if (selectionStart !== selectionEnd) return null;
+  if (key === "Backspace" && selectionStart === command.length) {
+    return {
+      query: input.value.slice(command.length),
+      cursor: 0,
+    };
+  }
+  if (key === "Delete" && selectionStart === 0) {
+    return {
+      query: input.value.slice(command.length),
+      cursor: 0,
+    };
+  }
+
+  return null;
 }
 
 function quickPromptCommandArgument(query: string, command: string): string {
@@ -2607,30 +2968,61 @@ function quickPromptCommandArgument(query: string, command: string): string {
 }
 
 function quickPromptMatchedCommandPrefix(query: string): string | null {
-  const normalizedQuery = normalizeSearchText(query).trim();
-  if (!normalizedQuery) return null;
-  const matchingPrefix = quickPromptCommandPrefixes()
-    .map((command) => ({ command, normalized: normalizeSearchText(command).trim() }))
-    .find(({ normalized }) => normalized === normalizedQuery || normalized.startsWith(normalizedQuery) || normalizedQuery.startsWith(`${normalized} `));
-  return matchingPrefix?.command ?? null;
+  return quickPromptMatchedCommandDefinition(query)?.prefix ?? null;
 }
 
 function quickPromptItemCommandPrefix(item: QuickPromptItem | undefined): string | null {
   if (!item) return null;
-  if (item.kind === "file") return item.fileType === "directory" ? "Open Directory: " : "Open File: ";
-  if (item.kind === "container") return "Open Container: ";
-  if (item.kind === "session") return "Open Session: ";
-  if (item.kind === "prompt") return "Enter Prompt: ";
-  if (item.kind === "command" && item.command === "rename-session") return "Rename Session: ";
+  if (item.kind === "file") return quickPromptCommandDefinition(item.fileType === "directory" ? "open-directory" : "open-file")?.prefix ?? null;
+  if (item.kind === "container") return quickPromptCommandDefinition("open-container")?.prefix ?? null;
+  if (item.kind === "session") return quickPromptCommandDefinition("open-session")?.prefix ?? null;
+  if (item.kind === "command") return quickPromptCommandDefinition(item.command)?.prefix ?? null;
   return null;
 }
 
 function quickPromptCommandPrefixes(): string[] {
-  return ["Open File: ", "Open Directory: ", "Open Container: ", "Open Session: ", "Rename Session: ", "Enter Prompt: "];
+  return quickPromptCommands.map((command) => command.prefix);
 }
 
-function quickPromptEnteredPrompt(query: string): string {
-  return query.replace(/^enter\s+prompt\s*:\s*/i, "").trim();
+function quickPromptCommandDefinition(id: QuickPromptCommandId): QuickPromptCommandDefinition | undefined {
+  return quickPromptCommands.find((command) => command.id === id);
+}
+
+function quickPromptMatchedCommandDefinition(query: string): QuickPromptCommandDefinition | null {
+  const normalizedQuery = normalizeSearchText(query).trim();
+  if (!normalizedQuery) return null;
+  return quickPromptCommands.find((command) => (
+    quickPromptCommandTriggers(command).some((trigger) => {
+      const normalizedTrigger = normalizeSearchText(trigger).trim();
+      return normalizedTrigger === normalizedQuery
+        || normalizedTrigger.startsWith(normalizedQuery)
+        || normalizedQuery.startsWith(`${normalizedTrigger} `);
+    })
+  )) ?? null;
+}
+
+function quickPromptCommandTriggers(command: QuickPromptCommandDefinition): string[] {
+  return [command.prefix, ...(command.aliases ?? [])];
+}
+
+function quickPromptCommandScoreQuery(query: string): boolean {
+  if (!query.trim()) return true;
+  return quickPromptCommands.some((command) => quickPromptScore(`${command.prefix} ${command.detail}`, query) < Number.POSITIVE_INFINITY);
+}
+
+function quickPromptEnteredCommandArgument(query: string, commandId: QuickPromptCommandId): string {
+  const command = quickPromptCommandDefinition(commandId);
+  if (!command) return "";
+
+  const trimmedStart = query.trimStart();
+  if (commandId === "rename-session" && /^rename\s+container(?:\s*:|\s+|\s*$)/i.test(trimmedStart)) return "";
+
+  for (const trigger of quickPromptCommandTriggers(command)) {
+    const pattern = trigger.trim().replace(/:\s*$/, "").replace(/\s+/g, "\\s+");
+    const match = trimmedStart.match(new RegExp(`^${pattern}(?:\\s*:\\s*|\\s+)(.+)$`, "i"));
+    if (match?.[1]) return match[1].trim();
+  }
+  return "";
 }
 
 function quickPromptEnteredPath(query: string, action: string): string {
@@ -2643,14 +3035,9 @@ function quickPromptFileSearchQuery(query: string): string {
   const directPath = quickPromptEnteredPath(query, "open file") || quickPromptEnteredPath(query, "open directory");
   if (directPath) return directPath;
   if (/^(?:open\s+file|open\s+directory)\s*:?\s*$/i.test(query)) return "";
-  if (/^(?:rename(?:\s+session)?|name)(?:\s*:|\s+|\s*$)/i.test(query)) return "";
-  if (/^enter\s+prompt\s*:/i.test(query)) return "";
+  const matchedCommand = quickPromptMatchedCommandDefinition(query);
+  if (matchedCommand?.id === "rename-session" || matchedCommand?.id === "rename-container") return "";
   return query.trim();
-}
-
-function quickPromptEnteredSessionName(query: string): string {
-  const match = query.match(/^(?:rename(?:\s+session)?|name)(?:\s*:\s*|\s+)(.+)$/i);
-  return match?.[1]?.trim() ?? "";
 }
 
 function containerFindSearchInput(query: string): { path: string; name?: string } {
@@ -2863,13 +3250,55 @@ function Avatar({ role }: { role: DisplayMessage["role"] }): JSX.Element {
   );
 }
 
+interface LoginScreenProps {
+  settingsError: string | null;
+  loginStatus: LoginStatus;
+  loginMessage: string;
+  loginUser: string | null;
+  onLogin: () => void;
+}
+
+function LoginScreen(props: LoginScreenProps): JSX.Element {
+  const isLoggingIn = props.loginStatus === "starting" || props.loginStatus === "waiting";
+  const messageTone = props.loginStatus === "error"
+    ? "border-red-800 bg-red-950/35 text-red-100"
+    : props.loginStatus === "approved"
+      ? "border-emerald-800 bg-emerald-950/25 text-emerald-100"
+      : "border-shell-700 bg-shell-850 text-slate-300";
+
+  return (
+    <main className="flex h-dvh min-h-[32rem] items-center justify-center bg-shell-950 px-5 text-slate-100">
+      <div className="flex w-full max-w-lg flex-col items-center gap-4 text-center">
+        <div className="flex items-center gap-3 text-sm font-medium uppercase tracking-[0.18em] text-slate-500">
+          <Bot className="h-5 w-5 text-accent-500" />
+          Clawflare Web
+        </div>
+        <button
+          className="primary-btn min-w-52"
+          disabled={isLoggingIn}
+          onClick={props.onLogin}
+        >
+          {isLoggingIn ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
+          <span>Login with GitHub</span>
+        </button>
+        {props.settingsError ? <p className="max-w-xl text-sm text-red-300">{props.settingsError}</p> : null}
+        {props.loginMessage ? (
+          <div className={`w-full rounded-md border p-4 text-sm ${messageTone}`}>
+            <p className="font-medium">{props.loginMessage}</p>
+            {props.loginStatus === "approved" && props.loginUser ? <p className="mt-1 text-slate-400">Signed in as {props.loginUser}.</p> : null}
+          </div>
+        ) : null}
+      </div>
+    </main>
+  );
+}
+
 interface SettingsPageProps {
   section: SettingsSection;
   settingsError: string | null;
   loginStatus: LoginStatus;
   loginMessage: string;
   loginUser: string | null;
-  serverInfo?: { contextWindow: number; supportsWorkspaceModels: boolean; supportedProviders: string[]; workspace?: { hasModels: boolean } };
   providers: ProviderInfo[];
   workspaceProviders: WorkspaceProvider[];
   providerModels: ProviderModelInfo[];
@@ -2879,7 +3308,6 @@ interface SettingsPageProps {
   selectedProviderInfo?: ProviderInfo;
   models: Model[];
   defaultModelId?: string;
-  setCreatedModelAsDefault: boolean;
   modelSecrets: Record<string, string>;
   availableEgress: EgressHandlerInfo[];
   configuredEgress: EgressHandlerInfo[];
@@ -2897,7 +3325,7 @@ interface SettingsPageProps {
   onProviderChange: (provider: string) => void;
   onModelChange: (model: string) => void;
   onToggleModelForm: () => void;
-  onSetCreatedModelAsDefaultChange: (value: boolean) => void;
+  onDeleteProvider: (id: string) => void;
   onModelSecretChange: (key: string, value: string) => void;
   onCreateModel: () => void;
   onDeleteModel: (id: string) => void;
@@ -2988,6 +3416,7 @@ function AccountPanel(props: SettingsPageProps): JSX.Element {
 
 function ModelsPanel(props: SettingsPageProps): JSX.Element {
   const hasModels = props.models.length > 0;
+  const hasProviders = props.workspaceProviders.length > 0;
 
   return (
     <PanelStack>
@@ -2997,11 +3426,13 @@ function ModelsPanel(props: SettingsPageProps): JSX.Element {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <p className="text-sm font-medium text-slate-200">No models configured</p>
-              <p className="mt-1 text-sm text-slate-500">Configure a provider before choosing a default model.</p>
+              <p className="mt-1 text-sm text-slate-500">
+                {hasProviders ? "Add a model for one of your configured providers before choosing a default." : "Configure a provider before choosing a default model."}
+              </p>
             </div>
             <button className="secondary-btn self-start" onClick={() => props.onSectionChange("providers")}>
               <KeyRound className="h-4 w-4" />
-              Configure providers
+              {hasProviders ? "Add model" : "Configure providers"}
             </button>
           </div>
         </InfoBox>
@@ -3040,6 +3471,9 @@ function ProvidersPanel(props: SettingsPageProps): JSX.Element {
               {provider.configuredSecrets.length ? ` · ${provider.configuredSecrets.length} secret${provider.configuredSecrets.length === 1 ? "" : "s"}` : ""}
             </p>
           </div>
+          <IconButton title="Delete provider" onClick={() => props.onDeleteProvider(provider.id)}>
+            <Trash2 className="h-4 w-4" />
+          </IconButton>
         </Row>
       ))}
       {props.workspaceProviders.length === 0 ? <p className="text-sm text-slate-500">No providers configured.</p> : null}
@@ -3068,28 +3502,14 @@ function ProvidersPanel(props: SettingsPageProps): JSX.Element {
               <input className="input" type="password" value={props.modelSecrets[secret] ?? ""} onChange={(event) => props.onModelSecretChange(secret, event.target.value)} />
             </Field>
           ))}
-          <label className="flex items-start gap-3 rounded-md border border-shell-700 bg-shell-900 px-3 py-2 text-sm text-slate-300">
-            <input
-              className="mt-1"
-              type="checkbox"
-              checked={props.setCreatedModelAsDefault}
-              onChange={(event) => props.onSetCreatedModelAsDefaultChange(event.target.checked)}
-            />
-            <span className="min-w-0">
-              <span className="block font-medium text-slate-200">Choose Default Model</span>
-              <span className="block text-xs text-slate-500">Use this model automatically for new chats unless another model is selected.</span>
-            </span>
-          </label>
-          {props.setCreatedModelAsDefault ? (
-            <Field label="Default model">
-              <select className="input" value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)}>
-                {props.providerModels.map((model) => (
-                  <option key={model.id} value={model.id}>{model.name} ({model.id})</option>
-                ))}
-              </select>
-            </Field>
-          ) : null}
-          <button className="primary-btn self-start" disabled={!props.selectedProvider || (props.setCreatedModelAsDefault && !props.selectedModel)} onClick={props.onCreateModel}>
+          <Field label="Default model">
+            <select className="input" value={props.selectedModel} onChange={(event) => props.onModelChange(event.target.value)}>
+              {props.providerModels.map((model) => (
+                <option key={model.id} value={model.id}>{model.name} ({model.id})</option>
+              ))}
+            </select>
+          </Field>
+          <button className="primary-btn self-start" disabled={!props.selectedProvider || !props.selectedModel} onClick={props.onCreateModel}>
             <Hammer className="h-4 w-4" />
             Add
           </button>
@@ -3194,12 +3614,23 @@ function DataPanel(props: { sessionsTotal: number; onDeleteAll: () => void }): J
   );
 }
 
-function EmptyState({ icon, title, body }: { icon: JSX.Element; title: string; body: string }): JSX.Element {
+function EmptyState({
+  icon,
+  title,
+  body,
+  action,
+}: {
+  icon: JSX.Element;
+  title: string;
+  body: string;
+  action?: ReactNode;
+}): JSX.Element {
   return (
     <div className="mx-auto mt-16 max-w-md text-center sm:mt-24">
       <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-lg bg-shell-850 text-accent-500 ring-1 ring-shell-700">{icon}</div>
       <h2 className="text-lg font-semibold">{title}</h2>
       <p className="mt-2 text-sm leading-6 text-slate-400">{body}</p>
+      {action}
     </div>
   );
 }

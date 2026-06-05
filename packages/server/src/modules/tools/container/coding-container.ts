@@ -9,6 +9,7 @@
 
 import { Container, ContainerProxy } from "@cloudflare/containers";
 import type { Env } from "../../../internal-types/index.js";
+import { CODING_CONTAINER_SLEEP_AFTER } from "../../../internal-types/container-config.js";
 import { routeOutboundRequest } from "../../../egress/gateway.js";
 import { ContainerRepository } from "../../../data/index.js";
 
@@ -50,17 +51,9 @@ const codingContainerOutbound = async (
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
   }
-  const [sessionLink] = await containers.listLinksForContainerId(containerId);
-  if (!sessionLink) {
-    return new Response(`Container outbound request has no session link for ${containerId}.`, {
-      status: 500,
-      headers: { "Content-Type": "text/plain; charset=utf-8" },
-    });
-  }
 
   return routeOutboundRequest(env, request, requestId, {
     workspaceId: container.workspaceId,
-    auth: { type: "session", sessionId: sessionLink.sessionId },
   });
 };
 
@@ -81,7 +74,7 @@ export class CodingContainer extends Container<Env> {
 
   defaultPort = 8080;
   requiredPorts = [8080];
-  sleepAfter = "20m";
+  sleepAfter = CODING_CONTAINER_SLEEP_AFTER;
   enableInternet = false;
   interceptHttps = true;
 

@@ -49,6 +49,12 @@ export interface UpdateProviderParams {
   config?: Record<string, unknown>;
 }
 
+export interface DeleteProviderResult {
+  providerId: string;
+  deletedModelIds: string[];
+  clearedDefaultModelId?: string;
+}
+
 export interface CreateModelParams {
   id?: string;
   workspaceId: string;
@@ -189,6 +195,65 @@ export class ProviderRepository {
     const updated = await this.get(workspaceId, id);
     if (!updated) throw new DataLayerError("Failed to fetch updated provider", "PROVIDER_NOT_FOUND");
     return updated;
+  }
+
+  async softDeleteWithModels(workspaceId: string, id: string): Promise<DeleteProviderResult> {
+    const existing = await this.get(workspaceId, id);
+    if (!existing) throw new DataLayerError("Provider not found", "PROVIDER_NOT_FOUND");
+
+    const activeSessions = await this.db
+      .select({ value: count() })
+      .from(sessions)
+      .innerJoin(models, eq(sessions.modelId, models.id))
+      .where(
+        and(
+          eq(models.workspaceId, workspaceId),
+          eq(models.providerId, id),
+          isNull(models.deletedAt),
+          eq(sessions.workspaceId, workspaceId),
+          notInArray(sessions.status, ["closed", "expired", "error"])
+        )
+      );
+
+    const activeSessionCount = activeSessions[0]?.value ?? 0;
+    if (activeSessionCount > 0) {
+      throw new DataLayerError(
+        `Cannot delete provider with ${activeSessionCount} active session(s) using its models.`,
+        "PROVIDER_ACTIVE_SESSIONS"
+      );
+    }
+
+    const providerModels = await this.db
+      .select({ id: models.id })
+      .from(models)
+      .where(and(eq(models.workspaceId, workspaceId), eq(models.providerId, id), isNull(models.deletedAt)));
+    const deletedModelIds = providerModels.map((model) => model.id);
+
+    const workspace = await this.db.query.workspaces.findFirst({
+      columns: { defaultModelId: true },
+      where: eq(workspaces.id, workspaceId),
+    });
+
+    const now = Date.now();
+    await this.db
+      .update(models)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(models.workspaceId, workspaceId), eq(models.providerId, id), isNull(models.deletedAt)));
+
+    const clearedDefaultModelId =
+      workspace?.defaultModelId && deletedModelIds.includes(workspace.defaultModelId)
+        ? workspace.defaultModelId
+        : undefined;
+    if (clearedDefaultModelId) {
+      await this.db.update(workspaces).set({ defaultModelId: null }).where(eq(workspaces.id, workspaceId));
+    }
+
+    await this.db
+      .update(providers)
+      .set({ deletedAt: now, updatedAt: now })
+      .where(and(eq(providers.id, id), eq(providers.workspaceId, workspaceId), isNull(providers.deletedAt)));
+
+    return { providerId: id, deletedModelIds, clearedDefaultModelId };
   }
 }
 

@@ -137,6 +137,42 @@ describe("secret broker", () => {
     }
   });
 
+  it("retrieves workspace secrets with workspace-scoped service authorization", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createAuthorizedWorkspace(db);
+      const env = {
+        DB: db,
+        CLAWFLARE_KEK: encodeBase64(generateKEK()),
+      } as Env;
+
+      const storeResponse = await secretBroker.fetch(
+        post("/store", {
+          auth: authContext(),
+          key: "workspaces_workspace-1_egress_github_GITHUB_TOKEN",
+          value: "github-token",
+        }),
+        env
+      );
+      await expect(storeResponse.json()).resolves.toEqual({ ok: true });
+
+      const getResponse = await secretBroker.fetch(
+        post("/get", {
+          auth: { workspaceId: "workspace-1" },
+          key: "workspaces_workspace-1_egress_github_GITHUB_TOKEN",
+        }),
+        env
+      );
+
+      await expect(getResponse.json()).resolves.toEqual({
+        ok: true,
+        value: "github-token",
+      });
+    } finally {
+      await dispose();
+    }
+  });
+
   it("fails clearly when the KEK binding is missing", async () => {
     const { db, dispose } = await createDb();
     try {

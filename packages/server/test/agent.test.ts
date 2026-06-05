@@ -121,7 +121,7 @@ describe("Agent", () => {
 
     const result = await agent.runToolStep(session, "tool-1");
 
-    expect(result.toolResultMessage.isError).toBe(true);
+    expect(result.toolResultMessage?.isError).toBe(true);
     expect(result.session.toolCalls["tool-1"]?.status).toBe("error");
     expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
   });
@@ -195,6 +195,72 @@ describe("Agent", () => {
     expect(result.session.toolCalls["tool-1"]?.status).toBe("complete");
     expect(result.session.toolCalls["tool-2"]?.status).toBe("complete");
     expect(result.nextStep?.type).toBe("complete");
+  });
+
+  it("keeps pending async tool calls open and resumes them with stored async state", async () => {
+    const calls: unknown[] = [];
+    const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async (_context: ToolRuntimeContext, _toolCallId: string, params: unknown) => {
+        calls.push(params);
+        if (calls.length === 1) {
+          return {
+            content: [{ type: "text", text: "still running" }],
+            details: {
+              ok: true,
+              pending: true,
+              asyncState: { kind: "test", commandId: "cmd-1" },
+            },
+          };
+        }
+        return {
+          content: [{ type: "text", text: "done" }],
+          details: { ok: true },
+        };
+      },
+    } satisfies RuntimeTool;
+
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      status: "running" as const,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const first = await agent.runSingleStep(session, agent.determineNextStep(session)!);
+
+    expect(first.session.messages.filter((message) => message.role === "toolResult")).toEqual([]);
+    expect(first.session.toolCalls["tool-1"]?.status).toBe("running");
+    expect(first.session.toolCalls["tool-1"]?.asyncState).toEqual({ kind: "test", commandId: "cmd-1" });
+    expect(first.nextStep?.type).toBe("tool");
+
+    const second = await agent.runSingleStep(first.session, first.nextStep!);
+
+    expect(calls[1]).toEqual({ _asyncState: { kind: "test", commandId: "cmd-1" } });
+    expect(second.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(1);
+    expect(second.session.toolCalls["tool-1"]?.status).toBe("complete");
+    expect(second.nextStep?.type).toBe("complete");
   });
 
   it("passes Bedrock credentials as bearerToken", async () => {

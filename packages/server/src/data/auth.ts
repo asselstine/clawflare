@@ -40,6 +40,28 @@ export interface VerifiedAccessToken {
   userId: string;
 }
 
+export interface ResolvedBearerAuthContext {
+  accessTokenId: string;
+  user: {
+    id: string;
+    email: string;
+    displayName: string | null;
+    emailVerifiedAt: number | null;
+    createdAt: number;
+    updatedAt: number;
+  };
+  workspace: {
+    id: string;
+    slug: string;
+    name: string;
+    description: string | null;
+    defaultModelId: string | null;
+    createdAt: number;
+    updatedAt: number;
+  };
+  role: "owner" | "admin" | "member" | "viewer";
+}
+
 // =============================================================================
 // Web Session Types
 // =============================================================================
@@ -143,15 +165,85 @@ export interface ApproveDeviceAuthorizationResult {
  * Drizzle-backed authentication repositories.
  */
 
-import { and, count, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, count, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { createDb, type Db } from "./db.js";
 import {
   accessTokens,
   deviceAuthorizations,
   emailVerificationTokens,
   passwordResetTokens,
+  users,
   webSessions,
+  workspaceMemberships,
+  workspaces,
 } from "./schema.js";
+
+export class AuthContextRepository {
+  private readonly db: Db;
+
+  constructor(db: Db | D1Database) {
+    this.db = "query" in db ? db : createDb(db);
+  }
+
+  async resolveBearerToken(tokenHash: string, now = Date.now()): Promise<ResolvedBearerAuthContext | null> {
+    const rows = await this.db
+      .select({
+        accessTokenId: accessTokens.id,
+        userId: users.id,
+        userEmail: users.email,
+        userDisplayName: users.displayName,
+        userEmailVerifiedAt: users.emailVerifiedAt,
+        userCreatedAt: users.createdAt,
+        userUpdatedAt: users.updatedAt,
+        workspaceId: workspaces.id,
+        workspaceSlug: workspaces.slug,
+        workspaceName: workspaces.name,
+        workspaceDescription: workspaces.description,
+        workspaceDefaultModelId: workspaces.defaultModelId,
+        workspaceCreatedAt: workspaces.createdAt,
+        workspaceUpdatedAt: workspaces.updatedAt,
+        role: workspaceMemberships.role,
+      })
+      .from(accessTokens)
+      .innerJoin(users, eq(users.id, accessTokens.userId))
+      .innerJoin(workspaceMemberships, eq(workspaceMemberships.userId, users.id))
+      .innerJoin(workspaces, eq(workspaces.id, workspaceMemberships.workspaceId))
+      .where(
+        and(
+          eq(accessTokens.tokenHash, tokenHash),
+          isNull(accessTokens.revokedAt),
+          or(isNull(accessTokens.expiresAt), gt(accessTokens.expiresAt, now))
+        )
+      )
+      .orderBy(desc(workspaces.updatedAt))
+      .limit(1);
+
+    const row = rows[0];
+    if (!row) return null;
+
+    return {
+      accessTokenId: row.accessTokenId,
+      user: {
+        id: row.userId,
+        email: row.userEmail,
+        displayName: row.userDisplayName,
+        emailVerifiedAt: row.userEmailVerifiedAt,
+        createdAt: row.userCreatedAt,
+        updatedAt: row.userUpdatedAt,
+      },
+      workspace: {
+        id: row.workspaceId,
+        slug: row.workspaceSlug,
+        name: row.workspaceName,
+        description: row.workspaceDescription,
+        defaultModelId: row.workspaceDefaultModelId,
+        createdAt: row.workspaceCreatedAt,
+        updatedAt: row.workspaceUpdatedAt,
+      },
+      role: row.role,
+    };
+  }
+}
 
 export class AccessTokenRepository {
   private readonly db: Db;

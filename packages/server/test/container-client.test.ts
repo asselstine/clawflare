@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildContainerRuntimeFailureMessage,
   buildContainerStartupFailureMessage,
+  containerBashStart,
   getContainerHealth,
   isContainerCodeUpdateResetError,
 } from "../src/modules/tools/container/client.js";
@@ -101,6 +102,9 @@ describe("container egress setup", () => {
 
     await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-abc");
 
+    expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledWith(expect.objectContaining({
+      cancellationOptions: expect.objectContaining({ portReadyTimeoutMS: 30_000 }),
+    }));
     expect(containerMocks.setOutboundHandler).toHaveBeenCalledWith(
       "clawflare",
       { containerId: "session-abc" }
@@ -124,5 +128,31 @@ describe("container egress setup", () => {
     expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledTimes(1);
     expect(containerMocks.setOutboundHandler).toHaveBeenCalledTimes(1);
     expect(containerMocks.containerFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the 30 minute bash timeout by default without changing startup timeout", async () => {
+    containerMocks.startAndWaitForPorts.mockResolvedValue(undefined);
+    containerMocks.setOutboundHandler.mockResolvedValue(undefined);
+    containerMocks.containerFetch.mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({
+        ok: true,
+        commandId: "cmd-1",
+        state: "running",
+        startedAt: 1,
+        timeoutMs: 1_800_000,
+      }))
+    ));
+
+    await containerBashStart({ CODING_CONTAINER: {} } as Env, "session-bash", "git clone https://example.com/repo.git");
+
+    expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledWith(expect.objectContaining({
+      cancellationOptions: expect.objectContaining({ portReadyTimeoutMS: 30_000 }),
+    }));
+    expect(containerMocks.containerFetch).toHaveBeenCalledWith(
+      "http://localhost/bash/start",
+      expect.objectContaining({
+        body: expect.stringContaining("\"timeoutMs\":1800000"),
+      })
+    );
   });
 });

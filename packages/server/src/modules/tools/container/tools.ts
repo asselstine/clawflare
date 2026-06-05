@@ -19,6 +19,8 @@ import {
 } from "../types.js";
 import {
   containerBash,
+  containerBashStart,
+  containerBashStatus,
   containerRead,
   containerWrite,
   containerEdit,
@@ -39,7 +41,7 @@ export interface ContainerToolContext {
 
 // Container create parameters
 interface ContainerCreateParams {
-  containerId?: string;
+  name?: string;
   description?: string;
 }
 
@@ -50,6 +52,18 @@ interface ContainerBashParams {
   cwd?: string;
   timeoutMs?: number;
   maxOutputChars?: number;
+  _asyncState?: ContainerBashAsyncState;
+}
+
+interface ContainerBashAsyncState {
+  kind: "container_bash";
+  containerId: string;
+  commandId: string;
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+  maxOutputChars?: number;
+  startedAt: number;
 }
 
 // Container read parameters
@@ -107,6 +121,13 @@ interface ContainerLsParams {
 
 interface ContainerDestroyParams {
   containerId: string;
+}
+
+function isUnsupportedDetachedBashError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("Unknown endpoint: /bash/start") ||
+    message.includes("Unknown endpoint: /bash/status") ||
+    message.includes("Unknown endpoint: /bash/cancel");
 }
 
 // Format bash result for the agent
@@ -257,13 +278,15 @@ async function registerSessionContainer(
   env: Env,
   ctx: ContainerToolContext,
   containerId: string,
+  name?: string,
   description?: string
-): Promise<void> {
-  if (!ctx.workspaceId) return;
+): Promise<{ name?: string }> {
+  if (!ctx.workspaceId) return {};
   const containers = new ContainerRepository(env.DB);
-  await containers.create({
+  const container = await containers.create({
     id: containerId,
     workspaceId: ctx.workspaceId,
+    name,
     description,
   });
   await containers.linkSession({
@@ -272,6 +295,7 @@ async function registerSessionContainer(
     sessionId: ctx.sessionId,
     role: "attached",
   });
+  return { name: container.name };
 }
 
 async function requireActiveSessionContainer(
@@ -316,13 +340,14 @@ export function createContainerCreateTool(
     description:
       "Create or initialize a persistent coding container for this session. " +
       "This container provides an isolated environment with bash, git, ripgrep, " +
-      "and other development tools. The container persists for the session duration " +
-      "and maintains its filesystem state. Container egress is routed through " +
+      "and other development tools. Its identity persists in the session, but its " +
+      "filesystem is ephemeral and resets after the container sleeps or restarts. " +
+      "Container egress is routed through " +
       "Clawflare's security layer.",
     label: "Create Container",
     parameters: Type.Object({
-      containerId: Type.Optional(Type.String({
-        description: "Optional custom container ID. If not provided, a unique container ID is generated.",
+      name: Type.Optional(Type.String({
+        description: "Optional short display name for the container. Defaults to container-N.",
       })),
       description: Type.Optional(Type.String({
         description: "Optional description of the container's purpose",
@@ -337,14 +362,15 @@ export function createContainerCreateTool(
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerCreateParams;
       const ctx = containerToolContext(runtime);
-      const containerId = p.containerId ? requireContainerId(p.containerId) : generateContainerId();
-      await registerSessionContainer(runtime.env, ctx, containerId, p.description);
+      const containerId = generateContainerId();
+      const registered = await registerSessionContainer(runtime.env, ctx, containerId, p.name, p.description);
       
       // Get or start container
       const health = await getContainerHealth(runtime.env, containerId, signal);
       
       const lines: string[] = [
-        `Container ready: ${containerId}`,
+        `Container ready: ${registered.name ?? containerId}`,
+        `ID: ${containerId}`,
         `Status: ${health.status}`,
         `Workspace: /workspace`,
       ];
@@ -357,6 +383,7 @@ export function createContainerCreateTool(
         content: [{ type: "text", text: lines.join("\n") }],
         details: {
           containerId,
+          name: registered.name,
           status: health.status,
           workspace: health.workspace,
         },
@@ -410,15 +437,78 @@ export function createContainerBashTool(
       const containerId = requireContainerId(p.containerId);
       await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
-      const result = await containerBash(
-        runtime.env,
-        containerId,
-        p.command,
-        p.cwd,
-        p.timeoutMs,
-        p.maxOutputChars,
-        signal
-      );
+      const asyncState = p._asyncState?.kind === "container_bash" ? p._asyncState : undefined;
+      const commandId = asyncState?.commandId;
+      let result;
+      try {
+        result = commandId
+          ? await containerBashStatus(
+              runtime.env,
+              containerId,
+              commandId,
+              p.maxOutputChars ?? asyncState.maxOutputChars,
+              signal
+            )
+          : await (async () => {
+              const started = await containerBashStart(
+                runtime.env,
+                containerId,
+                p.command,
+                p.cwd,
+                p.timeoutMs,
+                p.maxOutputChars,
+                signal
+              );
+              return await containerBashStatus(
+                runtime.env,
+                containerId,
+                started.commandId,
+                p.maxOutputChars,
+                signal
+              );
+            })();
+      } catch (error) {
+        if (!isUnsupportedDetachedBashError(error) || commandId) throw error;
+        result = await containerBash(
+          runtime.env,
+          containerId,
+          p.command,
+          p.cwd,
+          p.timeoutMs,
+          p.maxOutputChars,
+          signal
+        );
+      }
+
+      if (result.state === "running" && result.commandId) {
+        const nextAsyncState: ContainerBashAsyncState = asyncState ?? {
+          kind: "container_bash",
+          containerId,
+          commandId: result.commandId,
+          command: p.command,
+          cwd: p.cwd,
+          timeoutMs: p.timeoutMs,
+          maxOutputChars: p.maxOutputChars,
+          startedAt: Date.now() - result.durationMs,
+        };
+
+        return {
+          content: [{
+            type: "text",
+            text: `Command is still running (${Math.round(result.durationMs / 1000)}s elapsed).`,
+          }],
+          details: {
+            ok: true,
+            pending: true,
+            kind: "container_bash",
+            asyncState: nextAsyncState,
+            commandId: result.commandId,
+            durationMs: result.durationMs,
+            truncated: result.truncated,
+            output: result.output,
+          },
+        };
+      }
       
       const formatted = formatBashResult(result, p.maxOutputChars);
       
@@ -426,6 +516,8 @@ export function createContainerBashTool(
         content: [{ type: "text", text: formatted.text }],
         details: {
           ok: result.ok,
+          commandId: result.commandId,
+          state: result.state,
           exitCode: result.exitCode,
           durationMs: result.durationMs,
           truncated: formatted.truncated,

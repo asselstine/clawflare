@@ -3,15 +3,17 @@
 
 import type { Env } from "../internal-types/index.js";
 import {
+  AuthContextRepository,
   UserRepository,
   WorkspaceRepository,
   type User,
   type Workspace,
   type WorkspaceRole,
 } from "../data/index.js";
-import { verifyAccessToken } from "../modules/auth/access-tokens.js";
+import { hashToken } from "../modules/auth/access-tokens.js";
 import { verifyWebSession, extractSessionToken } from "../modules/auth/sessions.js";
 import { logger } from "../lib/logger.js";
+import { logTiming, timingStart } from "../lib/timing.js";
 
 /**
  * Request context containing authenticated user and workspace information
@@ -120,24 +122,23 @@ async function resolveBearerTokenContext(
   token: string,
   env: Env
 ): Promise<RequestContext | null> {
-  const tokenResult = await verifyAccessToken(env, token);
-  if (!tokenResult) return null;
+  const hashStart = timingStart();
+  const tokenHash = await hashToken(token);
+  logTiming(env, undefined, "auth.bearer.token_hashed", hashStart);
 
-  const user = await loadUser(tokenResult.userId, env);
-  if (!user) return null;
-
-  const workspace = await getDefaultWorkspace(user.id, env);
-  if (!workspace) return null;
-
-  const workspaces = new WorkspaceRepository(env.DB);
-  const role = await workspaces.getUserRole(workspace.id, user.id);
-  if (!role) return null;
+  const authContexts = new AuthContextRepository(env.DB);
+  const resolveStart = timingStart();
+  const resolved = await authContexts.resolveBearerToken(tokenHash);
+  logTiming(env, undefined, "auth.bearer.context_query", resolveStart, {
+    found: Boolean(resolved),
+  });
+  if (!resolved) return null;
 
   return {
-    user,
-    workspace,
-    role,
-    accessTokenId: tokenResult.tokenId,
+    user: resolved.user,
+    workspace: resolved.workspace,
+    role: resolved.role,
+    accessTokenId: resolved.accessTokenId,
   };
 }
 

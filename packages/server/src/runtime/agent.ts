@@ -20,6 +20,7 @@ export interface AgentToolCallState {
   status: "pending" | "running" | "complete" | "error";
   result?: AgentToolResult<unknown>;
   isError?: boolean;
+  asyncState?: unknown;
 }
 
 export interface AgentTurnState {
@@ -73,7 +74,8 @@ export interface AssistantStepResult extends AgentStepResult {
 }
 
 export interface ToolStepResult extends AgentStepResult {
-  toolResultMessage: ToolResultMessage;
+  toolResultMessage?: ToolResultMessage;
+  pending: boolean;
 }
 
 export interface ToolBatchStepResult extends AgentStepResult {
@@ -142,6 +144,17 @@ function createErrorToolResult(message: string): AgentToolResult<unknown> {
 function isErroredToolResult(result: AgentToolResult<unknown>): boolean {
   const details = result.details;
   return typeof details === "object" && details !== null && "ok" in details && details.ok === false;
+}
+
+function isPendingToolResult(result: AgentToolResult<unknown>): boolean {
+  const details = result.details;
+  return typeof details === "object" && details !== null && "pending" in details && details.pending === true;
+}
+
+function pendingToolAsyncState(result: AgentToolResult<unknown>): unknown {
+  const details = result.details;
+  if (typeof details !== "object" || details === null || !("asyncState" in details)) return undefined;
+  return (details as { asyncState?: unknown }).asyncState;
 }
 
 function createToolResultMessage(
@@ -587,7 +600,7 @@ export class Agent {
         (message): message is ToolResultMessage =>
           message.role === "toolResult" && message.toolCallId === toolCallId,
       );
-      if (existing) return { session, events: [], toolResultMessage: existing };
+      if (existing) return { session, events: [], toolResultMessage: existing, pending: false };
       throw new Error(`Tool call ${toolCallId} is already finalized without a result message`);
     }
 
@@ -624,13 +637,19 @@ export class Agent {
           arguments: preparedArgs,
           type: "toolCall",
         } as AgentToolCall);
+        const executableArgs = toolCall.asyncState &&
+          typeof validatedArgs === "object" &&
+          validatedArgs !== null &&
+          !Array.isArray(validatedArgs)
+          ? { ...(validatedArgs as Record<string, unknown>), _asyncState: toolCall.asyncState }
+          : validatedArgs;
         this.config.debugTiming?.("tool.args.validated", argsStart, {
           toolCallId: toolCall.id,
           toolName: toolCall.name,
         });
 
         const executeStart = now();
-        result = await tool.execute(this.config.toolRuntimeContext, toolCall.id, validatedArgs as never, signal, (partialResult) => {
+        result = await tool.execute(this.config.toolRuntimeContext, toolCall.id, executableArgs as never, signal, (partialResult) => {
           const event: AgentEvent = {
             type: "tool_execution_update",
             toolCallId: toolCall.id,
@@ -666,6 +685,35 @@ export class Agent {
     });
     if (pendingEventAppends.length > 0) {
       await Promise.all(pendingEventAppends);
+    }
+
+    if (isPendingToolResult(result)) {
+      const asyncState = pendingToolAsyncState(result);
+      const pendingEvent: AgentEvent = {
+        type: "tool_execution_update",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        args: toolCall.args,
+        partialResult: result,
+      };
+      events.push(pendingEvent);
+      await this.config.onEvent?.(pendingEvent);
+
+      const nextSession: AgentSessionState = {
+        ...session,
+        updatedAt: now(),
+        toolCalls: {
+          ...session.toolCalls,
+          [toolCall.id]: {
+            ...toolCall,
+            status: "running",
+            result,
+            asyncState,
+          },
+        },
+      };
+
+      return { session: nextSession, events, pending: true };
     }
 
     events.push({
@@ -710,7 +758,7 @@ export class Agent {
         : session.turns,
     };
 
-    return { session: nextSession, events, toolResultMessage };
+    return { session: nextSession, events, toolResultMessage, pending: false };
   }
 
   async runToolBatchStep(
@@ -727,29 +775,32 @@ export class Agent {
       return {
         session: result.session,
         events: result.events,
-        toolResultMessages: [result.toolResultMessage],
+        toolResultMessages: result.toolResultMessage ? [result.toolResultMessage] : [],
       };
     }
 
     const results = await Promise.all(
       uniqueToolCallIds.map((toolCallId) => this.runToolStep(session, toolCallId, signal)),
     );
-    const resultByToolCallId = new Map(
-      results.map((result) => [result.toolResultMessage.toolCallId, result]),
-    );
-    const orderedResults = uniqueToolCallIds.map((toolCallId) => {
-      const result = resultByToolCallId.get(toolCallId);
-      if (!result) throw new Error(`Missing tool result for ${toolCallId}`);
-      return result;
-    });
+    const orderedResults = results;
 
     const nextToolCalls = { ...session.toolCalls };
     for (const result of orderedResults) {
-      const toolCall = result.session.toolCalls[result.toolResultMessage.toolCallId];
+      const resultToolCallId = result.toolResultMessage?.toolCallId;
+      const toolCall = resultToolCallId ? result.session.toolCalls[resultToolCallId] : undefined;
+      if (!toolCall && result.pending) {
+        for (const toolCallId of uniqueToolCallIds) {
+          const pendingToolCall = result.session.toolCalls[toolCallId];
+          if (pendingToolCall?.status === "running") nextToolCalls[toolCallId] = pendingToolCall;
+        }
+        continue;
+      }
       if (toolCall) nextToolCalls[toolCall.id] = toolCall;
     }
 
-    const toolResultMessages = orderedResults.map((result) => result.toolResultMessage);
+    const toolResultMessages = orderedResults.flatMap((result) =>
+      result.toolResultMessage ? [result.toolResultMessage] : []
+    );
     const completedToolCallIds = new Set(toolResultMessages.map((message) => message.toolCallId));
     const turns = session.turns.map((turn) => {
       const orderedTurnResults = turn.toolCallIds.filter((toolCallId) => completedToolCallIds.has(toolCallId));

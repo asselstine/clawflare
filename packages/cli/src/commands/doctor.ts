@@ -32,57 +32,57 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
     process.exit(1);
   }
 
-  // Test connection with verbose output
-  console.log("2. Testing connection to server...");
+  // Test authenticated user endpoint with verbose output
+  console.log("2. Testing authenticated endpoint (/v1/users/me)...");
   console.log(`   URL: ${server}`);
   
   try {
-    const infoResponse = await fetch(`${server}/v1/info`, {
+    const userResponse = await fetch(`${server}/v1/users/me`, {
       headers: {
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
       },
     });
     
-    console.log(`   Response status: ${infoResponse.status}`);
-    console.log(`   Response headers: ${JSON.stringify(Object.fromEntries(infoResponse.headers.entries()))}`);
+    console.log(`   Response status: ${userResponse.status}`);
+    console.log(`   Response headers: ${JSON.stringify(Object.fromEntries(userResponse.headers.entries()))}`);
     
-    const text = await infoResponse.text();
+    const text = await userResponse.text();
     console.log(`   Response body: ${text.slice(0, 500)}`);
     
-    if (!infoResponse.ok) {
-      console.error(`\n✗ /v1/info request failed: ${infoResponse.status}`);
+    if (!userResponse.ok) {
+      console.error(`\n✗ /v1/users/me request failed: ${userResponse.status}`);
     } else {
-      console.log("\n✓ /v1/info request succeeded");
+      console.log("\n✓ /v1/users/me request succeeded");
     }
   } catch (error) {
     console.error(`\n✗ Connection failed: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   }
 
-  // Test /v1/me endpoint
-  console.log("\n3. Testing authenticated endpoint (/v1/me)...");
+  // Test /v1/workspace endpoint
+  console.log("\n3. Testing workspace endpoint (/v1/workspace)...");
   
   try {
-    const meResponse = await fetch(`${server}/v1/me`, {
+    const workspaceResponse = await fetch(`${server}/v1/workspace`, {
       headers: {
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
       },
     });
     
-    console.log(`   Response status: ${meResponse.status}`);
+    console.log(`   Response status: ${workspaceResponse.status}`);
     
-    const text = await meResponse.text();
+    const text = await workspaceResponse.text();
     console.log(`   Response body: ${text.slice(0, 500)}`);
     
-    if (!meResponse.ok) {
-      console.error(`\n✗ /v1/me request failed: ${meResponse.status}`);
+    if (!workspaceResponse.ok) {
+      console.error(`\n✗ /v1/workspace request failed: ${workspaceResponse.status}`);
     } else {
-      console.log("\n✓ /v1/me request succeeded");
+      console.log("\n✓ /v1/workspace request succeeded");
     }
   } catch (error) {
-    console.error(`\n✗ /v1/me failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`\n✗ /v1/workspace failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // Test with AgentClient
@@ -90,14 +90,20 @@ export async function doctorCommand(options: DoctorOptions): Promise<void> {
   
   try {
     const client = new AgentClient(server, token, config.workspace);
-    const serverInfo = await client.getServerInfo();
-    console.log(`   Context window: ${serverInfo.contextWindow}`);
-    console.log(`   Workspace models: ${serverInfo.supportsWorkspaceModels ? "supported" : "not supported"}`);
-    console.log(`   Supported providers: ${serverInfo.supportedProviders.join(", ") || "none"}`);
-    if (serverInfo.workspace) {
-      console.log(`   Workspace has models: ${serverInfo.workspace.hasModels ? "yes" : "no"}`);
-    }
-    console.log("\n✓ AgentClient.getServerInfo() succeeded");
+    const [user, workspace, providers, configuredProviders, models] = await Promise.all([
+      client.getCurrentUser(),
+      client.getWorkspace(),
+      client.listProviders(),
+      client.listConfiguredProviders(),
+      client.listModels(),
+    ]);
+    console.log(`   User: ${user.user.displayName || user.user.email}`);
+    console.log(`   Workspace: ${workspace.name} (${workspace.slug})`);
+    console.log(`   Supported providers: ${providers.map((provider) => provider.id).join(", ") || "none"}`);
+    console.log(`   Configured providers: ${configuredProviders.length}`);
+    console.log(`   Models: ${models.models.length}`);
+    console.log(`   Default model: ${models.defaultModelId || workspace.defaultModelId || "none"}`);
+    console.log("\n✓ AgentClient endpoint checks succeeded");
   } catch (error) {
     console.error(`\n✗ AgentClient failed: ${error instanceof Error ? error.message : String(error)}`);
   }

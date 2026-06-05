@@ -84,7 +84,12 @@ describe("ContainerRepository", () => {
       });
 
       expect(container.id).toBe("container-1");
+      expect(container.name).toBe("container-1");
       expect(container.description).toBe("test container");
+      expect(container.lastActivityAt).toBeGreaterThan(0);
+      expect(container.sleepAfterMs).toBe(20 * 60 * 1000);
+      expect(container.sleepAt).toBe(container.lastActivityAt + container.sleepAfterMs);
+      expect(container.sleepStatus).toBe("awake");
       expect(link.sessionId).toBe("session-1");
       expect(link.containerId).toBe("container-1");
 
@@ -117,6 +122,11 @@ describe("ContainerRepository", () => {
         id: "container-1",
         workspaceId: "workspace-1",
       });
+      await containers.create({
+        id: "container-2",
+        workspaceId: "workspace-1",
+        name: "scratch",
+      });
       await containers.linkSession({
         workspaceId: "workspace-1",
         sessionId: "session-1",
@@ -131,6 +141,7 @@ describe("ContainerRepository", () => {
       const links = await containers.listLinksForContainerId("container-1");
 
       expect(links.map((link) => link.sessionId)).toEqual(["session-2", "session-1"]);
+      expect((await containers.get("workspace-1", "container-2"))?.name).toBe("scratch");
     } finally {
       await mf.dispose();
     }

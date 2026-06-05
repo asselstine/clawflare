@@ -64,11 +64,17 @@ export type SessionStatus =
   | "expired";
 
 export type ContainerStatus = "active" | "destroyed";
+export type ContainerSleepStatus = "awake" | "sleeping";
 
 export interface ContainerSummary {
   id: string;
+  name?: string;
   status: ContainerStatus;
   description?: string;
+  lastActivityAt?: number;
+  sleepAfterMs?: number;
+  sleepAt?: number;
+  sleepStatus?: ContainerSleepStatus;
   createdAt: number;
   updatedAt: number;
   deletedAt?: number;
@@ -235,6 +241,24 @@ export interface CreateWorkspaceProviderRequest {
   providerDisplayName?: string;
   secrets?: Record<string, string>;
   config?: Record<string, unknown>;
+  defaultModelName?: string;
+  createDefaultModel?: boolean;
+  modelDisplayName?: string;
+  modelConfig?: Record<string, unknown>;
+  setAsDefault?: boolean;
+}
+
+export interface CreateWorkspaceProviderResponse {
+  provider: WorkspaceProvider;
+  model?: Model;
+  defaultModelId?: string;
+}
+
+export interface DeleteWorkspaceProviderResponse {
+  ok: boolean;
+  providerId: string;
+  deletedModelIds: string[];
+  clearedDefaultModelId?: string;
 }
 
 export interface EgressHandlerInfo {
@@ -320,11 +344,28 @@ export interface SetDefaultModelRequest {
   modelId: string | null;
 }
 
-export interface ServerInfo {
-  contextWindow: number;
-  supportsWorkspaceModels: boolean;
-  supportedProviders: string[];
-  workspace?: {
-    hasModels: boolean;
+export interface CurrentUserResponse {
+  user: {
+    id: string;
+    email: string;
+    displayName?: string;
+    createdAt: number;
   };
+  workspaces: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description?: string | null;
+    role?: string;
+  }>;
+  currentWorkspace: WorkspaceResponse;
+}
+
+export interface WorkspaceResponse {
+  id: string;
+  slug: string;
+  name: string;
+  description?: string | null;
+  role: string;
+  defaultModelId?: string | null;
 }

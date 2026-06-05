@@ -4,7 +4,6 @@ import { EgressHandlerRepository } from "../data/index.js";
 import { createEgressRegistry } from "./registry.js";
 import type { EgressContext } from "@clawflare/egress-core";
 import { resolveEgressHandler } from "../modules/egress-handlers/egress-handlers.service.js";
-import type { AuthSession } from "../modules/secrets/index.js";
 import { logger } from "../lib/logger.js";
 
 // Default workspace for egress handlers during transition - Phase 6
@@ -22,7 +21,6 @@ export async function routeOutboundRequest(
   requestId?: string,
   options: {
     workspaceId?: string;
-    auth?: AuthSession;
   } = {}
 ): Promise<Response> {
   // Use the base registry (GitHub and Cloudflare handlers only)
@@ -31,7 +29,6 @@ export async function routeOutboundRequest(
 
   const egressHandlers = new EgressHandlerRepository(env.DB);
   const workspaceId = options.workspaceId ?? DEFAULT_WORKSPACE_ID;
-  const auth = options.auth;
   const metadata = await egressHandlers.list(workspaceId, true);
 
   // Build a set of handler ids that have D1 metadata.
@@ -43,7 +40,7 @@ export async function routeOutboundRequest(
     const handler = registry.get(item.egressHandlerId);
     if (!handler?.fetch) continue;
 
-    const resolved = await resolveEgressHandler(env, auth, item);
+    const resolved = await resolveEgressHandler(env, workspaceId, item);
     const handlerConfig = resolved.metadata.config as Record<string, unknown> | undefined;
     const context: EgressContext<Env> = {
       env: { ...env, ...(handlerConfig ?? {}), ...resolved.secrets },
@@ -83,9 +80,6 @@ export class HttpGateway extends WorkerEntrypoint<Env, HttpGatewayProps> {
   async fetch(request: Request): Promise<Response> {
     return routeOutboundRequest(this.env, request, this.ctx.props?.requestId, {
       workspaceId: this.ctx.props?.workspaceId,
-      auth: this.ctx.props?.sessionId
-        ? { type: "session", sessionId: this.ctx.props.sessionId }
-        : undefined,
     });
   }
 

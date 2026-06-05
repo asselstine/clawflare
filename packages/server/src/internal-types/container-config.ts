@@ -1,0 +1,2 @@
+export const CODING_CONTAINER_SLEEP_AFTER = "20m";
+export const CODING_CONTAINER_SLEEP_AFTER_MS = 20 * 60 * 1000;

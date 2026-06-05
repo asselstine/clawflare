@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lt, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { createDb, type Db } from "./db.js";
 import { sessionRuns, sessionRunSteps } from "./schema.js";
 import type { SessionInputEvent } from "./sessions.js";
@@ -153,14 +153,14 @@ export class SessionRunRepository {
     return this.find(params.runId);
   }
 
-  async releaseRunnable(runId: string, workerId: string): Promise<void> {
+  async releaseRunnable(runId: string, workerId: string, delayMs = 0): Promise<void> {
     const now = Date.now();
     await this.db
       .update(sessionRuns)
       .set({
         status: "runnable",
         leaseOwner: null,
-        leaseExpiresAt: null,
+        leaseExpiresAt: delayMs > 0 ? now + delayMs : null,
         updatedAt: now,
       })
       .where(and(eq(sessionRuns.id, runId), eq(sessionRuns.leaseOwner, workerId)));
@@ -221,6 +221,12 @@ export class SessionRunRepository {
     return row ? JSON.parse(row.resultJson) : undefined;
   }
 
+  async deleteCompletedStep(runId: string, stepName: string): Promise<void> {
+    await this.db
+      .delete(sessionRunSteps)
+      .where(and(eq(sessionRunSteps.runId, runId), eq(sessionRunSteps.stepName, stepName)));
+  }
+
   async completeStep(runId: string, stepName: string, attempt: number, result: unknown): Promise<void> {
     const now = Date.now();
     await this.db
@@ -242,7 +248,10 @@ export class SessionRunRepository {
     const rows = await this.db.query.sessionRuns.findMany({
       columns: { id: true, sessionId: true },
       where: or(
-        eq(sessionRuns.status, "runnable"),
+        and(
+          eq(sessionRuns.status, "runnable"),
+          or(isNull(sessionRuns.leaseExpiresAt), lt(sessionRuns.leaseExpiresAt, now))
+        ),
         and(eq(sessionRuns.status, "running"), lt(sessionRuns.leaseExpiresAt, now))
       ),
       orderBy: [asc(sessionRuns.updatedAt)],

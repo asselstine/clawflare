@@ -7,8 +7,7 @@ import {
   handleDeviceAuthStart,
   handleDeviceVerify,
   handleForgotPassword,
-  handleGetAuthSession,
-  handleGetMe,
+  handleGetCurrentUser,
   handleGithubCallback,
   handleLogin,
   handleLogout,
@@ -32,16 +31,13 @@ authRoutes.post("/password/forgot", (c) => handleForgotPassword(c.req.raw, c.env
 authRoutes.post("/password/reset", (c) => handleResetPassword(c.req.raw, c.env));
 authRoutes.get("/email/verify", (c) => handleVerifyEmail(c.req.raw, c.env));
 
-authRoutes.get("/session", requireAuth, (c) =>
-  handleGetAuthSession(c.req.raw, c.env, c.get("requestContext")!)
-);
 authRoutes.post("/logout", requireAuth, (c) =>
   handleLogout(c.req.raw, c.env, c.get("requestContext")!)
 );
 
-export const meRoutes = new Hono<AppBindings>();
+export const usersRoutes = new Hono<AppBindings>();
 
-meRoutes.use("*", requireAuth);
-meRoutes.get("/", (c) =>
-  handleGetMe(c.req.raw, c.env, c.get("requestContext")!)
+usersRoutes.use("*", requireAuth);
+usersRoutes.get("/me", (c) =>
+  handleGetCurrentUser(c.req.raw, c.env, c.get("requestContext")!)
 );

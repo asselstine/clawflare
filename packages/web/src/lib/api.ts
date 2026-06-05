@@ -2,7 +2,7 @@ import type {
   ChatRequest,
   ChatSubmittedResponse,
   ConfigureEgressHandlerRequest,
-  CreateWorkspaceProviderRequest,
+  ContainerSummary,
   CreateModelRequest,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -17,7 +17,6 @@ import type {
   ProviderListResponse,
   ProviderModelInfo,
   ProviderModelsResponse,
-  ServerInfo,
   SessionListResponse,
   SessionResponse,
   UpdateEgressHandlerRequest,
@@ -58,9 +57,70 @@ export type DevicePollResponse =
       };
     };
 
+export interface CurrentUserResponse {
+  user: {
+    id: string;
+    email: string;
+    displayName?: string;
+    createdAt: number;
+  };
+  workspaces: Array<{
+    id: string;
+    slug: string;
+    name: string;
+    description?: string | null;
+    role?: string;
+  }>;
+  currentWorkspace: {
+    id: string;
+    slug: string;
+    name: string;
+    description?: string | null;
+    role: string;
+    defaultModelId?: string | null;
+  };
+}
+
+export interface CreateWorkspaceProviderRequest {
+  provider: string;
+  providerDisplayName?: string;
+  secrets?: Record<string, string>;
+  config?: Record<string, unknown>;
+  defaultModelName?: string;
+  createDefaultModel?: boolean;
+  modelDisplayName?: string;
+  modelConfig?: Record<string, unknown>;
+  setAsDefault?: boolean;
+}
+
+export interface CreateWorkspaceProviderResponse {
+  provider: WorkspaceProvider;
+  model?: Model;
+  defaultModelId?: string;
+}
+
+export interface DeleteWorkspaceProviderResponse {
+  ok: boolean;
+  providerId: string;
+  deletedModelIds: string[];
+  clearedDefaultModelId?: string;
+}
+
 interface RequestOptions extends RequestInit {
   skipJsonContentType?: boolean;
   skipAuth?: boolean;
+}
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly statusText: string;
+
+  constructor(response: Response, message: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = response.status;
+    this.statusText = response.statusText;
+  }
 }
 
 export class ClawflareApiClient {
@@ -72,8 +132,8 @@ export class ClawflareApiClient {
     this.token = token;
   }
 
-  async getInfo(): Promise<ServerInfo> {
-    return this.requestJson<ServerInfo>("/v1/info");
+  async getCurrentUser(): Promise<CurrentUserResponse> {
+    return this.requestJson<CurrentUserResponse>("/v1/users/me");
   }
 
   async startDeviceAuth(provider: "github" = "github", returnUrl?: string): Promise<DeviceStartResponse> {
@@ -142,6 +202,13 @@ export class ClawflareApiClient {
     });
   }
 
+  async renameContainer(containerId: string, name: string): Promise<{ ok: boolean; id: string; name: string; container: ContainerSummary }> {
+    return this.requestJson(`/v1/containers/${encodeURIComponent(containerId)}/name`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  }
+
   async closeSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string }> {
     return this.requestJson(`/v1/session/${encodeURIComponent(sessionId)}/close`, { method: "POST" });
   }
@@ -193,12 +260,15 @@ export class ClawflareApiClient {
     return data.providers ?? [];
   }
 
-  async createProvider(input: CreateWorkspaceProviderRequest): Promise<WorkspaceProvider> {
-    const data = await this.requestJson<{ provider: WorkspaceProvider }>("/v1/providers", {
+  async createProvider(input: CreateWorkspaceProviderRequest): Promise<CreateWorkspaceProviderResponse> {
+    return this.requestJson<CreateWorkspaceProviderResponse>("/v1/providers", {
       method: "POST",
       body: JSON.stringify(input),
     });
-    return data.provider;
+  }
+
+  async deleteProvider(id: string): Promise<DeleteWorkspaceProviderResponse> {
+    return this.requestJson<DeleteWorkspaceProviderResponse>(`/v1/providers/${encodeURIComponent(id)}`, { method: "DELETE" });
   }
 
   async listModels(): Promise<ModelListResponse> {
@@ -291,7 +361,7 @@ export class ClawflareApiClient {
       skipJsonContentType: true,
     });
 
-    if (!response.ok) throw new Error(await responseErrorMessage(response));
+    if (!response.ok) throw new ApiError(response, await responseErrorMessage(response));
     if (!response.body) throw new Error("Event stream response has no body");
 
     let sawActivity = false;
@@ -333,7 +403,7 @@ export class ClawflareApiClient {
 
   private async requestJson<T>(path: string, init: RequestOptions = {}): Promise<T> {
     const response = await this.request(path, init);
-    if (!response.ok) throw new Error(await responseErrorMessage(response));
+    if (!response.ok) throw new ApiError(response, await responseErrorMessage(response));
     const text = await response.text();
     if (!text || text === "undefined") {
       throw new Error(`Expected JSON from ${path}, received ${text ? "invalid" : "empty"} response`);

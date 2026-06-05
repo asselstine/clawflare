@@ -101,13 +101,15 @@ pnpm db:migrations:list
 ## API Endpoints
 
 - `POST /v1/chat` - send a prompt or command
+- `GET /v1/users/me` - get current user and workspace info
+- `GET /v1/workspace` - get current workspace
 - `GET /v1/session/:id` - poll session messages/events/status
 - `POST /v1/session/:id/close` - close a session
 - `GET /v1/sessions` - list sessions
-- `GET /v1/context` - get current context
-- `POST /v1/context` - create a new context
 - `GET /v1/tools` - list available model-visible tools
-- `GET /v1/info` - provider/model metadata
+- `GET /v1/providers` - list supported providers
+- `GET /v1/providers/configured` - list configured workspace providers
+- `GET /v1/models` - list configured workspace models
 - `GET /health` - health check
 - `/ws` - WebSocket upgrade for real-time sessions
 

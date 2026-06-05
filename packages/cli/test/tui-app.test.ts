@@ -231,12 +231,7 @@ describe("ClawflareTUIApp", () => {
   function createMockClient(overrides: Record<string, unknown> = {}) {
     return {
       getUrl: () => "https://example.com",
-      getServerInfo: vi.fn().mockResolvedValue({
-        contextWindow: 128000,
-        supportedProviders: [],
-        supportsWorkspaceModels: true,
-        workspace: { hasModels: true },
-      }),
+      listConfiguredProviders: vi.fn().mockResolvedValue([{ id: "provider-1" }]),
       createSession: vi.fn().mockResolvedValue({
         id: "session-current",
         workspaceId: "workspace-1",

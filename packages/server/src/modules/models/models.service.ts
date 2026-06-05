@@ -2,7 +2,7 @@
 // Coordinates D1 persistence and Secret Store for AI providers and models.
 
 import type { Env } from "../../internal-types/index.js";
-import { ModelRepository, ProviderRepository, SessionRepository, type Model, type Provider } from "../../data/index.js";
+import { ModelRepository, ProviderRepository, SessionRepository, type DeleteProviderResult, type Model, type Provider } from "../../data/index.js";
 import { getSecretBrokerClient, type AuthSession } from "../secrets/index.js";
 import {
   defaultModelForProvider,
@@ -31,6 +31,7 @@ export interface CreateModelResult {
 
 export interface CreateProviderResult {
   provider: Provider;
+  model?: Model;
   secretsStored: string[];
 }
 
@@ -47,6 +48,11 @@ export async function createProvider(
     providerDisplayName?: string;
     secrets?: Record<string, string>;
     config?: Record<string, unknown>;
+    defaultModelName?: string;
+    createDefaultModel?: boolean;
+    modelDisplayName?: string;
+    modelConfig?: Record<string, unknown>;
+    setAsDefault?: boolean;
   }
 ): Promise<CreateProviderResult> {
   if (!isProviderSupported(input.provider)) {
@@ -83,11 +89,45 @@ export async function createProvider(
     provider = await providers.update(workspaceId, provider.id, { secretRefs });
   }
 
-  return { provider, secretsStored };
+  const shouldCreateDefaultModel = Boolean(input.createDefaultModel || input.defaultModelName);
+  let model: Model | undefined;
+
+  if (shouldCreateDefaultModel) {
+    const modelName = input.defaultModelName ?? defaultModelForProvider(input.provider);
+    if (!modelName) {
+      throw new Error(`No default model is available for provider "${input.provider}"`);
+    }
+
+    if (!isModelSupportedForProvider(input.provider, modelName)) {
+      throw new Error(`Unknown model "${modelName}" for provider "${input.provider}"`);
+    }
+
+    model = await new ModelRepository(env.DB).create({
+      workspaceId,
+      providerId: provider.id,
+      displayName: input.modelDisplayName,
+      modelName,
+      config: input.modelConfig,
+    });
+
+    if (input.setAsDefault) {
+      await new ModelRepository(env.DB).setWorkspaceDefault(workspaceId, model.id);
+    }
+  }
+
+  return { provider, model, secretsStored };
 }
 
 export async function listProviders(env: Env, workspaceId: string): Promise<Provider[]> {
   return new ProviderRepository(env.DB).list(workspaceId);
+}
+
+export async function deleteProvider(env: Env, workspaceId: string, id: string): Promise<DeleteProviderResult> {
+  try {
+    return await new ProviderRepository(env.DB).softDeleteWithModels(workspaceId, id);
+  } catch (error) {
+    throw new Error(`Failed to delete provider: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export async function createModel(

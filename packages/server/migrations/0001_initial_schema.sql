@@ -361,8 +361,10 @@ CREATE TABLE session_run_steps (
 CREATE TABLE containers (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL,
+  name TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'destroyed')),
   description TEXT,
+  last_activity_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   deleted_at INTEGER,
@@ -370,6 +372,7 @@ CREATE TABLE containers (
 ) STRICT;
 
 CREATE INDEX idx_containers_workspace ON containers(workspace_id, deleted_at, updated_at DESC);
+CREATE UNIQUE INDEX idx_containers_workspace_name ON containers(workspace_id, name);
 CREATE INDEX idx_containers_status ON containers(status);
 
 CREATE TABLE session_container (

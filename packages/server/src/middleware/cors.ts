@@ -5,6 +5,7 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Authorization,Content-Type,Accept",
+  "Access-Control-Expose-Headers": "Server-Timing",
   "Access-Control-Max-Age": "86400",
 };
 

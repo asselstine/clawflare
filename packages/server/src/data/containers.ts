@@ -1,16 +1,23 @@
 import { and, desc, eq } from "drizzle-orm";
+import { CODING_CONTAINER_SLEEP_AFTER_MS } from "../internal-types/container-config.js";
 import { createDb, type Db } from "./db.js";
 import { containers, sessionContainer, sessions } from "./schema.js";
 import { DataLayerError } from "./errors.js";
 
 export type ContainerStatus = "active" | "destroyed";
+export type ContainerSleepStatus = "awake" | "sleeping";
 export type SessionContainerRole = "attached";
 
 export interface ContainerRecord {
   id: string;
   workspaceId: string;
+  name: string;
   status: ContainerStatus;
   description?: string;
+  lastActivityAt: number;
+  sleepAfterMs: number;
+  sleepAt: number;
+  sleepStatus?: ContainerSleepStatus;
   createdAt: number;
   updatedAt: number;
   deletedAt?: number;
@@ -28,6 +35,7 @@ export interface SessionContainerLink {
 export interface CreateContainerParams {
   id: string;
   workspaceId: string;
+  name?: string;
   description?: string;
 }
 
@@ -39,15 +47,34 @@ export interface LinkSessionContainerParams {
 }
 
 function mapContainer(row: typeof containers.$inferSelect): ContainerRecord {
+  const sleepAt = row.lastActivityAt + CODING_CONTAINER_SLEEP_AFTER_MS;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
+    name: row.name,
     status: row.status as ContainerStatus,
     description: row.description ?? undefined,
+    lastActivityAt: row.lastActivityAt,
+    sleepAfterMs: CODING_CONTAINER_SLEEP_AFTER_MS,
+    sleepAt,
+    sleepStatus: row.status === "active"
+      ? Date.now() >= sleepAt ? "sleeping" : "awake"
+      : undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt ?? undefined,
   };
+}
+
+function normalizeContainerName(name: string): string {
+  const normalized = name.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(normalized)) {
+    throw new DataLayerError(
+      "Container name must be 1-64 characters and contain only letters, numbers, hyphens, or underscores",
+      "CONTAINER_INVALID_NAME"
+    );
+  }
+  return normalized;
 }
 
 function mapSessionContainer(row: typeof sessionContainer.$inferSelect): SessionContainerLink {
@@ -68,21 +95,38 @@ export class ContainerRepository {
     this.db = "query" in db ? db : createDb(db);
   }
 
+  private async nextContainerName(workspaceId: string): Promise<string> {
+    const rows = await this.db.query.containers.findMany({
+      where: eq(containers.workspaceId, workspaceId),
+      columns: { name: true },
+    });
+    const names = new Set(rows.map((row) => row.name));
+    let index = rows.length + 1;
+    while (names.has(`container-${index}`)) index += 1;
+    return `container-${index}`;
+  }
+
   async create(params: CreateContainerParams): Promise<ContainerRecord> {
     const existing = await this.get(params.workspaceId, params.id);
+    const name = params.name !== undefined
+      ? normalizeContainerName(params.name)
+      : existing?.name ?? await this.nextContainerName(params.workspaceId);
+
     if (existing) {
       if (existing.status === "destroyed" || existing.deletedAt !== undefined) {
         await this.db
           .update(containers)
           .set({
             status: "active",
+            name,
             description: params.description ?? existing.description,
             deletedAt: null,
+            lastActivityAt: Date.now(),
             updatedAt: Date.now(),
           })
           .where(and(eq(containers.workspaceId, params.workspaceId), eq(containers.id, params.id)));
       } else {
-        await this.touch(params.workspaceId, params.id, params.description);
+        await this.touch(params.workspaceId, params.id, params.description, name);
       }
 
       const updated = await this.get(params.workspaceId, params.id);
@@ -94,8 +138,10 @@ export class ContainerRepository {
     await this.db.insert(containers).values({
       id: params.id,
       workspaceId: params.workspaceId,
+      name,
       status: "active",
       description: params.description,
+      lastActivityAt: now,
       createdAt: now,
       updatedAt: now,
     });
@@ -127,11 +173,13 @@ export class ContainerRepository {
     return rows.map(mapContainer);
   }
 
-  async touch(workspaceId: string, id: string, description?: string): Promise<void> {
+  async touch(workspaceId: string, id: string, description?: string, name?: string): Promise<void> {
     const update: Partial<typeof containers.$inferInsert> = {
+      lastActivityAt: Date.now(),
       updatedAt: Date.now(),
     };
     if (description !== undefined) update.description = description;
+    if (name !== undefined) update.name = normalizeContainerName(name);
 
     await this.db
       .update(containers)
@@ -207,8 +255,10 @@ export class ContainerRepository {
       .select({
         id: containers.id,
         workspaceId: containers.workspaceId,
+        name: containers.name,
         status: containers.status,
         description: containers.description,
+        lastActivityAt: containers.lastActivityAt,
         createdAt: containers.createdAt,
         updatedAt: containers.updatedAt,
         deletedAt: containers.deletedAt,

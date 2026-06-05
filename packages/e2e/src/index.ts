@@ -786,18 +786,20 @@ async function runTests(url: string): Promise<void> {
   });
 
   await runner.runTest("Container: create and run ls command", async () => {
-    const containerId = `e2e-container-${Date.now()}`;
     const sessionId = await createToolSession(client);
-    trackTestContainer(containerId, sessionId);
+    let containerId: string | undefined;
 
     try {
-      const createData = await invokeTool<{ status?: string }>(
+      const createData = await invokeTool<{ containerId?: string; status?: string }>(
         url,
         token,
         "container_create",
-        { containerId },
+        {},
         sessionId
       );
+      containerId = createData.result.details.containerId;
+      if (!containerId) throw new Error(`Container create did not return containerId: ${JSON.stringify(createData)}`);
+      trackTestContainer(containerId, sessionId);
       if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
       
       const bashData = await invokeTool<{ ok?: boolean; exitCode: number | null }>(
@@ -819,23 +821,25 @@ async function runTests(url: string): Promise<void> {
       // Verify container respects the deployed compatibility by checking it works at all
       // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
     } finally {
-      await destroyTestContainer(url, token, containerId, sessionId);
+      if (containerId) await destroyTestContainer(url, token, containerId, sessionId);
     }
   });
 
   await runner.runTest("Container: git clone works through GitHub egress", async () => {
-    const containerId = `e2e-github-clone-${Date.now()}`;
     const sessionId = await createToolSession(client);
-    trackTestContainer(containerId, sessionId);
+    let containerId: string | undefined;
 
     try {
-      const createData = await invokeTool<{ status?: string }>(
+      const createData = await invokeTool<{ containerId?: string; status?: string }>(
         url,
         token,
         "container_create",
-        { containerId },
+        {},
         sessionId
       );
+      containerId = createData.result.details.containerId;
+      if (!containerId) throw new Error(`Container create did not return containerId: ${JSON.stringify(createData)}`);
+      trackTestContainer(containerId, sessionId);
       if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
 
       const cloneCommand = [
@@ -855,7 +859,7 @@ async function runTests(url: string): Promise<void> {
         throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
       }
     } finally {
-      await destroyTestContainer(url, token, containerId, sessionId);
+      if (containerId) await destroyTestContainer(url, token, containerId, sessionId);
     }
   });
 

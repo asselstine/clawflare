@@ -28,6 +28,7 @@ modelsRoutes.patch("/:id", (c) => handleUpdateModel(c.req.raw, c.env, c.get("req
 modelsRoutes.delete("/:id", (c) => handleDeleteModel(c.req.raw, c.env, c.get("requestContext")!, c.req.param("id")));
 
 workspaceRoutes.use("*", requireAuth);
+workspaceRoutes.get("/", (c) => handleGetWorkspace(c.get("requestContext")!));
 workspaceRoutes.put("/default-model", (c) => handleSetDefaultModel(c.req.raw, c.env, c.get("requestContext")!));
 
 function createAuthSession(ctx: RequestContext): AuthSession {
@@ -216,6 +217,17 @@ export async function handleDeleteModel(
 
 interface SetDefaultRequest {
   modelId: string | null;
+}
+
+export function handleGetWorkspace(requestContext: RequestContext): Response {
+  return json({
+    id: requestContext.workspace.id,
+    slug: requestContext.workspace.slug,
+    name: requestContext.workspace.name,
+    description: requestContext.workspace.description,
+    role: requestContext.role,
+    defaultModelId: requestContext.workspace.defaultModelId,
+  });
 }
 
 export async function handleSetDefaultModel(

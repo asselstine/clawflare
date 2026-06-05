@@ -31,7 +31,7 @@ import {
   importKEK,
   decodeBase64,
 } from "./secrets.crypto.js";
-import { validateAuthorization, validateSessionAuthorization } from "./secrets.auth.js";
+import { validateAuthorization, validateSessionAuthorization, validateWorkspaceAuthorization } from "./secrets.auth.js";
 import {
   type StoreSecretRequest,
   type GetSecretRequest,
@@ -76,7 +76,9 @@ async function loadKEK(env: Env): Promise<CryptoKey> {
  * Parse authorization from request.
  * Can be AuthorizationContext or session reference.
  */
-function parseAuth(auth: unknown): { type: "context"; context: AuthorizationContext } | { type: "session"; sessionId: string } | null {
+function parseAuth(
+  auth: unknown
+): { type: "context"; context: AuthorizationContext } | { type: "session"; sessionId: string } | { type: "workspace"; workspaceId: string } | null {
   if (!auth || typeof auth !== "object") return null;
 
   const a = auth as Record<string, unknown>;
@@ -104,6 +106,11 @@ function parseAuth(auth: unknown): { type: "context"; context: AuthorizationCont
         version: a.version,
       },
     };
+  }
+
+  // Workspace-scoped service reference: { workspaceId: string }
+  if ("workspaceId" in a && typeof a.workspaceId === "string") {
+    return { type: "workspace", workspaceId: a.workspaceId };
   }
 
   return null;
@@ -162,8 +169,10 @@ async function handleGet(
   let authResult;
   if (parsedAuth.type === "context") {
     authResult = await validateAuthorization(env, parsedAuth.context);
-  } else {
+  } else if (parsedAuth.type === "session") {
     authResult = await validateSessionAuthorization(env, parsedAuth.sessionId);
+  } else {
+    authResult = await validateWorkspaceAuthorization(env, parsedAuth.workspaceId);
   }
 
   if (!authResult.valid) {

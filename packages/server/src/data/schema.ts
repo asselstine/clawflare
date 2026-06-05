@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  index,
   integer,
   primaryKey,
   sqliteTable,
@@ -14,7 +15,9 @@ export const users = sqliteTable("users", {
   emailVerifiedAt: integer("email_verified_at"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => ({
+  email: index("idx_users_email").on(table.email),
+}));
 
 export const workspaces = sqliteTable("workspaces", {
   id: text("id").primaryKey(),
@@ -24,7 +27,10 @@ export const workspaces = sqliteTable("workspaces", {
   defaultModelId: text("default_model_id"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => ({
+  slug: index("idx_workspaces_slug").on(table.slug),
+  updated: index("idx_workspaces_updated").on(sql`${table.updatedAt} DESC`),
+}));
 
 export const workspaceMemberships = sqliteTable(
   "workspace_memberships",
@@ -37,26 +43,37 @@ export const workspaceMemberships = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.userId] }),
+    user: index("idx_workspace_memberships_user").on(table.userId),
+    workspace: index("idx_workspace_memberships_workspace").on(table.workspaceId),
   })
 );
 
-export const oauthAccounts = sqliteTable("oauth_accounts", {
-  id: text("id").primaryKey(),
-  userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
-  provider: text("provider").notNull(),
-  providerAccountId: text("provider_account_id").notNull(),
-  accessToken: text("access_token"),
-  refreshToken: text("refresh_token"),
-  expiresAt: integer("expires_at"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-});
+export const oauthAccounts = sqliteTable(
+  "oauth_accounts",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    provider: text("provider").notNull(),
+    providerAccountId: text("provider_account_id").notNull(),
+    accessToken: text("access_token"),
+    refreshToken: text("refresh_token"),
+    expiresAt: integer("expires_at"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => ({
+    user: index("idx_oauth_accounts_user").on(table.userId),
+    provider: index("idx_oauth_accounts_provider").on(table.provider, table.providerAccountId),
+  })
+);
 
 export const passwordCredentials = sqliteTable("password_credentials", {
   userId: text("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
   passwordHash: text("password_hash").notNull(),
   passwordUpdatedAt: integer("password_updated_at").notNull(),
-});
+}, (table) => ({
+  updated: index("idx_password_credentials_updated").on(table.passwordUpdatedAt),
+}));
 
 export const webSessions = sqliteTable("web_sessions", {
   id: text("id").primaryKey(),
@@ -66,7 +83,11 @@ export const webSessions = sqliteTable("web_sessions", {
   expiresAt: integer("expires_at").notNull(),
   createdAt: integer("created_at").notNull(),
   lastSeenAt: integer("last_seen_at"),
-});
+}, (table) => ({
+  user: index("idx_web_sessions_user_id").on(table.userId),
+  sessionTokenHash: index("idx_web_sessions_token_hash").on(table.sessionTokenHash),
+  expiresAt: index("idx_web_sessions_expires_at").on(table.expiresAt),
+}));
 
 export const accessTokens = sqliteTable("access_tokens", {
   id: text("id").primaryKey(),
@@ -78,7 +99,11 @@ export const accessTokens = sqliteTable("access_tokens", {
   createdAt: integer("created_at").notNull(),
   lastUsedAt: integer("last_used_at"),
   revokedAt: integer("revoked_at"),
-});
+}, (table) => ({
+  user: index("idx_access_tokens_user_id").on(table.userId),
+  tokenHash: index("idx_access_tokens_token_hash").on(table.tokenHash),
+  revoked: index("idx_access_tokens_revoked").on(table.revokedAt),
+}));
 
 export const deviceAuthorizations = sqliteTable("device_authorizations", {
   deviceCode: text("device_code").primaryKey(),
@@ -94,7 +119,13 @@ export const deviceAuthorizations = sqliteTable("device_authorizations", {
   returnUrl: text("return_url"),
   accessTokenPlaintext: text("access_token_plaintext"),
   tokenRetrievedAt: integer("token_retrieved_at"),
-});
+}, (table) => ({
+  userCode: index("idx_device_authorizations_user_code").on(table.userCode),
+  user: index("idx_device_authorizations_user_id").on(table.userId),
+  expiresAt: index("idx_device_authorizations_expires_at").on(table.expiresAt),
+  status: index("idx_device_authorizations_status").on(table.status),
+  oauthStateHash: index("idx_device_authorizations_oauth_state_hash").on(table.oauthStateHash),
+}));
 
 export const emailVerificationTokens = sqliteTable("email_verification_tokens", {
   id: text("id").primaryKey(),
@@ -103,7 +134,10 @@ export const emailVerificationTokens = sqliteTable("email_verification_tokens", 
   expiresAt: integer("expires_at").notNull(),
   consumedAt: integer("consumed_at"),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => ({
+  user: index("idx_email_verification_tokens_user_id").on(table.userId),
+  tokenHash: index("idx_email_verification_tokens_hash").on(table.tokenHash),
+}));
 
 export const passwordResetTokens = sqliteTable("password_reset_tokens", {
   id: text("id").primaryKey(),
@@ -112,7 +146,10 @@ export const passwordResetTokens = sqliteTable("password_reset_tokens", {
   expiresAt: integer("expires_at").notNull(),
   consumedAt: integer("consumed_at"),
   createdAt: integer("created_at").notNull(),
-});
+}, (table) => ({
+  user: index("idx_password_reset_tokens_user_id").on(table.userId),
+  tokenHash: index("idx_password_reset_tokens_hash").on(table.tokenHash),
+}));
 
 export const sessions = sqliteTable("sessions", {
   id: text("id").primaryKey(),
@@ -128,7 +165,13 @@ export const sessions = sqliteTable("sessions", {
   maxQueueSize: integer("max_queue_size").notNull().default(100),
   idleTimeout: text("idle_timeout"),
   modelId: text("model_id"),
-});
+}, (table) => ({
+  statusUpdated: index("idx_sessions_status_updated").on(table.status, sql`${table.updatedAt} DESC`),
+  updated: index("idx_sessions_updated").on(sql`${table.updatedAt} DESC`),
+  workflow: index("idx_sessions_workflow").on(table.workflowId),
+  workspace: index("idx_sessions_workspace").on(table.workspaceId),
+  workspaceUpdated: index("idx_sessions_workspace_updated").on(table.workspaceId, sql`${table.updatedAt} DESC`),
+}));
 
 export const sessionEvents = sqliteTable(
   "session_events",
@@ -142,6 +185,11 @@ export const sessionEvents = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.sessionId, table.sequence] }),
+    sessionSequence: index("idx_session_events_session_sequence").on(table.sessionId, table.sequence),
+    type: index("idx_session_events_type").on(table.type),
+    timestamp: index("idx_session_events_timestamp").on(table.timestamp),
+    workspace: index("idx_session_events_workspace").on(table.workspaceId),
+    workspaceSession: index("idx_session_events_workspace_session").on(table.workspaceId, table.sessionId),
   })
 );
 
@@ -174,7 +222,11 @@ export const sessionMessages = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.sessionId, table.sequence] }),
+    sessionSequence: index("idx_session_messages_session_sequence").on(table.sessionId, table.sequence),
     sessionMessageId: uniqueIndex("idx_session_messages_session_id_unique").on(table.sessionId, table.id),
+    sessionId: index("idx_session_messages_session_id").on(table.sessionId, table.id),
+    workspace: index("idx_session_messages_workspace").on(table.workspaceId),
+    workspaceSession: index("idx_session_messages_workspace_session").on(table.workspaceId, table.sessionId),
   })
 );
 
@@ -185,7 +237,9 @@ export const sessionCounters = sqliteTable("session_counters", {
   nextEventSequence: integer("next_event_sequence").notNull().default(1),
   nextMessageSequence: integer("next_message_sequence").notNull().default(1),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => ({
+  workspace: index("idx_session_counters_workspace").on(table.workspaceId),
+}));
 
 export const sessionInputQueue = sqliteTable(
   "session_input_queue",
@@ -198,6 +252,8 @@ export const sessionInputQueue = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.sessionId, table.sequence] }),
+    sessionSequence: index("idx_session_input_queue_session_sequence").on(table.sessionId, table.sequence),
+    workspace: index("idx_session_input_queue_workspace").on(table.workspaceId),
   })
 );
 
@@ -210,7 +266,10 @@ export const sessionRuntime = sqliteTable("session_runtime", {
   workflowWaitingAt: integer("workflow_waiting_at"),
   hotContextJson: text("hot_context_json"),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => ({
+  active: index("idx_session_runtime_active").on(table.active),
+  workspace: index("idx_session_runtime_workspace").on(table.workspaceId),
+}));
 
 export const sessionRuns = sqliteTable("session_runs", {
   id: text("id").primaryKey(),
@@ -227,7 +286,11 @@ export const sessionRuns = sqliteTable("session_runs", {
   errorMessage: text("error_message"),
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
-});
+}, (table) => ({
+  sessionStatus: index("idx_session_runs_session_status").on(table.sessionId, table.status),
+  statusUpdated: index("idx_session_runs_status_updated").on(table.status, table.updatedAt),
+  lease: index("idx_session_runs_lease").on(table.status, table.leaseExpiresAt),
+}));
 
 export const sessionRunSteps = sqliteTable(
   "session_run_steps",
@@ -259,18 +322,29 @@ export const sessionTools = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.sessionId, table.toolRefType, table.toolRef] }),
+    sessionEnabled: index("idx_session_tools_session_enabled").on(table.sessionId, table.enabled),
   })
 );
 
-export const containers = sqliteTable("containers", {
-  id: text("id").primaryKey(),
-  workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
-  status: text("status", { enum: ["active", "destroyed"] }).notNull().default("active"),
-  description: text("description"),
-  createdAt: integer("created_at").notNull(),
-  updatedAt: integer("updated_at").notNull(),
-  deletedAt: integer("deleted_at"),
-});
+export const containers = sqliteTable(
+  "containers",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    status: text("status", { enum: ["active", "destroyed"] }).notNull().default("active"),
+    description: text("description"),
+    lastActivityAt: integer("last_activity_at").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    deletedAt: integer("deleted_at"),
+  },
+  (table) => ({
+    workspace: index("idx_containers_workspace").on(table.workspaceId, table.deletedAt, sql`${table.updatedAt} DESC`),
+    workspaceName: uniqueIndex("idx_containers_workspace_name").on(table.workspaceId, table.name),
+    status: index("idx_containers_status").on(table.status),
+  })
+);
 
 export const sessionContainer = sqliteTable(
   "session_container",
@@ -284,6 +358,8 @@ export const sessionContainer = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.sessionId, table.containerId] }),
+    session: index("idx_session_container_session").on(table.workspaceId, table.sessionId),
+    container: index("idx_session_container_container").on(table.workspaceId, table.containerId),
   })
 );
 
@@ -300,6 +376,8 @@ export const storedCode = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.name] }),
+    workspaceUpdated: index("idx_stored_code_workspace_updated").on(table.workspaceId, sql`${table.updatedAt} DESC`),
+    workspaceName: index("idx_stored_code_workspace_name").on(table.workspaceId, table.name),
   })
 );
 
@@ -318,6 +396,12 @@ export const egressHandlers = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.egressHandlerId] }),
+    enabled: index("idx_egress_handlers_enabled").on(table.enabled),
+    id: index("idx_egress_handlers_id").on(table.egressHandlerId),
+    name: index("idx_egress_handlers_name").on(table.name),
+    updated: index("idx_egress_handlers_updated").on(sql`${table.updatedAt} DESC`),
+    workspace: index("idx_egress_handlers_workspace").on(table.workspaceId),
+    workspaceEnabled: index("idx_egress_handlers_workspace_enabled").on(table.workspaceId, table.enabled),
   })
 );
 
@@ -331,7 +415,10 @@ export const providers = sqliteTable("providers", {
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
   deletedAt: integer("deleted_at"),
-});
+}, (table) => ({
+  workspace: index("idx_providers_workspace").on(table.workspaceId, table.deletedAt, sql`${table.updatedAt} DESC`),
+  provider: index("idx_providers_provider").on(table.provider),
+}));
 
 export const models = sqliteTable("models", {
   id: text("id").primaryKey(),
@@ -343,7 +430,10 @@ export const models = sqliteTable("models", {
   createdAt: integer("created_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
   deletedAt: integer("deleted_at"),
-});
+}, (table) => ({
+  workspace: index("idx_models_workspace").on(table.workspaceId, table.deletedAt, sql`${table.updatedAt} DESC`),
+  provider: index("idx_models_provider").on(table.providerId, table.modelName),
+}));
 
 export const encryptedSecrets = sqliteTable(
   "encrypted_secrets",
@@ -359,5 +449,6 @@ export const encryptedSecrets = sqliteTable(
   },
   (table) => ({
     pk: primaryKey({ columns: [table.workspaceId, table.key] }),
+    workspace: index("idx_encrypted_secrets_workspace").on(table.workspaceId, sql`${table.updatedAt} DESC`),
   })
 );

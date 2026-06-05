@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { formatExecutionResult, MAX_TOOL_RESPONSE_LENGTH_CHARS } from "../src/modules/tools/code/output.js";
+import { tailToolOutput } from "../src/modules/tools/container/output.js";
 
 describe("tool output formatting", () => {
   it("shows captured stdout when code returns no explicit result", () => {
@@ -28,7 +29,7 @@ describe("tool output formatting", () => {
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
     expect(text.length).toBeLessThanOrEqual(MAX_TOOL_RESPONSE_LENGTH_CHARS);
-    expect(text).toContain("Tool output truncated");
+    expect(text).not.toContain("Tool output truncated");
     expect(text.endsWith("TAIL\"")).toBe(true);
     expect(result.details).toMatchObject({ truncated: true });
   });
@@ -42,6 +43,15 @@ describe("tool output formatting", () => {
     const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
     expect(text.length).toBeLessThanOrEqual(200);
-    expect(text).toContain("Tool output truncated");
+    expect(text).not.toContain("Tool output truncated");
+    expect(result.details).toMatchObject({ truncated: true, originalLength: 1010, limit: 200 });
+  });
+
+  it("tails oversized container output without injecting a synthetic banner into content", () => {
+    const output = tailToolOutput("0123456789".repeat(100), 25);
+
+    expect(output.text).toBe("5678901234567890123456789");
+    expect(output.text).not.toContain("Tool output truncated");
+    expect(output).toMatchObject({ truncated: true, originalLength: 1000, limit: 25 });
   });
 });
