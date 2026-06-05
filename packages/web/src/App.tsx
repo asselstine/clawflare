@@ -9,6 +9,8 @@ import {
   ChevronDown,
   Circle,
   Database,
+  FileText,
+  Folder,
   Hammer,
   KeyRound,
   Loader2,
@@ -16,6 +18,8 @@ import {
   LogOut,
   MessageSquare,
   Monitor,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Power,
   RefreshCw,
@@ -23,6 +27,7 @@ import {
   Settings,
   Shield,
   Square,
+  Terminal,
   Trash2,
   User,
   X,
@@ -33,7 +38,6 @@ import type {
   ProviderInfo,
   ProviderModelInfo,
   SessionListResponse,
-  SessionStatus,
   SessionResponse,
   SessionSummary,
   WorkspaceProvider,
@@ -47,7 +51,6 @@ import {
   formatMessagesFromEvents,
   formatSessionTitle,
   formatToolCallHeader,
-  formatUpdatedAt,
   getEventDisplayMessage,
   type DisplayMessage,
   type ToolCallInfo,
@@ -57,6 +60,78 @@ import { loadSettings, saveSettings, type AppSettings } from "./lib/settings";
 type AppPage = "chat" | "settings";
 type SettingsSection = "providers" | "egress" | "models" | "account" | "data";
 type LoginStatus = "idle" | "starting" | "waiting" | "approved" | "error";
+
+interface SelectedContainer {
+  sessionId: string;
+  containerId: string;
+}
+
+interface ContainerDirEntry {
+  path: string;
+  name: string;
+  type: "file" | "directory";
+  size: number;
+  mode: string | null;
+  mtime: string | null;
+  depth: number;
+}
+
+interface ContainerLsDetails {
+  ok: boolean;
+  path: string;
+  entries: ContainerDirEntry[];
+  entryCount: number;
+  truncated: boolean;
+}
+
+interface ContainerReadDetails {
+  ok: boolean;
+  path: string;
+  totalLines: number;
+  size: number;
+}
+
+interface ContainerFindResult {
+  path: string;
+  type: "file" | "directory";
+  size: number;
+  mtime: string | null;
+}
+
+interface ContainerFindDetails {
+  ok: boolean;
+  path: string;
+  results: ContainerFindResult[];
+  resultCount: number;
+  truncated: boolean;
+}
+
+interface ContainerFile {
+  path: string;
+  content?: string;
+  dataUrl?: string;
+  mimeType?: string;
+  kind: "text" | "image";
+  totalLines: number;
+  size: number;
+}
+
+interface ContainerBashDetails {
+  ok?: boolean;
+  exitCode?: number | null;
+  durationMs?: number;
+  truncated?: boolean;
+  killed?: boolean;
+}
+
+interface TerminalEntry {
+  id: string;
+  command: string;
+  cwd: string;
+  output: string;
+  details?: ContainerBashDetails;
+  isError?: boolean;
+}
 
 const settingsSectionIds: SettingsSection[] = ["providers", "egress", "models", "account", "data"];
 
@@ -128,6 +203,14 @@ function App(): JSX.Element {
   const [appPage, setAppPage] = useState<AppPage>(initialSettingsSection ? "settings" : "chat");
   const [settingsSection, setSettingsSection] = useState<SettingsSection>(initialSettingsSection ?? "providers");
   const [mobileSessionsOpen, setMobileSessionsOpen] = useState(false);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
+  const [selectedContainer, setSelectedContainer] = useState<SelectedContainer | null>(null);
+  const [containerPath, setContainerPath] = useState(".");
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [terminalCommand, setTerminalCommand] = useState("");
+  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
+  const [terminalRunning, setTerminalRunning] = useState(false);
+  const [quickFileSelectedIndex, setQuickFileSelectedIndex] = useState(0);
   const [selectedProvider, setSelectedProvider] = useState("");
   const [showModelForm, setShowModelForm] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
@@ -142,6 +225,7 @@ function App(): JSX.Element {
   const abortController = useRef<AbortController | null>(null);
   const runningSessionIdRef = useRef<string | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const terminalInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
   const oldestLoadedEventSequenceRef = useRef<number | null>(null);
@@ -175,6 +259,90 @@ function App(): JSX.Element {
       return isRunning || serverProcessingSessionId === sessionId || activeSession?.status === "processing" ? 2000 : 15_000;
     },
   });
+
+  const containerListing = useQuery({
+    queryKey: ["container-ls", settings.serverUrl, settings.token, selectedContainer?.sessionId, selectedContainer?.containerId, containerPath],
+    queryFn: async () => {
+      if (!selectedContainer) throw new Error("No container selected");
+      const response = await client.invokeTool<ContainerLsDetails>(selectedContainer.sessionId, "container_ls", {
+        containerId: selectedContainer.containerId,
+        path: containerPath,
+        maxResults: 500,
+      });
+      if (!response.result.details) throw new Error("Container listing did not include details");
+      return response.result.details;
+    },
+    enabled: isConfigured && Boolean(selectedContainer),
+  });
+
+  const selectedFile = useQuery({
+    queryKey: ["container-read", settings.serverUrl, settings.token, selectedContainer?.sessionId, selectedContainer?.containerId, selectedFilePath],
+    queryFn: async (): Promise<ContainerFile> => {
+      if (!selectedContainer || !selectedFilePath) throw new Error("No file selected");
+      const imageMimeType = imageMimeTypeFromPath(selectedFilePath);
+      if (imageMimeType) {
+        const escapedPath = shellSingleQuote(selectedFilePath);
+        const response = await client.invokeTool<ContainerBashDetails>(selectedContainer.sessionId, "container_bash", {
+          containerId: selectedContainer.containerId,
+          command: `base64 ${escapedPath} | tr -d '\\n'`,
+          cwd: ".",
+          maxOutputChars: 8_000_000,
+        });
+        const base64 = extractBashStdout(response.result.content?.find((part) => part.type === "text")?.text ?? "").trim();
+        if (response.result.details?.ok === false || response.result.details?.exitCode) {
+          throw new Error(base64 || `Failed to load image ${selectedFilePath}`);
+        }
+        return {
+          path: selectedFilePath,
+          dataUrl: `data:${imageMimeType};base64,${base64}`,
+          mimeType: imageMimeType,
+          kind: "image",
+          totalLines: 0,
+          size: Math.floor(base64.length * 0.75),
+        };
+      }
+
+      const response = await client.invokeTool<ContainerReadDetails>(selectedContainer.sessionId, "container_read", {
+        containerId: selectedContainer.containerId,
+        path: selectedFilePath,
+        maxBytes: 500_000,
+      });
+      const details = response.result.details;
+      const text = response.result.content?.find((part) => part.type === "text")?.text ?? "";
+      const content = text.startsWith(`--- ${selectedFilePath} ---\n`)
+        ? text.slice(`--- ${selectedFilePath} ---\n`.length)
+        : text.replace(/^--- .* ---\n/, "");
+      return {
+        path: details?.path ?? selectedFilePath,
+        content,
+        kind: "text",
+        totalLines: details?.totalLines ?? content.split("\n").length,
+        size: details?.size ?? content.length,
+      };
+    },
+    enabled: isConfigured && Boolean(selectedContainer && selectedFilePath),
+  });
+
+  const quickFileMode = selectedContainer !== null && terminalCommand.startsWith("/");
+  const quickFileQuery = quickFileMode ? terminalCommand.slice(1).trim() : "";
+  const quickFiles = useQuery({
+    queryKey: ["container-find-paths", settings.serverUrl, settings.token, selectedContainer?.sessionId, selectedContainer?.containerId],
+    queryFn: async (): Promise<ContainerFindResult[]> => {
+      if (!selectedContainer) throw new Error("No container selected");
+      const response = await client.invokeTool<ContainerFindDetails>(selectedContainer.sessionId, "container_find", {
+        containerId: selectedContainer.containerId,
+        path: ".",
+        type: "any",
+        maxResults: 1000,
+      });
+      return response.result.details?.results ?? [];
+    },
+    enabled: isConfigured && Boolean(selectedContainer) && quickFileMode,
+  });
+  const quickFileMatches = useMemo(
+    () => filterQuickFiles(quickFiles.data ?? [], quickFileQuery),
+    [quickFiles.data, quickFileQuery],
+  );
 
   const providers = useQuery({
     queryKey: ["providers", settings.serverUrl, settings.token],
@@ -425,6 +593,44 @@ function App(): JSX.Element {
   }, [currentSession, serverProcessingSessionId]);
 
   useEffect(() => {
+    if (selectedContainer && appPage === "chat") {
+      focusTerminalPrompt();
+    }
+  }, [appPage, selectedContainer?.containerId]);
+
+  useEffect(() => {
+    if (!selectedContainer || appPage !== "chat") return;
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTextEntryElement(document.activeElement)) return;
+
+      event.preventDefault();
+      setTerminalCommand("/");
+      setSelectedFilePath(null);
+      focusTerminalPrompt();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [appPage, selectedContainer]);
+
+  useEffect(() => {
+    setQuickFileSelectedIndex(0);
+  }, [quickFileQuery, selectedContainer?.containerId]);
+
+  useEffect(() => {
+    if (quickFileSelectedIndex >= quickFileMatches.length) {
+      setQuickFileSelectedIndex(Math.max(0, quickFileMatches.length - 1));
+    }
+  }, [quickFileMatches.length, quickFileSelectedIndex]);
+
+  useEffect(() => {
+    const cause = containerListing.error ?? selectedFile.error;
+    if (cause) showError(cause);
+  }, [containerListing.error, selectedFile.error]);
+
+  useEffect(() => {
     if (!isConfigured || !sessionId || appPage !== "chat" || isRunning || !activeSessionIsProcessing) return;
     if (followingSessionRef.current === sessionId) return;
 
@@ -465,6 +671,12 @@ function App(): JSX.Element {
     });
   }
 
+  function focusTerminalPrompt(): void {
+    window.requestAnimationFrame(() => {
+      terminalInputRef.current?.focus();
+    });
+  }
+
   function startDraftSession(options: { history?: "push" | "replace" | false } = {}): void {
     abortRun();
     followingAbortControllerRef.current?.abort();
@@ -472,6 +684,7 @@ function App(): JSX.Element {
     followingSessionRef.current = null;
     setAppPage("chat");
     setMobileSessionsOpen(false);
+    closeContainerWorkspace();
     setSessionId("");
     setServerProcessingSessionId(null);
     setMessages([]);
@@ -486,6 +699,7 @@ function App(): JSX.Element {
   function openSettings(section: SettingsSection | null = null, options: { history?: "push" | "replace" | false } = {}): void {
     setAppPage("settings");
     setMobileSessionsOpen(false);
+    closeContainerWorkspace();
     setSettingsSection(section ?? "providers");
     if (options.history !== false) updateBrowserSettingsPath(section, options.history ?? "push");
   }
@@ -494,6 +708,115 @@ function App(): JSX.Element {
     setSettingsSection(section);
     setAppPage("settings");
     updateBrowserSettingsPath(section);
+  }
+
+  function openContainerWorkspace(next: SelectedContainer): void {
+    setSelectedContainer(next);
+    setContainerPath(".");
+    setSelectedFilePath(null);
+    setMobileSessionsOpen(false);
+    setStatusText(`Viewing ${next.containerId.slice(0, 12)}`);
+    focusTerminalPrompt();
+  }
+
+  function openContainerDirectory(path: string): void {
+    setContainerPath(path || ".");
+    setSelectedFilePath(null);
+  }
+
+  function closeContainerWorkspace(): void {
+    setSelectedContainer(null);
+    setContainerPath(".");
+    setSelectedFilePath(null);
+    setTerminalCommand("");
+    setTerminalEntries([]);
+  }
+
+  async function submitTerminalCommand(): Promise<void> {
+    const command = terminalCommand.trim();
+    if (quickFileMode) {
+      openQuickFile();
+      return;
+    }
+    if (!selectedContainer || !command || terminalRunning) return;
+
+    const cwd = containerPath === "." ? "." : containerPath;
+    setTerminalCommand("");
+    setTerminalRunning(true);
+    setStatusText(`Running ${command}`);
+
+    try {
+      const response = await client.invokeTool<ContainerBashDetails>(selectedContainer.sessionId, "container_bash", {
+        containerId: selectedContainer.containerId,
+        command,
+        cwd,
+        maxOutputChars: 120_000,
+      });
+      const output = response.result.content?.find((part) => part.type === "text")?.text ?? "";
+      setTerminalEntries((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          command,
+          cwd,
+          output,
+          details: response.result.details,
+          isError: response.result.details?.ok === false || Boolean(response.result.details?.exitCode),
+        },
+      ]);
+      setStatusText("Command complete");
+      void containerListing.refetch();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setTerminalEntries((current) => [
+        ...current,
+        {
+          id: crypto.randomUUID(),
+          command,
+          cwd,
+          output: message,
+          isError: true,
+        },
+      ]);
+      showError(cause);
+    } finally {
+      setTerminalRunning(false);
+    }
+  }
+
+  function openQuickFile(path?: string): void {
+    const selectedMatch = path
+      ? quickFileMatches.find((match) => match.path === path)
+      : quickFileMatches[quickFileSelectedIndex];
+    const selectedPath = path ?? selectedMatch?.path ?? quickFileQuery;
+    const normalizedPath = normalizeQuickFilePath(selectedPath);
+    if (!normalizedPath) return;
+    if (selectedMatch?.type === "directory" || selectedPath.endsWith("/")) {
+      openContainerDirectory(normalizedPath);
+    } else {
+      setSelectedFilePath(normalizedPath);
+    }
+    setTerminalCommand("");
+    setStatusText(`${selectedMatch?.type === "directory" ? "Opened directory" : "Opened"} ${normalizedPath}`);
+  }
+
+  function rememberSessionContainers(targetSessionId: string, displayMessages: DisplayMessage[]): void {
+    const containers = inferContainerIds(targetSessionId, displayMessages);
+    if (containers.length === 0) return;
+
+    queryClient.setQueryData<SessionListResponse>(["sessions", settings.serverUrl, settings.token], (current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        sessions: current.sessions.map((session) => {
+          if (session.id !== targetSessionId) return session;
+          return {
+            ...session,
+            containers: mergeContainers(session.containers ?? [], containers),
+          };
+        }),
+      };
+    });
   }
 
   async function loginWithGithub(): Promise<void> {
@@ -591,11 +914,14 @@ function App(): JSX.Element {
       const oldestSequence = oldestEventSequence(session.events);
       setAppPage("chat");
       setMobileSessionsOpen(false);
+      setSelectedContainer(null);
+      setSelectedFilePath(null);
       setSessionId(session.id);
       setServerProcessingSessionId(session.status === "processing" ? session.id : null);
       if (options.history !== false) updateBrowserSessionPath(session.id, options.history ?? "push");
       shouldStickToBottomRef.current = true;
       setMessages(attachToolResults(recentMessages));
+      rememberSessionContainers(session.id, recentMessages);
       setPromptHistory(session.promptHistory ?? null);
       oldestLoadedEventSequenceRef.current = oldestSequence;
       latestEventCursorRef.current = session.nextEventCursor;
@@ -646,6 +972,7 @@ function App(): JSX.Element {
       setHasOlderMessages(nextOldestSequence > 1);
       setPromptHistory(session.promptHistory ?? promptHistory);
       setMessages((current) => [...olderMessages, ...current]);
+      rememberSessionContainers(session.id, [...olderMessages, ...messages]);
       setStatusText(`Loaded earlier ${session.id.slice(0, 8)}`);
     } catch (cause) {
       showError(cause);
@@ -671,6 +998,7 @@ function App(): JSX.Element {
         const recentMessages = attachToolResults(formatMessagesFromEvents(initialSession.events));
         const oldestSequence = oldestEventSequence(initialSession.events);
         setMessages(recentMessages);
+        rememberSessionContainers(targetSessionId, recentMessages);
         setPromptHistory(initialSession.promptHistory ?? null);
         oldestLoadedEventSequenceRef.current = oldestSequence;
         latestEventCursorRef.current = initialSession.nextEventCursor;
@@ -693,7 +1021,9 @@ function App(): JSX.Element {
         setMessages((current) => {
           const serverMessages = attachToolResults((update.session.messages ?? []).map(formatMessageForDisplay));
           const base = serverMessages.length ? serverMessages : current;
-          return attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
+          const next = attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
+          rememberSessionContainers(targetSessionId, next);
+          return next;
         });
         setPromptHistory(update.session.promptHistory ?? null);
 
@@ -713,6 +1043,7 @@ function App(): JSX.Element {
       });
       latestEventCursorRef.current = finalSession.nextEventCursor;
       setMessages(attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay)));
+      rememberSessionContainers(targetSessionId, attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay)));
       setPromptHistory(finalSession.promptHistory ?? null);
       setServerProcessingSessionId(null);
       setStatusText(finalSession.status === "error" ? "Error" : "Complete");
@@ -893,7 +1224,9 @@ function App(): JSX.Element {
         setMessages((current) => {
           const serverMessages = attachToolResults((update.session.messages ?? []).map(formatMessageForDisplay));
           const base = mergeCurrentTurnMessages(current, serverMessages, content, optimistic);
-          return attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
+          const next = attachToolResults(applyAssistantPartialEvents(base, update.newEvents));
+          rememberSessionContainers(submitted.sessionId, next);
+          return next;
         });
         setPromptHistory(update.session.promptHistory ?? null);
 
@@ -913,7 +1246,9 @@ function App(): JSX.Element {
       latestEventCursorRef.current = finalSession.nextEventCursor;
       setMessages((current) => {
         const serverMessages = attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay));
-        return mergeCurrentTurnMessages(current, serverMessages, content, optimistic);
+        const next = mergeCurrentTurnMessages(current, serverMessages, content, optimistic);
+        rememberSessionContainers(submitted.sessionId, next);
+        return next;
       });
       setPromptHistory(finalSession.promptHistory ?? null);
       setStatusText("Complete");
@@ -989,13 +1324,16 @@ function App(): JSX.Element {
 
   return (
     <div className="flex h-dvh min-h-0 bg-shell-950 text-slate-100">
-      <aside className="hidden w-72 shrink-0 border-r border-shell-700 bg-shell-900/95 md:flex md:flex-col">
+      <aside className={`hidden shrink-0 border-r border-shell-700 bg-shell-900/95 transition-[width] md:flex md:flex-col ${sessionsCollapsed ? "w-14" : "w-72"}`}>
         <SessionSidebar
           currentSessionId={sessionId}
           sessions={sessions.data?.sessions ?? []}
+          collapsed={sessionsCollapsed}
+          selectedContainer={selectedContainer}
           onNew={startDraftSession}
           onOpen={(id) => void openSession(id)}
-          onDelete={(id) => deleteSession.mutate(id)}
+          onOpenContainer={openContainerWorkspace}
+          onToggleCollapsed={() => setSessionsCollapsed((current) => !current)}
           onRefresh={() => {
             setStatusText("Sessions refreshed");
             void sessions.refetch();
@@ -1045,9 +1383,12 @@ function App(): JSX.Element {
             <SessionSidebar
               currentSessionId={sessionId}
               sessions={sessions.data?.sessions ?? []}
+              collapsed={false}
+              selectedContainer={selectedContainer}
               onNew={startDraftSession}
               onOpen={(id) => void openSession(id)}
-              onDelete={(id) => deleteSession.mutate(id)}
+              onOpenContainer={openContainerWorkspace}
+              onToggleCollapsed={() => setMobileSessionsOpen(false)}
               onRefresh={() => {
                 setStatusText("Sessions refreshed");
                 void sessions.refetch();
@@ -1111,55 +1452,137 @@ function App(): JSX.Element {
           />
         ) : (
           <>
-            <section
-              ref={messageScrollerRef}
-              className="scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-4 sm:py-6"
-              onScroll={(event) => {
-                const scroller = event.currentTarget;
-                shouldStickToBottomRef.current = isNearBottom(scroller);
-                if (scroller.scrollTop < 96) void loadPreviousMessages();
-              }}
-            >
-              <div className="mx-auto flex max-w-4xl flex-col gap-5">
-                {sessionId && (historyLoading || hasOlderMessages) ? (
-                  <div className="flex justify-center">
-                    <button
-                      className="flex h-8 items-center gap-2 rounded-md border border-shell-700 bg-shell-850 px-3 text-xs text-slate-400 transition hover:border-shell-600 hover:text-slate-200 disabled:cursor-wait disabled:opacity-70"
-                      disabled={historyLoading}
-                      onClick={() => void loadPreviousMessages()}
-                    >
-                      {historyLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
-                      {historyLoading ? "Loading earlier" : "Load earlier"}
-                    </button>
-                  </div>
-                ) : null}
-                {!isConfigured ? (
-                  <EmptyState
-                    icon={<KeyRound className="h-7 w-7" />}
-                    title="Add your Clawflare endpoint and token"
-                    body="The web client stores them locally in this browser and sends requests directly to the Clawflare API."
-                  />
-                ) : messages.length === 0 ? (
-                  <EmptyState
-                    icon={<MessageSquare className="h-7 w-7" />}
-                    title="Ready for a new turn"
-                    body="Ask the agent to inspect sessions, write code, use containers, or configure integrations."
-                  />
-                ) : (
-                  <>
-                    <PromptHistoryReveal promptHistory={promptHistory} visibleMessages={messages} />
-                    {messages.map((message, index) => <ChatMessage key={`${index}-${message.role}`} message={message} />)}
-                  </>
-                )}
-                {composerBusy ? <Thinking /> : null}
-                {error ? <ErrorBanner message={error} onDismiss={() => setError(null)} /> : null}
-                <div ref={messageEndRef} />
-              </div>
-            </section>
+            {selectedContainer ? (
+              <ContainerWorkspaceView
+                selectedContainer={selectedContainer}
+                path={containerPath}
+                listing={containerListing.data}
+                listingLoading={containerListing.isFetching}
+                filePath={selectedFilePath}
+                file={selectedFile.data}
+                fileLoading={selectedFile.isFetching}
+                terminalEntries={terminalEntries}
+                terminalRunning={terminalRunning}
+                error={error}
+                onDismissError={() => setError(null)}
+                onClose={closeContainerWorkspace}
+                onOpenDirectory={openContainerDirectory}
+                onOpenFile={setSelectedFilePath}
+                onRefresh={() => void containerListing.refetch()}
+              />
+            ) : (
+              <section
+                ref={messageScrollerRef}
+                className="scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-5 sm:px-4 sm:py-6"
+                onScroll={(event) => {
+                  const scroller = event.currentTarget;
+                  shouldStickToBottomRef.current = isNearBottom(scroller);
+                  if (scroller.scrollTop < 96) void loadPreviousMessages();
+                }}
+              >
+                <div className="mx-auto flex max-w-4xl flex-col gap-5">
+                  {sessionId && (historyLoading || hasOlderMessages) ? (
+                    <div className="flex justify-center">
+                      <button
+                        className="flex h-8 items-center gap-2 rounded-md border border-shell-700 bg-shell-850 px-3 text-xs text-slate-400 transition hover:border-shell-600 hover:text-slate-200 disabled:cursor-wait disabled:opacity-70"
+                        disabled={historyLoading}
+                        onClick={() => void loadPreviousMessages()}
+                      >
+                        {historyLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
+                        {historyLoading ? "Loading earlier" : "Load earlier"}
+                      </button>
+                    </div>
+                  ) : null}
+                  {!isConfigured ? (
+                    <EmptyState
+                      icon={<KeyRound className="h-7 w-7" />}
+                      title="Add your Clawflare endpoint and token"
+                      body="The web client stores them locally in this browser and sends requests directly to the Clawflare API."
+                    />
+                  ) : messages.length === 0 ? (
+                    <EmptyState
+                      icon={<MessageSquare className="h-7 w-7" />}
+                      title="Ready for a new turn"
+                      body="Ask the agent to inspect sessions, write code, use containers, or configure integrations."
+                    />
+                  ) : (
+                    <>
+                      <PromptHistoryReveal promptHistory={promptHistory} visibleMessages={messages} />
+                      {messages.map((message, index) => <ChatMessage key={`${index}-${message.role}`} message={message} />)}
+                    </>
+                  )}
+                  {composerBusy ? <Thinking /> : null}
+                  {error ? <ErrorBanner message={error} onDismiss={() => setError(null)} /> : null}
+                  <div ref={messageEndRef} />
+                </div>
+              </section>
+            )}
 
             <footer className="border-t border-shell-700 bg-shell-900/95 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
               <div className="mx-auto max-w-4xl">
-                <div className="flex items-end gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
+                {selectedContainer ? (
+                  <div className="relative flex items-center gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
+                    {quickFileMode ? (
+                      <QuickFilePopup
+                        query={quickFileQuery}
+                        matches={quickFileMatches}
+                        selectedIndex={quickFileSelectedIndex}
+                        loading={quickFiles.isFetching}
+                        onSelect={(path) => openQuickFile(path)}
+                      />
+                    ) : null}
+                    <div className="hidden shrink-0 items-center gap-2 rounded-md bg-shell-900 px-2 py-2 font-mono text-xs text-slate-500 sm:flex">
+                      <Terminal className="h-4 w-4 text-accent-500" />
+                      /workspace/{containerPath === "." ? "" : containerPath}
+                    </div>
+                    <input
+                      ref={terminalInputRef}
+                      className="h-10 min-w-0 flex-1 border-0 bg-transparent px-2 font-mono text-sm text-slate-100 outline-none placeholder:text-slate-500"
+                      value={terminalCommand}
+                      placeholder={terminalRunning ? "Command running..." : "Run command in container"}
+                      disabled={terminalRunning}
+                      onChange={(event) => setTerminalCommand(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (quickFileMode && event.key === "ArrowDown") {
+                          event.preventDefault();
+                          setQuickFileSelectedIndex((current) => Math.min(current + 1, Math.max(0, quickFileMatches.length - 1)));
+                          return;
+                        }
+                        if (quickFileMode && event.key === "ArrowUp") {
+                          event.preventDefault();
+                          setQuickFileSelectedIndex((current) => Math.max(0, current - 1));
+                          return;
+                        }
+                        if (quickFileMode && event.key === "Escape") {
+                          event.preventDefault();
+                          setTerminalCommand("");
+                          return;
+                        }
+                        if (quickFileMode && event.key === "Tab") {
+                          event.preventDefault();
+                          const selectedMatch = quickFileMatches[quickFileSelectedIndex];
+                          if (selectedMatch) {
+                            setTerminalCommand(`/${selectedMatch.path}${selectedMatch.type === "directory" ? "/" : ""}`);
+                          }
+                          return;
+                        }
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submitTerminalCommand();
+                        }
+                      }}
+                    />
+                    <button
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-accent-600 text-white transition hover:bg-accent-500 disabled:bg-shell-700"
+                      disabled={!terminalCommand.trim() || terminalRunning}
+                      title={quickFileMode ? "Open file" : "Run"}
+                      onClick={() => void submitTerminalCommand()}
+                    >
+                      {terminalRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-end gap-2 rounded-lg border border-shell-600 bg-shell-850 p-2 shadow-panel">
                   <textarea
                     ref={promptInputRef}
                     className="scrollbar min-h-11 flex-1 resize-none border-0 bg-transparent px-2 py-2 text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
@@ -1192,7 +1615,8 @@ function App(): JSX.Element {
                       <Send className="h-4 w-4" />
                     </button>
                   )}
-                </div>
+                  </div>
+                )}
               </div>
             </footer>
           </>
@@ -1205,9 +1629,12 @@ function App(): JSX.Element {
 interface SessionSidebarProps {
   currentSessionId: string;
   sessions: SessionSummary[];
+  collapsed: boolean;
+  selectedContainer: SelectedContainer | null;
   onNew: () => void;
   onOpen: (sessionId: string) => void;
-  onDelete: (sessionId: string) => void;
+  onOpenContainer: (container: SelectedContainer) => void;
+  onToggleCollapsed: () => void;
   onRefresh: () => void;
   refreshing: boolean;
   onSettings: () => void;
@@ -1217,59 +1644,588 @@ interface SessionSidebarProps {
 function SessionSidebar(props: SessionSidebarProps): JSX.Element {
   return (
     <>
-      <div className="flex h-16 items-center justify-between border-b border-shell-700 px-3">
-        <button className="flex h-10 items-center gap-2 rounded-md bg-slate-100 px-3 text-sm font-medium text-shell-950 transition hover:bg-white" onClick={props.onNew}>
-          <Plus className="h-4 w-4" />
-          New chat
-        </button>
-        <IconButton title="Refresh sessions" onClick={props.onRefresh}>
-          <RefreshCw className={`h-4 w-4 ${props.refreshing ? "animate-spin" : ""}`} />
-        </IconButton>
-      </div>
-      <div className="scrollbar min-h-0 flex-1 overflow-y-auto p-2">
-        {props.sessions.map((session) => (
-          <div
-            key={session.id}
-            className={`mb-1 flex w-full items-start gap-1 rounded-md p-2 transition hover:bg-shell-800 ${
-              session.id === props.currentSessionId ? "bg-shell-800 ring-1 ring-accent-600/60" : ""
-            }`}
-          >
-            <button className="min-w-0 flex-1 p-1 text-left" onClick={() => props.onOpen(session.id)}>
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-medium text-slate-100">{formatSessionTitle(session)}</span>
-                <SessionStatusDot status={session.status} />
-              </div>
-              <div className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
-                <span>{session.messageCount} events</span>
-                <span>{formatUpdatedAt(session.updatedAt)}</span>
-              </div>
-            </button>
-            <button
-              className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-red-950/50 hover:text-red-200"
-              title="Delete session"
-              onClick={() => props.onDelete(session.id)}
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </div>
-        ))}
-        {props.sessions.length === 0 ? <p className="px-2 py-6 text-sm text-slate-500">No sessions found.</p> : null}
-      </div>
-      <div className="border-t border-shell-700 p-3">
+      <div className={`flex h-16 items-center border-b border-shell-700 ${props.collapsed ? "justify-center px-1" : "justify-between px-3"}`}>
         <button
-          className={`flex h-9 w-full items-center justify-center gap-2 rounded-md border px-3 text-sm transition ${
+          className={`flex h-10 items-center justify-center gap-2 rounded-md bg-slate-100 text-sm font-medium text-shell-950 transition hover:bg-white ${props.collapsed ? "w-10 px-0" : "px-3"}`}
+          title="New chat"
+          onClick={props.onNew}
+        >
+          <Plus className="h-4 w-4" />
+          {props.collapsed ? null : "New chat"}
+        </button>
+        {props.collapsed ? null : (
+          <div className="flex items-center gap-1">
+            <IconButton title="Refresh sessions" onClick={props.onRefresh}>
+              <RefreshCw className={`h-4 w-4 ${props.refreshing ? "animate-spin" : ""}`} />
+            </IconButton>
+            <IconButton title="Minimize sessions" onClick={props.onToggleCollapsed}>
+              <PanelLeftClose className="h-4 w-4" />
+            </IconButton>
+          </div>
+        )}
+      </div>
+      {props.collapsed ? (
+        <div className="border-b border-shell-700 p-1">
+          <IconButton title="Expand sessions" onClick={props.onToggleCollapsed}>
+            <PanelLeftOpen className="h-4 w-4" />
+          </IconButton>
+        </div>
+      ) : null}
+      <div className={`scrollbar min-h-0 flex-1 overflow-y-auto ${props.collapsed ? "p-1" : "p-2"}`}>
+        {props.sessions.map((session) => {
+          const containerIds = sessionContainers(session);
+          return (
+            <div
+              key={session.id}
+              className="mb-2"
+            >
+              <button
+                className={`flex w-full min-w-0 items-center gap-2 rounded-md text-left transition hover:bg-shell-800 ${
+                  props.collapsed ? "h-10 justify-center px-0" : "px-2 py-2"
+                } ${
+                  session.id === props.currentSessionId ? "bg-shell-800 text-slate-100" : "text-slate-300"
+                }`}
+                title={formatSessionTitle(session)}
+                onClick={() => props.onOpen(session.id)}
+              >
+                {props.collapsed ? (
+                  <MessageSquare className="h-4 w-4 text-slate-300" />
+                ) : (
+                  <>
+                    <MessageSquare className="h-4 w-4 shrink-0 text-slate-500" />
+                    <span className={`truncate text-[0.95rem] ${session.id === props.currentSessionId ? "font-semibold" : "font-medium"}`}>
+                      {formatSessionTitle(session)}
+                    </span>
+                  </>
+                )}
+              </button>
+              {props.collapsed ? (
+                <div className="mb-1 flex flex-col items-center gap-1">
+                  {containerIds.map((containerId) => (
+                    <button
+                      key={containerId}
+                      className={`flex h-8 w-8 items-center justify-center rounded-md transition hover:bg-shell-800 ${
+                        props.selectedContainer?.containerId === containerId ? "bg-accent-600/15 text-accent-300" : "text-slate-500"
+                      }`}
+                      title={containerId}
+                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId })}
+                    >
+                      <FileText className="h-4 w-4" />
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="mb-1 flex flex-col gap-0.5">
+                  {containerIds.map((containerId) => (
+                    <button
+                      key={containerId}
+                      className={`flex h-9 min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition hover:bg-shell-850 ${
+                        props.selectedContainer?.containerId === containerId ? "bg-accent-600/15 text-accent-200" : "text-slate-400"
+                      }`}
+                      title={containerId}
+                      onClick={() => props.onOpenContainer({ sessionId: session.id, containerId })}
+                    >
+                      <Folder className="h-4 w-4 shrink-0" />
+                      <span className="truncate">{containerId}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {props.sessions.length === 0 && !props.collapsed ? <p className="px-2 py-6 text-sm text-slate-500">No sessions found.</p> : null}
+      </div>
+      <div className={`border-t border-shell-700 ${props.collapsed ? "p-1" : "p-3"}`}>
+        <button
+          className={`flex h-9 w-full items-center justify-center gap-2 rounded-md border text-sm transition ${props.collapsed ? "px-0" : "px-3"} ${
             props.settingsActive
               ? "border-accent-600 bg-accent-600/20 text-accent-300"
               : "border-shell-700 bg-shell-850 text-slate-300 hover:bg-shell-800"
           }`}
+          title="Settings"
           onClick={props.onSettings}
         >
           <Settings className="h-4 w-4" />
-          Settings
+          {props.collapsed ? null : "Settings"}
         </button>
       </div>
     </>
   );
+}
+
+function ContainerWorkspaceView(props: {
+  selectedContainer: SelectedContainer;
+  path: string;
+  listing?: ContainerLsDetails;
+  listingLoading: boolean;
+  filePath: string | null;
+  file?: ContainerFile;
+  fileLoading: boolean;
+  terminalEntries: TerminalEntry[];
+  terminalRunning: boolean;
+  error: string | null;
+  onDismissError: () => void;
+  onClose: () => void;
+  onOpenDirectory: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onRefresh: () => void;
+}): JSX.Element {
+  return (
+    <section className="scrollbar min-h-0 flex-1 overflow-auto bg-shell-950">
+      <div className="mx-auto flex max-w-6xl flex-col gap-4 px-3 py-5 sm:px-4 sm:py-6">
+        <div className="flex min-w-0 items-center justify-between gap-3 border-b border-shell-700 pb-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-xs text-slate-500">
+              <Terminal className="h-3.5 w-3.5 text-accent-500" />
+              <span className="truncate">{props.selectedContainer.containerId}</span>
+            </div>
+            <h2 className="truncate font-mono text-sm font-semibold text-slate-100">/workspace/{props.path === "." ? "" : props.path}</h2>
+          </div>
+          <div className="flex items-center gap-2">
+            {props.terminalRunning ? (
+              <div className="flex items-center gap-2 text-xs text-slate-500">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Running
+              </div>
+            ) : null}
+            <IconButton title="Close container view" onClick={props.onClose}>
+              <X className="h-4 w-4" />
+            </IconButton>
+          </div>
+        </div>
+        {props.error ? <ErrorBanner message={props.error} onDismiss={props.onDismissError} /> : null}
+        {props.filePath ? (
+          <InlineFileViewer file={props.file} path={props.filePath} loading={props.fileLoading} onOpenDirectory={props.onOpenDirectory} />
+        ) : (
+          <>
+            <ContainerDirectoryBrowser
+              path={props.path}
+              listing={props.listing}
+              loading={props.listingLoading}
+              onOpenDirectory={props.onOpenDirectory}
+              onOpenFile={props.onOpenFile}
+              onRefresh={props.onRefresh}
+            />
+            {props.terminalEntries.length ? <TerminalOutput entries={props.terminalEntries} /> : null}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function ContainerDirectoryBrowser(props: {
+  path: string;
+  listing?: ContainerLsDetails;
+  loading: boolean;
+  onOpenDirectory: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onRefresh: () => void;
+}): JSX.Element {
+  const entries = props.listing?.entries ?? [];
+  const directories = entries.filter((entry) => entry.type === "directory").sort((a, b) => a.name.localeCompare(b.name));
+  const files = entries.filter((entry) => entry.type === "file").sort((a, b) => a.name.localeCompare(b.name));
+
+  return (
+    <section className="rounded-md border border-shell-700 bg-shell-900">
+      <div className="flex min-h-12 items-center justify-between gap-3 border-b border-shell-700 px-3 py-2">
+        <Breadcrumbs path={props.path} onOpenDirectory={props.onOpenDirectory} />
+        <IconButton title="Refresh directory" onClick={props.onRefresh}>
+          <RefreshCw className={`h-4 w-4 ${props.loading ? "animate-spin" : ""}`} />
+        </IconButton>
+      </div>
+      <div className="scrollbar max-h-[calc(100dvh-17rem)] overflow-auto p-2">
+        {props.path !== "." ? (
+          <button
+            className="mb-1 flex h-10 w-full items-center gap-2 rounded-md px-2 text-left text-sm text-slate-500 transition hover:bg-shell-850 hover:text-slate-300"
+            onClick={() => props.onOpenDirectory(parentContainerPath(props.path))}
+          >
+            <ChevronDown className="h-4 w-4 rotate-90" />
+            ..
+          </button>
+        ) : null}
+        {props.loading && entries.length === 0 ? (
+          <div className="flex items-center gap-2 px-2 py-8 text-sm text-slate-500">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading directory
+          </div>
+        ) : null}
+        {[...directories, ...files].map((entry) => (
+          <button
+            key={entry.path}
+            className="flex h-10 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm text-slate-300 transition hover:bg-shell-850"
+            onClick={() => entry.type === "directory" ? props.onOpenDirectory(entry.path) : props.onOpenFile(entry.path)}
+          >
+            {entry.type === "directory" ? <Folder className="h-4 w-4 shrink-0 text-accent-400" /> : <FileText className="h-4 w-4 shrink-0 text-slate-500" />}
+            <span className="truncate font-mono">{entry.name}</span>
+            {entry.type === "file" ? <span className="ml-auto shrink-0 text-xs text-slate-600">{formatBytes(entry.size)}</span> : null}
+          </button>
+        ))}
+        {!props.loading && entries.length === 0 ? <p className="px-2 py-8 text-sm text-slate-500">Directory is empty.</p> : null}
+        {props.listing?.truncated ? <p className="px-2 py-3 text-xs text-amberSoft-300">Results truncated.</p> : null}
+      </div>
+    </section>
+  );
+}
+
+function Breadcrumbs({ path, onOpenDirectory }: { path: string; onOpenDirectory: (path: string) => void }): JSX.Element {
+  const parts = path === "." ? [] : path.split("/").filter(Boolean);
+
+  return (
+    <nav className="flex min-w-0 flex-wrap items-center gap-1 font-mono text-sm">
+      <button
+        className={`rounded-md px-2 py-1 transition hover:bg-shell-850 ${parts.length === 0 ? "text-slate-100" : "text-accent-300"}`}
+        onClick={() => onOpenDirectory(".")}
+      >
+        /workspace
+      </button>
+      {parts.map((part, index) => {
+        const nextPath = parts.slice(0, index + 1).join("/");
+        const active = index === parts.length - 1;
+        return (
+          <span key={nextPath} className="flex min-w-0 items-center gap-1">
+            <span className="text-slate-600">/</span>
+            <button
+              className={`max-w-44 truncate rounded-md px-2 py-1 transition hover:bg-shell-850 ${active ? "text-slate-100" : "text-accent-300"}`}
+              onClick={() => onOpenDirectory(nextPath)}
+            >
+              {part}
+            </button>
+          </span>
+        );
+      })}
+    </nav>
+  );
+}
+
+function InlineFileViewer({ file, path, loading, onOpenDirectory }: { file?: ContainerFile; path: string; loading: boolean; onOpenDirectory: (path: string) => void }): JSX.Element {
+  const language = languageFromPath(path);
+  const parentPath = parentContainerPath(path);
+
+  return (
+    <section className="min-h-0 rounded-md border border-shell-700 bg-shell-900">
+      <div className="flex min-h-12 items-center justify-between gap-3 border-b border-shell-700 px-3 py-2">
+        <div className="min-w-0 flex-1">
+          <Breadcrumbs path={parentPath} onOpenDirectory={onOpenDirectory} />
+          <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+            <FileText className="h-3.5 w-3.5" />
+            <span>{language}</span>
+            {file ? <span>{formatBytes(file.size)}</span> : null}
+          </div>
+          <h3 className="truncate font-mono text-sm font-semibold text-slate-100">{path}</h3>
+        </div>
+        <button
+          className="flex h-9 shrink-0 items-center gap-2 rounded-md border border-shell-700 bg-shell-850 px-3 text-sm text-slate-300 transition hover:bg-shell-800"
+          onClick={() => onOpenDirectory(parentPath)}
+        >
+          <Folder className="h-4 w-4" />
+          Directory
+        </button>
+      </div>
+      <div className="scrollbar max-h-[calc(100dvh-13rem)] overflow-auto">
+        {loading && !file ? (
+          <div className="flex items-center gap-2 p-4 text-sm text-slate-500">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading file
+          </div>
+        ) : file?.kind === "image" && file.dataUrl ? (
+          <div className="flex min-h-[20rem] items-center justify-center bg-shell-950 p-4">
+            <img
+              className="max-h-[calc(100dvh-16rem)] max-w-full rounded-md object-contain"
+              src={file.dataUrl}
+              alt={path}
+            />
+          </div>
+        ) : (
+          <CodeViewer code={file?.content ?? ""} language={language} />
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TerminalOutput({ entries }: { entries: TerminalEntry[] }): JSX.Element {
+  if (entries.length === 0) {
+    return (
+      <EmptyState
+        icon={<Terminal className="h-7 w-7" />}
+        title="Container terminal"
+        body="Run commands from the terminal below. Select a file in the sidebar to view it here."
+      />
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {entries.map((entry) => (
+        <section key={entry.id} className="rounded-md border border-shell-700 bg-shell-900">
+          <div className="border-b border-shell-700 px-3 py-2 font-mono text-xs text-slate-500">
+            <span className="text-accent-300">$</span> <span className="text-slate-300">{entry.command}</span>
+            <span className="ml-2">/workspace/{entry.cwd === "." ? "" : entry.cwd}</span>
+          </div>
+          <pre className={`scrollbar max-h-96 overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-5 ${entry.isError ? "text-red-200" : "text-slate-300"}`}>
+            {entry.output || "Command executed successfully."}
+          </pre>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function QuickFilePopup(props: {
+  query: string;
+  matches: ContainerFindResult[];
+  selectedIndex: number;
+  loading: boolean;
+  onSelect: (path: string) => void;
+}): JSX.Element {
+  return (
+    <div className="absolute inset-x-0 bottom-[calc(100%+0.5rem)] z-20 overflow-hidden rounded-md border border-shell-600 bg-shell-900 shadow-panel">
+      <div className="flex items-center justify-between border-b border-shell-700 px-3 py-2 text-xs text-slate-500">
+        <span>Quick open</span>
+        {props.loading ? (
+          <span className="flex items-center gap-1">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            Searching
+          </span>
+        ) : (
+          <span>{props.matches.length} match{props.matches.length === 1 ? "" : "es"}</span>
+        )}
+      </div>
+      <div className="scrollbar max-h-72 overflow-y-auto p-1">
+        {props.matches.map((match, index) => (
+          <button
+            key={match.path}
+            className={`flex h-9 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-sm transition ${
+              index === props.selectedIndex ? "bg-accent-600/15 text-accent-200" : "text-slate-300 hover:bg-shell-850"
+            }`}
+            onMouseDown={(event) => {
+              event.preventDefault();
+              props.onSelect(match.path);
+            }}
+          >
+            {match.type === "directory" ? <Folder className="h-4 w-4 shrink-0 text-accent-400" /> : <FileText className="h-4 w-4 shrink-0 text-slate-500" />}
+            <span className="truncate font-mono">{match.path}</span>
+            <span className="ml-auto shrink-0 text-xs text-slate-600">{match.type === "directory" ? "dir" : formatBytes(match.size)}</span>
+          </button>
+        ))}
+        {!props.loading && props.matches.length === 0 ? (
+          <div className="px-3 py-6 text-sm text-slate-500">
+            {props.query ? `Press Enter to try opening "${props.query}".` : "No files found."}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function CodeViewer({ code, language }: { code: string; language: string }): JSX.Element {
+  const lines = code.split("\n");
+  const gutterWidth = String(Math.max(1, lines.length)).length;
+
+  return (
+    <pre className="min-w-max p-4 font-mono text-xs leading-5 text-slate-200">
+      {lines.map((line, index) => (
+        <div key={index} className="flex">
+          <span className="mr-4 select-none text-right text-slate-600" style={{ width: `${gutterWidth}ch` }}>{index + 1}</span>
+          <code className="whitespace-pre">{highlightLine(line, language)}</code>
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+function highlightLine(line: string, language: string): ReactNode[] {
+  const keywords = keywordSet(language);
+  const tokenPattern = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\/\/.*|#.*|\/\*.*?\*\/|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$-]*\b|[{}()[\].,;:+\-*/%=<>!?|&]+)/g;
+  const pieces: ReactNode[] = [];
+  let cursor = 0;
+
+  for (const match of line.matchAll(tokenPattern)) {
+    const token = match[0];
+    const index = match.index ?? 0;
+    if (index > cursor) pieces.push(line.slice(cursor, index));
+    pieces.push(<span key={`${index}-${token}`} className={tokenClass(token, keywords)}>{token}</span>);
+    cursor = index + token.length;
+  }
+
+  if (cursor < line.length) pieces.push(line.slice(cursor));
+  return pieces;
+}
+
+function tokenClass(token: string, keywords: Set<string>): string {
+  if (token.startsWith("//") || token.startsWith("#") || token.startsWith("/*")) return "text-slate-500";
+  if (token.startsWith("\"") || token.startsWith("'") || token.startsWith("`")) return "text-emerald-300";
+  if (/^\d/.test(token)) return "text-amberSoft-300";
+  if (keywords.has(token)) return "text-accent-300";
+  if (/^[{}()[\].,;:+\-*/%=<>!?|&]+$/.test(token)) return "text-slate-500";
+  return "text-slate-200";
+}
+
+function keywordSet(language: string): Set<string> {
+  const common = ["break", "case", "catch", "class", "const", "continue", "default", "else", "export", "extends", "false", "finally", "for", "from", "function", "if", "import", "in", "let", "new", "null", "return", "switch", "this", "throw", "true", "try", "typeof", "undefined", "while"];
+  const extra = language === "python"
+    ? ["and", "as", "def", "elif", "except", "global", "is", "lambda", "None", "not", "or", "pass", "with", "yield"]
+    : language === "rust"
+      ? ["async", "await", "enum", "impl", "match", "mod", "mut", "pub", "self", "struct", "trait", "use", "where"]
+      : language === "go"
+        ? ["chan", "defer", "func", "interface", "map", "package", "range", "select", "struct", "var"]
+        : ["async", "await", "interface", "type", "var"];
+  return new Set([...common, ...extra]);
+}
+
+function languageFromPath(path: string): string {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    c: "c",
+    cpp: "cpp",
+    css: "css",
+    go: "go",
+    html: "html",
+    java: "java",
+    js: "javascript",
+    json: "json",
+    jsx: "javascript",
+    md: "markdown",
+    mjs: "javascript",
+    py: "python",
+    rs: "rust",
+    sh: "shell",
+    sql: "sql",
+    ts: "typescript",
+    tsx: "typescript",
+    yaml: "yaml",
+    yml: "yaml",
+  };
+  return map[ext] ?? "text";
+}
+
+function imageMimeTypeFromPath(path: string): string | null {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    apng: "image/apng",
+    avif: "image/avif",
+    gif: "image/gif",
+    ico: "image/x-icon",
+    jpeg: "image/jpeg",
+    jpg: "image/jpeg",
+    png: "image/png",
+    svg: "image/svg+xml",
+    webp: "image/webp",
+  };
+  return map[ext] ?? null;
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function extractBashStdout(text: string): string {
+  if (!text.startsWith("Stdout:\n")) return text;
+  const withoutPrefix = text.slice("Stdout:\n".length);
+  const stderrIndex = withoutPrefix.indexOf("\n\nStderr:\n");
+  if (stderrIndex >= 0) return withoutPrefix.slice(0, stderrIndex);
+  const exitCodeIndex = withoutPrefix.indexOf("\n\nExit code:");
+  if (exitCodeIndex >= 0) return withoutPrefix.slice(0, exitCodeIndex);
+  return withoutPrefix;
+}
+
+function parentContainerPath(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  parts.pop();
+  return parts.length ? parts.join("/") : ".";
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function inferContainerIds(sessionId: string, displayMessages: DisplayMessage[]): string[] {
+  const containers = new Set<string>();
+  for (const message of displayMessages) {
+    for (const toolCall of message.toolCalls ?? []) {
+      if (!toolCall.name.startsWith("container_")) continue;
+      const explicitId = stringValue(toolCall.params.containerId);
+      const detailsId = detailsContainerId(toolCall.result?.details);
+      containers.add(explicitId ?? detailsId ?? defaultContainerId(sessionId));
+    }
+  }
+  return [...containers];
+}
+
+function detailsContainerId(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const containerId = (value as Record<string, unknown>).containerId;
+  return stringValue(containerId);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function defaultContainerId(sessionId: string): string {
+  return `session-${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64)}`;
+}
+
+function sessionContainers(session: SessionSummary): string[] {
+  return mergeContainers([defaultContainerId(session.id)], session.containers ?? []);
+}
+
+function mergeContainers(current: string[], next: string[]): string[] {
+  return [...new Set([...current, ...next])];
+}
+
+function isTextEntryElement(element: Element | null): boolean {
+  if (!element) return false;
+  const tagName = element.tagName.toLowerCase();
+  return tagName === "input" || tagName === "textarea" || element.getAttribute("contenteditable") === "true";
+}
+
+function filterQuickFiles(files: ContainerFindResult[], query: string): ContainerFindResult[] {
+  const normalizedQuery = normalizeQuickFilePath(query).toLowerCase();
+  const matches = normalizedQuery
+    ? files.filter((file) => quickFileMatches(file.path, normalizedQuery))
+    : files;
+
+  return matches
+    .sort((a, b) => quickFileScore(a.path, normalizedQuery) - quickFileScore(b.path, normalizedQuery))
+    .slice(0, 30);
+}
+
+function normalizeQuickFilePath(path: string): string {
+  const withoutLeadingSlash = path.trim().replace(/^\/+/, "");
+  return withoutLeadingSlash.startsWith("workspace/")
+    ? withoutLeadingSlash.slice("workspace/".length)
+    : withoutLeadingSlash;
+}
+
+function quickFileMatches(path: string, query: string): boolean {
+  const normalizedPath = path.toLowerCase();
+  if (normalizedPath.includes(query)) return true;
+
+  let queryIndex = 0;
+  for (const char of normalizedPath) {
+    if (char === query[queryIndex]) queryIndex += 1;
+    if (queryIndex === query.length) return true;
+  }
+  return false;
+}
+
+function quickFileScore(path: string, query: string): number {
+  if (!query) return path.length;
+  const normalizedPath = path.toLowerCase();
+  const index = normalizedPath.indexOf(query);
+  if (index >= 0) return index * 10 + path.length;
+  return 10_000 + path.length;
 }
 
 function PromptHistoryReveal({ promptHistory, visibleMessages }: { promptHistory: SessionResponse["promptHistory"] | null; visibleMessages: DisplayMessage[] }): JSX.Element | null {
@@ -1755,11 +2711,6 @@ function StatusPill({ status, connected }: { status: string; connected: boolean 
       <span className="max-w-40 truncate">{status}</span>
     </div>
   );
-}
-
-function SessionStatusDot({ status }: { status: SessionStatus }): JSX.Element {
-  const color = status === "processing" ? "bg-accent-500" : status === "error" ? "bg-red-400" : status === "idle" ? "bg-mint-500" : "bg-slate-500";
-  return <span title={status} className={`h-2.5 w-2.5 shrink-0 rounded-full ${color}`} />;
 }
 
 function Field({ label, children }: { label: string; children: JSX.Element }): JSX.Element {
