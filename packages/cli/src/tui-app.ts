@@ -361,6 +361,15 @@ export function updateToolCallStatusesFromEvents(
           content: block.result.text || JSON.stringify(block.result.output),
         };
       }
+      if (block.partialResult) {
+        toolCall.partialResult = {
+          role: "toolResult",
+          toolName: block.name,
+          isError: Boolean(block.partialResult.isError),
+          details: block.partialResult.output,
+          content: block.partialResult.text || JSON.stringify(block.partialResult.output),
+        };
+      }
     }
   }
 }
@@ -416,6 +425,7 @@ export interface ToolCallInfo {
   name: string;
   params: Record<string, unknown>;
   status: ToolCallStatus;
+  partialResult?: DisplayMessage;
   result?: DisplayMessage;
   isError?: boolean;
   expanded?: boolean; // For UI expand/collapse
@@ -582,6 +592,15 @@ function extractMessageToolCalls(content: string | Array<any> | undefined): Tool
       name: c.name || "tool",
       params: c.arguments || c.input || {},
       status: (c.status === "running" || c.status === "complete" || c.status === "error" ? c.status : "pending") as ToolCallStatus,
+      partialResult: c.partialResult
+        ? {
+            role: "toolResult" as const,
+            toolName: c.name || "tool",
+            isError: Boolean(c.partialResult.isError),
+            details: c.partialResult.output,
+            content: c.partialResult.text || JSON.stringify(c.partialResult.output),
+          }
+        : undefined,
       result: c.result
         ? {
             role: "toolResult" as const,
@@ -1231,6 +1250,7 @@ export class ClawflareTUIApp {
       if (isComplete) return completeBgFn;
       return inFlightBgFn;
     };
+    const visibleResult = toolResult ?? toolCall.partialResult;
 
     const statusIcon = isComplete ? "✓" :
                        hasError ? "✗" : "●";
@@ -1261,9 +1281,9 @@ export class ClawflareTUIApp {
       }
     }
 
-    // Show tool result content if available
-    if (toolResult && toolResult.content) {
-      const resultText = toolResult.content;
+    // Show final result content, or live partial output while the tool is running.
+    if (visibleResult && visibleResult.content) {
+      const resultText = visibleResult.content;
       const contentLines = getLineCount(resultText);
       const shouldCollapse = contentLines > termHeight;
       const isExpanded = toolCall.expanded ?? false;
@@ -1412,7 +1432,7 @@ export class ClawflareTUIApp {
     // Don't allow new messages while loading
     if (this.isLoading) {
       this.editor.setText(displayContent);
-      this.setStatus("Still processing previous prompt (Esc to abort)", "yellow");
+      this.setStatus("Still processing previous prompt (Esc to stop)", "yellow");
       return;
     }
 
@@ -1430,7 +1450,7 @@ export class ClawflareTUIApp {
     this.agentEvents = [];
     this.assistantPartialState = { active: false };
     this.renderMessages();
-    this.setStatus("Submitting... (Esc to abort)", "yellow");
+    this.setStatus("Submitting... (Esc to stop)", "yellow");
 
     // Create abort controller
     this.abortController = new AbortController();
@@ -1570,7 +1590,7 @@ export class ClawflareTUIApp {
 
   private async beginOpenSessionSelection(): Promise<boolean> {
     if (this.isLoading) {
-      throw new Error("Cannot open a session while an operation is running. Press Esc to abort first.");
+      throw new Error("Cannot open a session while an operation is running. Press Esc to stop first.");
     }
 
     const response = await this.client.listSessions({ status: "all" });
@@ -1613,7 +1633,7 @@ export class ClawflareTUIApp {
 
   private async openSession(sessionIdInput: string): Promise<void> {
     if (this.isLoading) {
-      throw new Error("Cannot open a session while an operation is running. Press Esc to abort first.");
+      throw new Error("Cannot open a session while an operation is running. Press Esc to stop first.");
     }
 
     const sessionId = await this.resolveSessionIdForOpen(sessionIdInput);
@@ -1762,17 +1782,17 @@ export class ClawflareTUIApp {
     if (this.abortController && this.isLoading) {
       const activeSessionId = this.sessionId;
       if (activeSessionId) {
-        void this.client.abortSession(activeSessionId).catch((error) => {
-          this.setStatus(`Abort request failed: ${error instanceof Error ? error.message : String(error)}`, "red");
+        void this.client.stopSession(activeSessionId).catch((error) => {
+          this.setStatus(`Stop request failed: ${error instanceof Error ? error.message : String(error)}`, "red");
         });
       }
       this.abortController.abort();
-      this.messages.push({ role: "assistant", content: "⚠ Operation aborted by user" });
+      this.messages.push({ role: "assistant", content: "Operation stopped by user" });
       this.isLoading = false;
       this.abortController = null;
       this.agentEvents = [];
       this.renderMessages();
-      this.setStatus("Aborted", "yellow");
+      this.setStatus("Stopped", "yellow");
     }
   }
 
@@ -2100,7 +2120,7 @@ export class ClawflareTUIApp {
 
 Shortcuts:
 Ctrl+C or Ctrl+D - Quit
-Esc - Abort current operation
+Esc - Stop current operation
 ↑/↓ - Select message (or navigate autocomplete)
 Ctrl+O - Expand/collapse selected message`,
           });

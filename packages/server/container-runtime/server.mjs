@@ -157,7 +157,9 @@ async function executeBash(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, m
 function appendCommandOutput(record, stream, value) {
   record[stream] += value;
   if (record[stream].length > MAX_COMMAND_BUFFER_CHARS) {
-    record[stream] = record[stream].slice(-MAX_COMMAND_BUFFER_CHARS);
+    const droppedChars = record[stream].length - MAX_COMMAND_BUFFER_CHARS;
+    record[`${stream}Start`] += droppedChars;
+    record[stream] = record[stream].slice(droppedChars);
     record.outputBufferTruncated = true;
   }
 }
@@ -183,8 +185,23 @@ function formatCommandOutput(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) 
   };
 }
 
-function commandResult(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
+function streamDelta(record, stream, cursor) {
+  const buffer = record[stream];
+  const start = record[`${stream}Start`];
+  const end = start + buffer.length;
+  const requestedCursor = typeof cursor === "number" && Number.isFinite(cursor) ? Math.max(0, cursor) : start;
+  const effectiveCursor = Math.max(start, Math.min(requestedCursor, end));
+  return {
+    delta: buffer.slice(effectiveCursor - start),
+    cursor: end,
+    truncated: requestedCursor < start,
+  };
+}
+
+function commandResult(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS, cursors = {}) {
   const output = formatCommandOutput(record, maxOutputChars);
+  const stdoutDelta = streamDelta(record, "stdout", cursors.stdoutCursor);
+  const stderrDelta = streamDelta(record, "stderr", cursors.stderrCursor);
   const durationMs = (record.finishedAt || Date.now()) - record.startedAt;
   const isRunning = record.state === "running";
   const ok = isRunning ? true : record.exitCode === 0 && !record.killed;
@@ -197,6 +214,12 @@ function commandResult(record, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS) {
     signal: isRunning ? null : record.signal,
     stdout: output.stdout,
     stderr: output.stderr,
+    stdoutDelta: stdoutDelta.delta,
+    stderrDelta: stderrDelta.delta,
+    stdoutCursor: stdoutDelta.cursor,
+    stderrCursor: stderrDelta.cursor,
+    stdoutDeltaTruncated: stdoutDelta.truncated,
+    stderrDeltaTruncated: stderrDelta.truncated,
     durationMs,
     truncated: output.truncated,
     killed: record.killed,
@@ -220,6 +243,8 @@ function startBashCommand(command, cwd = ".", timeoutMs = DEFAULT_TIMEOUT_MS, ma
     maxOutputChars,
     stdout: "",
     stderr: "",
+    stdoutStart: 0,
+    stderrStart: 0,
     outputBufferTruncated: false,
     killed: false,
     exitCode: null,
@@ -618,13 +643,18 @@ const handlers = {
 
   "/bash/status": async (req) => {
     const body = await parseBody(req);
-    const { commandId, maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS } = body;
+    const {
+      commandId,
+      maxOutputChars = DEFAULT_MAX_OUTPUT_CHARS,
+      stdoutCursor,
+      stderrCursor,
+    } = body;
 
     if (!commandId || typeof commandId !== "string") {
       throw new Error("commandId is required");
     }
 
-    return commandResult(getCommand(commandId), maxOutputChars);
+    return commandResult(getCommand(commandId), maxOutputChars, { stdoutCursor, stderrCursor });
   },
 
   "/bash/cancel": async (req) => {

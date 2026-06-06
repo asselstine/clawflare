@@ -87,6 +87,46 @@ describe("updateToolCallStatusesFromEvents", () => {
 
     expect(toolCalls[0]?.status).toBe("error");
   });
+
+  it("stores partial tool results without completing the tool call", () => {
+    const toolCalls = [{
+      id: "tool-1",
+      name: "container_bash",
+      params: {},
+      status: "running" as const,
+    }];
+
+    updateToolCallStatusesFromEvents(toolCalls, [{
+      type: "message.updated",
+      message: {
+        id: "assistant-1",
+        sessionId: "session-1",
+        sequence: 1,
+        role: "assistant",
+        status: "complete",
+        content: [{
+          type: "tool_call",
+          id: "tool-1",
+          name: "container_bash",
+          input: {},
+          status: "running",
+          partialResult: { output: {}, text: "Stdout:\nhello", updatedAt: 1 },
+        }],
+        createdAt: 1,
+        updatedAt: 1,
+      },
+      timestamp: Date.now(),
+      sequence: 1,
+    } as never]);
+
+    expect(toolCalls[0]?.status).toBe("running");
+    expect(toolCalls[0]?.result).toBeUndefined();
+    expect(toolCalls[0]?.partialResult?.content).toBe("Stdout:\nhello");
+    expect(getToolCallVisualState(toolCalls[0]!.status, toolCalls[0]?.result)).toEqual({
+      hasError: false,
+      isComplete: false,
+    });
+  });
 });
 
 describe("getActiveToolCallStatusMessage", () => {

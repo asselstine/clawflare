@@ -21,12 +21,20 @@ export interface ToolResult {
   completedAt: number;
 }
 
+export interface ToolPartialResult {
+  output: unknown;
+  text?: string;
+  isError?: boolean;
+  updatedAt: number;
+}
+
 export interface ToolCallContentBlock {
   type: "tool_call";
   id: string;
   name: string;
   input: unknown;
   status: ToolCallStatus;
+  partialResult?: ToolPartialResult;
   result?: ToolResult;
 }
 

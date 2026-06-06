@@ -18,6 +18,8 @@ import {
   LogIn,
   LogOut,
   MessageSquare,
+  Mic,
+  MicOff,
   Monitor,
   PanelLeftClose,
   PanelLeftOpen,
@@ -63,6 +65,69 @@ import { loadSettings, saveSettings, type AppSettings } from "./lib/settings";
 type AppPage = "chat" | "settings";
 type SettingsSection = "providers" | "egress" | "models" | "account" | "data";
 type LoginStatus = "idle" | "starting" | "waiting" | "approved" | "error";
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+type SpeechRecognitionErrorCode =
+  | "aborted"
+  | "audio-capture"
+  | "bad-grammar"
+  | "language-not-supported"
+  | "network"
+  | "no-speech"
+  | "not-allowed"
+  | "phrases-not-supported"
+  | "service-not-allowed";
+
+interface SpeechRecognitionAlternativeLike {
+  transcript: string;
+}
+
+interface SpeechRecognitionResultLike {
+  readonly isFinal: boolean;
+  readonly length: number;
+  item(index: number): SpeechRecognitionAlternativeLike;
+  [index: number]: SpeechRecognitionAlternativeLike;
+}
+
+interface SpeechRecognitionResultListLike {
+  readonly length: number;
+  item(index: number): SpeechRecognitionResultLike;
+  [index: number]: SpeechRecognitionResultLike;
+}
+
+interface SpeechRecognitionEventLike extends Event {
+  readonly resultIndex: number;
+  readonly results: SpeechRecognitionResultListLike;
+}
+
+interface SpeechRecognitionErrorEventLike extends Event {
+  readonly error: SpeechRecognitionErrorCode;
+  readonly message: string;
+}
+
+interface SpeechRecognitionLike extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onend: ((event: Event) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onstart: ((event: Event) => void) | null;
+  abort(): void;
+  start(): void;
+  stop(): void;
+}
+
+interface SpeechRecognitionWindow extends Window {
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
+}
+
+interface BraveNavigator extends Navigator {
+  brave?: {
+    isBrave?: () => Promise<boolean>;
+  };
+}
 
 interface SelectedContainer {
   sessionId: string;
@@ -266,6 +331,68 @@ function updateBrowserRootPath(mode: "push" | "replace" = "push"): void {
   window.history[mode === "replace" ? "replaceState" : "pushState"]({}, "", "/");
 }
 
+function getSpeechRecognitionConstructor(): SpeechRecognitionConstructor | null {
+  const speechWindow = window as SpeechRecognitionWindow;
+  return speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition ?? null;
+}
+
+async function isSpeechRecognitionUsable(): Promise<boolean> {
+  if (!getSpeechRecognitionConstructor()) return false;
+  return !(await isBraveBrowser());
+}
+
+async function isBraveBrowser(): Promise<boolean> {
+  const brave = (navigator as BraveNavigator).brave;
+  if (!brave?.isBrave) return false;
+  try {
+    return await brave.isBrave();
+  } catch {
+    return false;
+  }
+}
+
+function appendSpeechTranscript(basePrompt: string, transcript: string): string {
+  if (!transcript) return basePrompt;
+  const trimmedBase = basePrompt.trimEnd();
+  if (!trimmedBase) return transcript;
+  return `${trimmedBase}${/[ \n]$/.test(basePrompt) ? "" : " "}${transcript}`;
+}
+
+function speechRecognitionResultAt(results: SpeechRecognitionResultListLike, index: number): SpeechRecognitionResultLike | undefined {
+  return results[index] ?? results.item(index);
+}
+
+function speechRecognitionAlternativeAt(result: SpeechRecognitionResultLike, index: number): SpeechRecognitionAlternativeLike | undefined {
+  return result[index] ?? result.item(index);
+}
+
+function speechTranscriptFromEvent(event: SpeechRecognitionEventLike): string {
+  let transcript = "";
+  for (let index = 0; index < event.results.length; index += 1) {
+    const result = speechRecognitionResultAt(event.results, index);
+    if (!result) continue;
+    transcript += speechRecognitionAlternativeAt(result, 0)?.transcript ?? "";
+  }
+  return transcript.trim();
+}
+
+function formatSpeechRecognitionError(event: SpeechRecognitionErrorEventLike): string {
+  if (event.message) return event.message;
+  switch (event.error) {
+    case "audio-capture":
+      return "No microphone was found.";
+    case "network":
+      return "Browser speech recognition service is unavailable.";
+    case "no-speech":
+      return "No speech detected.";
+    case "not-allowed":
+    case "service-not-allowed":
+      return "Microphone access was blocked.";
+    default:
+      return "Voice input stopped.";
+  }
+}
+
 const providerFormSchema = z.object({
   provider: z.string().min(1),
   modelName: z.string().min(1),
@@ -319,10 +446,15 @@ function App(): JSX.Element {
   const [egressConfig, setEgressConfig] = useState<Record<string, string>>({});
   const [egressEnabled, setEgressEnabled] = useState(true);
   const [composerRows, setComposerRows] = useState(2);
+  const [speechRecognitionAvailable, setSpeechRecognitionAvailable] = useState(false);
+  const [isRecordingPrompt, setIsRecordingPrompt] = useState(false);
   const abortController = useRef<AbortController | null>(null);
   const runningSessionIdRef = useRef<string | null>(null);
   const abortingSessionIdRef = useRef<string | null>(null);
   const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const promptRef = useRef(prompt);
+  const speechRecognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const speechPromptBaseRef = useRef("");
   const quickPromptInputRef = useRef<HTMLInputElement | null>(null);
   const messageScrollerRef = useRef<HTMLElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
@@ -346,6 +478,22 @@ function App(): JSX.Element {
   useEffect(() => {
     const timer = window.setInterval(() => setContainerClock(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    promptRef.current = prompt;
+  }, [prompt]);
+
+  useEffect(() => {
+    let active = true;
+    void isSpeechRecognitionUsable().then((usable) => {
+      if (active) setSpeechRecognitionAvailable(usable);
+    });
+    return () => {
+      active = false;
+      speechRecognitionRef.current?.abort();
+      speechRecognitionRef.current = null;
+    };
   }, []);
 
   const currentUser = useQuery({
@@ -962,6 +1110,75 @@ function App(): JSX.Element {
     });
   }
 
+  function setPromptWithRows(nextPrompt: string): void {
+    setPrompt(nextPrompt);
+    setComposerRows(Math.min(8, Math.max(2, nextPrompt.split("\n").length)));
+  }
+
+  function stopPromptRecording(): void {
+    speechRecognitionRef.current?.stop();
+  }
+
+  async function togglePromptRecording(): Promise<void> {
+    if (isRecordingPrompt) {
+      stopPromptRecording();
+      return;
+    }
+
+    if (!(await isSpeechRecognitionUsable())) {
+      setSpeechRecognitionAvailable(false);
+      showError(new Error("Voice input is not available in this browser."));
+      return;
+    }
+
+    const Recognition = getSpeechRecognitionConstructor();
+    if (!Recognition) {
+      setSpeechRecognitionAvailable(false);
+      showError(new Error("Voice input is not available in this browser."));
+      return;
+    }
+
+    const recognition = new Recognition();
+    speechRecognitionRef.current = recognition;
+    speechPromptBaseRef.current = prompt;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onstart = () => {
+      setIsRecordingPrompt(true);
+      setError(null);
+      setStatusText("Listening");
+    };
+    recognition.onresult = (event) => {
+      setPromptWithRows(appendSpeechTranscript(speechPromptBaseRef.current, speechTranscriptFromEvent(event)));
+    };
+    recognition.onerror = (event) => {
+      const message = formatSpeechRecognitionError(event);
+      setStatusText(message);
+      if (event.error === "network" || event.error === "service-not-allowed") {
+        setSpeechRecognitionAvailable(false);
+      }
+      if (event.error !== "no-speech" && event.error !== "aborted") {
+        setError(message);
+      }
+    };
+    recognition.onend = () => {
+      if (speechRecognitionRef.current === recognition) {
+        speechRecognitionRef.current = null;
+      }
+      setIsRecordingPrompt(false);
+      focusPrompt();
+    };
+
+    try {
+      recognition.start();
+    } catch (cause) {
+      speechRecognitionRef.current = null;
+      setIsRecordingPrompt(false);
+      showError(cause);
+    }
+  }
+
   function openQuickPrompt(): void {
     setQuickPromptOpen(true);
     setQuickPromptQuery("");
@@ -1518,6 +1735,7 @@ function App(): JSX.Element {
   }
 
   async function submitPromptContent(promptContent: string): Promise<void> {
+    if (isRecordingPrompt) stopPromptRecording();
     const content = promptContent.trim();
     if (!content) return;
 
@@ -1534,10 +1752,9 @@ function App(): JSX.Element {
 
     const optimistic: DisplayMessage = { role: "user", content };
     const currentSessionId = sessionId;
+    let promptSubmitted = false;
 
     shouldStickToBottomRef.current = true;
-    setPrompt("");
-    setComposerRows(2);
     setIsRunning(true);
     setError(null);
     setStatusText("Submitting");
@@ -1550,6 +1767,10 @@ function App(): JSX.Element {
         content,
         sessionId: currentSessionId || undefined,
       });
+      promptSubmitted = true;
+      if (promptRef.current === promptContent) {
+        setPromptWithRows("");
+      }
       setSessionId(submitted.sessionId);
       const submittedName = submitted.name;
       if (submittedName) {
@@ -1631,7 +1852,9 @@ function App(): JSX.Element {
         } else {
           setStatusText("Error");
         }
-        setPrompt((current) => current || content);
+        if (!promptSubmitted && !promptRef.current) {
+          setPromptWithRows(promptContent);
+        }
       }
     } finally {
       setIsRunning(false);
@@ -1954,8 +2177,7 @@ function App(): JSX.Element {
                     placeholder={checkingProviderSetup ? "Checking workspace setup..." : needsProviderSetup ? "Configure a provider before chatting" : activeSessionIsStopping ? "Stopping agent..." : composerBusy ? "Agent is running..." : "Message Clawflare or type /help"}
                     disabled={!hasUsableAuth || checkingProviderSetup || needsProviderSetup}
                     onChange={(event) => {
-                      setPrompt(event.target.value);
-                      setComposerRows(Math.min(8, Math.max(2, event.target.value.split("\n").length)));
+                      setPromptWithRows(event.target.value);
                     }}
                     onKeyDown={(event) => {
                       if (event.key === "Escape") {
@@ -1970,6 +2192,22 @@ function App(): JSX.Element {
                       }
                     }}
                   />
+                  {speechRecognitionAvailable ? (
+                    <button
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-md border transition ${
+                        isRecordingPrompt
+                          ? "border-red-400 bg-red-500/15 text-red-200 hover:bg-red-500/25"
+                          : "border-shell-600 bg-shell-800 text-slate-200 hover:border-shell-500 hover:bg-shell-700"
+                      } disabled:bg-shell-800 disabled:text-slate-500`}
+                      disabled={!hasUsableAuth || checkingProviderSetup || needsProviderSetup || composerBusy}
+                      title={isRecordingPrompt ? "Stop recording" : "Record voice prompt"}
+                      aria-label={isRecordingPrompt ? "Stop recording" : "Record voice prompt"}
+                      aria-pressed={isRecordingPrompt}
+                      onClick={() => void togglePromptRecording()}
+                    >
+                      {isRecordingPrompt ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                    </button>
+                  ) : null}
                   {composerBusy ? (
                     <IconButton title="Abort" onClick={abortRun}>
                       {activeSessionIsStopping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Square className="h-4 w-4" />}

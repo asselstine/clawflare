@@ -6,6 +6,7 @@ import type {
   MessageStatus,
   SessionDelta,
   ToolCallContentBlock,
+  ToolPartialResult,
   ToolResult,
 } from "../types.js";
 import {
@@ -68,6 +69,7 @@ async function projectAgentEvent(
     return updateToolCall(messagesRepo, sessionId, event.toolCallId, timestamp, (block) => ({
       ...block,
       status: "running",
+      partialResult: mergeToolPartialResult(block.partialResult, event.partialResult, timestamp),
     }));
   }
 
@@ -75,6 +77,7 @@ async function projectAgentEvent(
     return updateToolCall(messagesRepo, sessionId, event.toolCallId, timestamp, (block) => ({
       ...block,
       status: event.isError ? "error" : "complete",
+      partialResult: undefined,
       result: toolResultFromAgentResult(event.result, Boolean(event.isError), timestamp),
     }));
   }
@@ -211,9 +214,65 @@ function mergeToolState(next: MessageContentBlock[], previous: MessageContentBlo
     return {
       ...block,
       status: previousBlock.status,
+      partialResult: previousBlock.partialResult,
       result: previousBlock.result,
     };
   });
+}
+
+function mergeToolPartialResult(
+  previous: ToolPartialResult | undefined,
+  result: unknown,
+  timestamp: number,
+): ToolPartialResult | undefined {
+  const next = toolPartialResultFromAgentResult(result, timestamp);
+  if (!next) return previous;
+
+  return {
+    ...next,
+    text: appendPartialText(previous?.text, next.text),
+  };
+}
+
+function appendPartialText(previous: string | undefined, next: string | undefined): string | undefined {
+  if (!previous) return next;
+  if (!next) return previous;
+  return `${previous}\n\n${next}`;
+}
+
+function toolPartialResultFromAgentResult(result: unknown, timestamp: number): ToolPartialResult | undefined {
+  if (!isRecord(result)) return undefined;
+  const details = isRecord(result.details) ? result.details : undefined;
+  const outputDelta = typeof details?.outputDelta === "string" ? details.outputDelta : undefined;
+  const text = outputDelta ?? formatStreamDeltas(details);
+  if (!text) return undefined;
+
+  return {
+    output: details ?? result,
+    text,
+    isError: details?.ok === false,
+    updatedAt: timestamp,
+  };
+}
+
+function formatStreamDeltas(details: Record<string, unknown> | undefined): string | undefined {
+  if (!details) return undefined;
+  const parts: string[] = [];
+
+  if (details.stdoutDeltaTruncated === true) {
+    parts.push("[Earlier stdout was truncated before it could be streamed.]");
+  }
+  if (typeof details.stdoutDelta === "string" && details.stdoutDelta.length > 0) {
+    parts.push(`Stdout:\n${details.stdoutDelta}`);
+  }
+  if (details.stderrDeltaTruncated === true) {
+    parts.push("[Earlier stderr was truncated before it could be streamed.]");
+  }
+  if (typeof details.stderrDelta === "string" && details.stderrDelta.length > 0) {
+    parts.push(`Stderr:\n${details.stderrDelta}`);
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 function toolResultFromAgentResult(result: unknown, isError: boolean, timestamp: number): ToolResult {

@@ -380,4 +380,38 @@ describe("AgentClient", () => {
       expect(result.destroyedContainers).toEqual(["container-id"]);
     });
   });
+
+  describe("stopSession", () => {
+    it("should stop a session via POST /v1/session/:id/stop", async () => {
+      const mockFetch = vi.fn().mockResolvedValue(
+        createMockResponse({
+          ok: true,
+          sessionId: "session-id",
+          workspaceId: "workspace-id",
+          status: "idle",
+          stopped: true,
+          stoppedToolCallIds: ["tool-1"],
+          toolStopErrors: [],
+        })
+      );
+
+      global.fetch = mockFetch;
+
+      const client = new AgentClient("https://localhost", "test-token");
+      const result = await client.stopSession("session-id");
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        "https://localhost/v1/session/session-id/stop",
+        expect.objectContaining({
+          method: "POST",
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-token",
+            "Content-Type": "application/json",
+          }),
+        })
+      );
+      expect(result.stopped).toBe(true);
+      expect(result.stoppedToolCallIds).toEqual(["tool-1"]);
+    });
+  });
 });

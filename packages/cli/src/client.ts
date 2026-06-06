@@ -274,6 +274,27 @@ export class AgentClient {
     );
   }
 
+  async stopSession(sessionId: string): Promise<{
+    ok: boolean;
+    sessionId: string;
+    status: string;
+    stopped: boolean;
+    stoppedToolCallIds?: string[];
+    toolStopErrors?: string[];
+  }> {
+    return this.requestJson<{
+      ok: boolean;
+      sessionId: string;
+      status: string;
+      stopped: boolean;
+      stoppedToolCallIds?: string[];
+      toolStopErrors?: string[];
+    }>(
+      `/v1/session/${sessionId}/stop`,
+      { method: "POST" }
+    );
+  }
+
   async abortSession(sessionId: string): Promise<{ ok: boolean; sessionId: string; status: string; aborted: boolean }> {
     return this.requestJson<{ ok: boolean; sessionId: string; status: string; aborted: boolean }>(
       `/v1/session/${sessionId}/abort`,

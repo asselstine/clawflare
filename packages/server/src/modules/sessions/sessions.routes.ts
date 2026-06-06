@@ -12,7 +12,7 @@ import {
   type SessionListFilter,
   type SessionMetadataState,
 } from "../../data/index.js";
-import { destroyContainer } from "../tools/container/client.js";
+import { containerBashCancel, destroyContainer } from "../tools/container/client.js";
 import { badRequest, json, notFound, serverError } from "../../http/responses.js";
 import type { RequestContext } from "../../http/request-context.js";
 import { resolveModelForNewSession } from "../models/models.service.js";
@@ -21,6 +21,10 @@ import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
 import type { AgentMessage, DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
 import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
+import { projectAndAppendAgentEvents } from "../../runtime/message-projection.js";
+import type { AgentEvent, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import type { AgentSessionState, AgentToolCallState, AgentTurnState } from "../../runtime/agent.js";
 
 export const sessionRoutes = new Hono<AppBindings>();
 export const sessionsRoutes = new Hono<AppBindings>();
@@ -51,6 +55,9 @@ sessionRoutes.post("/:id/close", (c) =>
   handleCloseSession(c.req.param("id"), c.env, c.get("requestContext")!)
 );
 sessionRoutes.post("/:id/abort", (c) =>
+  handleAbortSession(c.req.param("id"), c.env, c.get("requestContext")!)
+);
+sessionRoutes.post("/:id/stop", (c) =>
   handleAbortSession(c.req.param("id"), c.env, c.get("requestContext")!)
 );
 sessionRoutes.post("/:id/kill", (c) =>
@@ -244,6 +251,135 @@ function promptHistoryFromRuntimeSession(value: unknown): SessionResponse["promp
     systemPrompt: value.systemPrompt,
     messages: value.messages as AgentMessage[],
   };
+}
+
+function isAgentSessionState(value: unknown): value is AgentSessionState {
+  return isRecord(value) &&
+    typeof value.id === "string" &&
+    Array.isArray(value.messages) &&
+    Array.isArray(value.turns) &&
+    isRecord(value.toolCalls) &&
+    typeof value.status === "string";
+}
+
+function latestTurn(session: AgentSessionState): AgentTurnState | undefined {
+  return session.turns.at(-1);
+}
+
+function containerBashAsyncState(value: unknown): {
+  containerId: string;
+  commandId: string;
+} | undefined {
+  if (!isRecord(value) || value.kind !== "container_bash") return undefined;
+  if (typeof value.containerId !== "string" || typeof value.commandId !== "string") return undefined;
+  return { containerId: value.containerId, commandId: value.commandId };
+}
+
+function stoppedToolResult(toolCall: AgentToolCallState): AgentToolResult<unknown> {
+  return {
+    content: [{ type: "text", text: "Tool stopped by user." }],
+    details: {
+      ok: false,
+      stopped: true,
+      reason: "user_stop",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+    },
+  };
+}
+
+function stoppedToolResultMessage(toolCall: AgentToolCallState, result: AgentToolResult<unknown>): ToolResultMessage {
+  return {
+    role: "toolResult",
+    toolCallId: toolCall.id,
+    toolName: toolCall.name,
+    content: result.content,
+    details: result.details,
+    isError: true,
+    timestamp: Date.now(),
+  };
+}
+
+async function stopRunningWorkflowTools(
+  env: Env,
+  runtime: SessionRuntimeRepository,
+  events: SessionEventRepository,
+  messages: SessionMessageRepository,
+  sessionId: string,
+  workspaceId: string,
+): Promise<{ stoppedToolCallIds: string[]; errors: string[] }> {
+  const stored = await runtime.getWorkflowSession(sessionId);
+  if (!isAgentSessionState(stored)) return { stoppedToolCallIds: [], errors: [] };
+
+  const stoppable = Object.values(stored.toolCalls)
+    .filter((toolCall): toolCall is AgentToolCallState => Boolean(toolCall))
+    .filter((toolCall) => toolCall.status === "pending" || toolCall.status === "running");
+  if (stoppable.length === 0) return { stoppedToolCallIds: [], errors: [] };
+
+  const errors: string[] = [];
+  for (const toolCall of stoppable) {
+    const asyncState = containerBashAsyncState(toolCall.asyncState);
+    if (!asyncState || toolCall.status !== "running") continue;
+    try {
+      await containerBashCancel(env, asyncState.containerId, asyncState.commandId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(`${toolCall.id}: ${message}`);
+      logger.warn("Failed to cancel running container bash command during session stop", {
+        sessionId,
+        toolCallId: toolCall.id,
+        containerId: asyncState.containerId,
+        commandId: asyncState.commandId,
+        error: message,
+      });
+    }
+  }
+
+  const stoppedIds = new Set(stoppable.map((toolCall) => toolCall.id));
+  const stoppedResults = new Map(stoppable.map((toolCall) => [toolCall.id, stoppedToolResult(toolCall)]));
+  const currentTurn = latestTurn(stored);
+  const stoppedMessages = stoppable
+    .filter((toolCall) => !stored.messages.some((message) =>
+      isRecord(message) && message.role === "toolResult" && message.toolCallId === toolCall.id
+    ))
+    .map((toolCall) => stoppedToolResultMessage(toolCall, stoppedResults.get(toolCall.id)!));
+
+  const stoppedSession: AgentSessionState = {
+    ...stored,
+    updatedAt: Date.now(),
+    status: "idle",
+    messages: [...stored.messages, ...stoppedMessages],
+    toolCalls: Object.fromEntries(Object.entries(stored.toolCalls).map(([id, toolCall]) => {
+      if (!stoppedIds.has(id)) return [id, toolCall];
+      return [id, {
+        ...toolCall,
+        status: "error",
+        isError: true,
+        result: stoppedResults.get(id),
+        asyncState: undefined,
+      }];
+    })),
+    turns: currentTurn
+      ? stored.turns.map((turn) => turn.id === currentTurn.id
+        ? {
+            ...turn,
+            status: "error",
+            toolResultIds: [...new Set([...turn.toolResultIds, ...stoppable.map((toolCall) => toolCall.id)])],
+          }
+        : turn)
+      : stored.turns,
+  };
+
+  await runtime.saveWorkflowSession(sessionId, stoppedSession);
+  await projectAndAppendAgentEvents(events, messages, sessionId, stoppable.map((toolCall): AgentEvent => ({
+    type: "tool_execution_end",
+    toolCallId: toolCall.id,
+    toolName: toolCall.name,
+    result: stoppedResults.get(toolCall.id)!,
+    isError: true,
+  } as AgentEvent)), { workspaceId });
+
+  return { stoppedToolCallIds: stoppable.map((toolCall) => toolCall.id), errors };
 }
 
 async function buildSessionResponse(
@@ -794,6 +930,8 @@ export async function handleAbortSession(
 ): Promise<Response> {
   const sessions = new SessionRepository(env.DB);
   const runtime = new SessionRuntimeRepository(env.DB);
+  const events = new SessionEventRepository(env.DB);
+  const messages = new SessionMessageRepository(env.DB);
   const runs = new SessionRunRepository(env.DB);
   const effectiveWorkspaceId = requestContext.workspace.id;
 
@@ -814,6 +952,14 @@ export async function handleAbortSession(
     }
 
     await runs.cancel(activeRun.id);
+    const stoppedTools = await stopRunningWorkflowTools(
+      env,
+      runtime,
+      events,
+      messages,
+      sessionId,
+      effectiveWorkspaceId,
+    );
     await sessions.save({
       ...session,
       status: "idle",
@@ -821,7 +967,16 @@ export async function handleAbortSession(
       errorMessage: undefined,
     });
     await runtime.setActive(sessionId, false);
-    return json({ ok: true, sessionId, status: "idle", aborted: true, workspaceId: effectiveWorkspaceId });
+    return json({
+      ok: stoppedTools.errors.length === 0,
+      sessionId,
+      status: "idle",
+      aborted: true,
+      stopped: true,
+      stoppedToolCallIds: stoppedTools.stoppedToolCallIds,
+      toolStopErrors: stoppedTools.errors,
+      workspaceId: effectiveWorkspaceId,
+    });
   } catch (error) {
     logger.error("Session abort failed", error, {
       handler: "handleAbortSession",

@@ -21,6 +21,12 @@ export interface BashResult {
   signal: string | null;
   stdout: string;
   stderr: string;
+  stdoutDelta?: string;
+  stderrDelta?: string;
+  stdoutCursor?: number;
+  stderrCursor?: number;
+  stdoutDeltaTruncated?: boolean;
+  stderrDeltaTruncated?: boolean;
   durationMs: number;
   truncated: boolean;
   killed: boolean;
@@ -445,6 +451,8 @@ export async function containerBashStatus(
   containerId: string,
   commandId: string,
   maxOutputChars?: number,
+  stdoutCursor?: number,
+  stderrCursor?: number,
   signal?: AbortSignal
 ): Promise<BashResult> {
   const result = await callContainerRuntime(
@@ -454,6 +462,8 @@ export async function containerBashStatus(
     {
       commandId,
       maxOutputChars: maxOutputChars || 8000,
+      stdoutCursor,
+      stderrCursor,
     },
     signal,
     { allowRuntimeFailure: true }

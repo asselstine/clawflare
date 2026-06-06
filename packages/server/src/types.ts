@@ -16,6 +16,7 @@ export type {
   TextContentBlock,
   ToolCallContentBlock,
   ToolCallStatus,
+  ToolPartialResult,
   ToolResult,
   ChatRequest,
   ChatSubmittedResponse,

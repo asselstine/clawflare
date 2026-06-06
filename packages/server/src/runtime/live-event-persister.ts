@@ -7,7 +7,6 @@ type AppendAgentEvents = (events: AgentEvent[]) => Promise<void>;
 
 function getLiveUpdateKey(event: AgentEvent): string | undefined {
   if (event.type === "message_update") return "message_update";
-  if (event.type === "tool_execution_update") return `tool_execution_update:${event.toolCallId}`;
   return undefined;
 }
 

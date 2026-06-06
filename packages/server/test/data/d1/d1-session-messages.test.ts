@@ -137,4 +137,84 @@ describe("D1 Session Message Projection", () => {
       await dispose();
     }
   });
+
+  it("projects partial tool output onto the running tool call", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const events = new SessionEventRepository(db);
+      const messages = new SessionMessageRepository(db);
+
+      const assistantMessage = {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-1", name: "container_bash", arguments: { command: "pnpm test" } },
+        ],
+        timestamp: 1,
+      };
+
+      await projectAndAppendAgentEvents(events, messages, "session-1", [
+        { type: "message_start", message: assistantMessage },
+        { type: "message_end", message: assistantMessage },
+        { type: "tool_execution_start", toolCallId: "call-1", toolName: "container_bash", args: { command: "pnpm test" } },
+        {
+          type: "tool_execution_update",
+          toolCallId: "call-1",
+          toolName: "container_bash",
+          args: { command: "pnpm test" },
+          partialResult: {
+            content: [{ type: "text", text: "ignored status text" }],
+            details: { ok: true, outputDelta: "Stdout:\nfirst" },
+          },
+        },
+        {
+          type: "tool_execution_update",
+          toolCallId: "call-1",
+          toolName: "container_bash",
+          args: { command: "pnpm test" },
+          partialResult: {
+            content: [{ type: "text", text: "ignored status text" }],
+            details: { ok: true, outputDelta: "Stdout:\nsecond" },
+          },
+        },
+      ] as AgentEvent[], { workspaceId: DEFAULT_WORKSPACE_ID });
+
+      let storedMessages = await messages.list("session-1", { limit: 100 });
+      let assistant = storedMessages.messages.find((message) => message.role === "assistant");
+      expect(assistant?.content).toEqual([
+        {
+          type: "tool_call",
+          id: "call-1",
+          name: "container_bash",
+          input: { command: "pnpm test" },
+          status: "running",
+          partialResult: expect.objectContaining({ text: "Stdout:\nfirst\n\nStdout:\nsecond" }),
+        },
+      ]);
+
+      await projectAndAppendAgentEvents(events, messages, "session-1", [{
+        type: "tool_execution_end",
+        toolCallId: "call-1",
+        toolName: "container_bash",
+        result: { content: [{ type: "text", text: "done" }], details: { ok: true } },
+        isError: false,
+      }] as AgentEvent[], { workspaceId: DEFAULT_WORKSPACE_ID });
+
+      storedMessages = await messages.list("session-1", { limit: 100 });
+      assistant = storedMessages.messages.find((message) => message.role === "assistant");
+      expect(assistant?.content).toEqual([
+        {
+          type: "tool_call",
+          id: "call-1",
+          name: "container_bash",
+          input: { command: "pnpm test" },
+          status: "complete",
+          result: expect.objectContaining({ text: "done", isError: false }),
+        },
+      ]);
+    } finally {
+      await dispose();
+    }
+  });
 });

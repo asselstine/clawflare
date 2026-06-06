@@ -64,6 +64,8 @@ interface ContainerBashAsyncState {
   timeoutMs?: number;
   maxOutputChars?: number;
   startedAt: number;
+  stdoutCursor?: number;
+  stderrCursor?: number;
 }
 
 // Container read parameters
@@ -163,6 +165,30 @@ function formatBashResult(result: {
     truncated: output.truncated,
     originalLength: output.originalLength,
   };
+}
+
+function formatBashDelta(result: {
+  stdoutDelta?: string;
+  stderrDelta?: string;
+  stdoutDeltaTruncated?: boolean;
+  stderrDeltaTruncated?: boolean;
+}): string | undefined {
+  const parts: string[] = [];
+
+  if (result.stdoutDeltaTruncated) {
+    parts.push("[Earlier stdout was truncated before it could be streamed.]");
+  }
+  if (result.stdoutDelta) {
+    parts.push(`Stdout:\n${result.stdoutDelta}`);
+  }
+  if (result.stderrDeltaTruncated) {
+    parts.push("[Earlier stderr was truncated before it could be streamed.]");
+  }
+  if (result.stderrDelta) {
+    parts.push(`Stderr:\n${result.stderrDelta}`);
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
 // Format grep results
@@ -447,6 +473,8 @@ export function createContainerBashTool(
               containerId,
               commandId,
               p.maxOutputChars ?? asyncState.maxOutputChars,
+              asyncState.stdoutCursor,
+              asyncState.stderrCursor,
               signal
             )
           : await (async () => {
@@ -464,6 +492,8 @@ export function createContainerBashTool(
                 containerId,
                 started.commandId,
                 p.maxOutputChars,
+                0,
+                0,
                 signal
               );
             })();
@@ -481,21 +511,28 @@ export function createContainerBashTool(
       }
 
       if (result.state === "running" && result.commandId) {
-        const nextAsyncState: ContainerBashAsyncState = asyncState ?? {
-          kind: "container_bash",
-          containerId,
-          commandId: result.commandId,
-          command: p.command,
-          cwd: p.cwd,
-          timeoutMs: p.timeoutMs,
-          maxOutputChars: p.maxOutputChars,
-          startedAt: Date.now() - result.durationMs,
+        const nextAsyncState: ContainerBashAsyncState = {
+          ...(asyncState ?? {
+            kind: "container_bash",
+            containerId,
+            commandId: result.commandId,
+            command: p.command,
+            cwd: p.cwd,
+            timeoutMs: p.timeoutMs,
+            maxOutputChars: p.maxOutputChars,
+            startedAt: Date.now() - result.durationMs,
+          }),
+          stdoutCursor: typeof result.stdoutCursor === "number" ? result.stdoutCursor : asyncState?.stdoutCursor,
+          stderrCursor: typeof result.stderrCursor === "number" ? result.stderrCursor : asyncState?.stderrCursor,
         };
+        const outputDelta = formatBashDelta(result);
 
         return {
           content: [{
             type: "text",
-            text: `Command is still running (${Math.round(result.durationMs / 1000)}s elapsed).`,
+            text: outputDelta
+              ? `Command is still running (${Math.round(result.durationMs / 1000)}s elapsed).\n\n${outputDelta}`
+              : `Command is still running (${Math.round(result.durationMs / 1000)}s elapsed).`,
           }],
           details: {
             ok: true,
@@ -505,6 +542,13 @@ export function createContainerBashTool(
             commandId: result.commandId,
             durationMs: result.durationMs,
             truncated: result.truncated,
+            stdoutDelta: result.stdoutDelta,
+            stderrDelta: result.stderrDelta,
+            stdoutCursor: result.stdoutCursor,
+            stderrCursor: result.stderrCursor,
+            stdoutDeltaTruncated: result.stdoutDeltaTruncated,
+            stderrDeltaTruncated: result.stderrDeltaTruncated,
+            outputDelta,
             output: result.output,
           },
         };

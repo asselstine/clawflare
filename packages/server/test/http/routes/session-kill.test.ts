@@ -14,11 +14,15 @@ const mocks = vi.hoisted(() => ({
   findActiveForSession: vi.fn(),
   requestCancelRun: vi.fn(),
   cancelRun: vi.fn(),
+  getWorkflowSession: vi.fn(),
+  saveWorkflowSession: vi.fn(),
   listForSession: vi.fn(),
   unlinkSession: vi.fn(),
   listLinksForContainer: vi.fn(),
   markDestroyed: vi.fn(),
   destroyContainer: vi.fn(),
+  containerBashCancel: vi.fn(),
+  projectAndAppendAgentEvents: vi.fn(),
 }));
 
 vi.mock("../../../src/data/index.js", () => ({
@@ -32,8 +36,11 @@ vi.mock("../../../src/data/index.js", () => ({
   SessionEventRepository: vi.fn().mockImplementation(() => ({
     append: mocks.append,
   })),
+  SessionMessageRepository: vi.fn().mockImplementation(() => ({})),
   SessionRuntimeRepository: vi.fn().mockImplementation(() => ({
     setActive: mocks.setActive,
+    getWorkflowSession: mocks.getWorkflowSession,
+    saveWorkflowSession: mocks.saveWorkflowSession,
   })),
   SessionRunRepository: vi.fn().mockImplementation(() => ({
     findActiveForSession: mocks.findActiveForSession,
@@ -51,6 +58,11 @@ vi.mock("../../../src/data/index.js", () => ({
 
 vi.mock("../../../src/modules/tools/container/client.js", () => ({
   destroyContainer: mocks.destroyContainer,
+  containerBashCancel: mocks.containerBashCancel,
+}));
+
+vi.mock("../../../src/runtime/message-projection.js", () => ({
+  projectAndAppendAgentEvents: mocks.projectAndAppendAgentEvents,
 }));
 
 function createRequestContext(): RequestContext {
@@ -75,6 +87,9 @@ function createRequestContext(): RequestContext {
 describe("handleAbortSession", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.getWorkflowSession.mockResolvedValue(null);
+    mocks.saveWorkflowSession.mockResolvedValue({ written: false, skippedUnchanged: true, serializedJson: "{}", serializedBytes: 2 });
+    mocks.projectAndAppendAgentEvents.mockResolvedValue(undefined);
   });
 
   it("cancels a running run immediately and marks the session idle", async () => {
@@ -117,6 +132,100 @@ describe("handleAbortSession", () => {
       errorMessage: undefined,
     }));
     expect(mocks.markClosed).not.toHaveBeenCalled();
+    expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
+  });
+
+  it("cancels running container bash tool calls and leaves the session usable", async () => {
+    const now = Date.now();
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "processing",
+      nextEventCursor: "0",
+      updatedAt: now,
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue({
+      id: "run-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      status: "running",
+    });
+    mocks.getWorkflowSession.mockResolvedValue({
+      id: "session-1",
+      createdAt: now,
+      updatedAt: now,
+      systemPrompt: "",
+      model: {},
+      thinkingLevel: "none",
+      messages: [],
+      steeringQueue: [],
+      followUpQueue: [],
+      steeringMode: "all",
+      followUpMode: "all",
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools",
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "container_bash",
+          args: {},
+          turnId: "turn-1",
+          status: "running",
+          asyncState: {
+            kind: "container_bash",
+            containerId: "container-1",
+            commandId: "command-1",
+          },
+        },
+      },
+      status: "running",
+    });
+    mocks.cancelRun.mockResolvedValue(undefined);
+    mocks.containerBashCancel.mockResolvedValue({ ok: true });
+    mocks.saveSession.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+
+    const response = await handleAbortSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as {
+      ok: boolean;
+      status: string;
+      stoppedToolCallIds: string[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.status).toBe("idle");
+    expect(data.stoppedToolCallIds).toEqual(["tool-1"]);
+    expect(mocks.containerBashCancel).toHaveBeenCalledWith({} as Env, "container-1", "command-1");
+    expect(mocks.saveWorkflowSession).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      status: "idle",
+      toolCalls: expect.objectContaining({
+        "tool-1": expect.objectContaining({
+          status: "error",
+          isError: true,
+          asyncState: undefined,
+        }),
+      }),
+    }));
+    expect(mocks.projectAndAppendAgentEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "session-1",
+      [expect.objectContaining({
+        type: "tool_execution_end",
+        toolCallId: "tool-1",
+        toolName: "container_bash",
+        isError: true,
+      })],
+      { workspaceId: "workspace-1" },
+    );
     expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
   });
 

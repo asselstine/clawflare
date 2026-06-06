@@ -106,11 +106,11 @@ describe("LiveAgentEventPersister", () => {
     }
   });
 
-  it("coalesces tool updates independently by tool call", async () => {
+  it("preserves tool update order because tool updates may be deltas", async () => {
     const appended: AgentEvent[][] = [];
     const firstToolUpdate = toolUpdate("tool-1", "one");
-    const latestFirstToolUpdate = toolUpdate("tool-1", "two");
-    const secondToolUpdate = toolUpdate("tool-2", "other");
+    const secondToolUpdate = toolUpdate("tool-1", "two");
+    const otherToolUpdate = toolUpdate("tool-2", "other");
     const toolEnd: AgentEvent = {
       type: "tool_execution_end",
       toolCallId: "tool-1",
@@ -123,10 +123,10 @@ describe("LiveAgentEventPersister", () => {
     });
 
     await persister.onEvent(firstToolUpdate);
-    await persister.onEvent(latestFirstToolUpdate);
     await persister.onEvent(secondToolUpdate);
+    await persister.onEvent(otherToolUpdate);
     await persister.onEvent(toolEnd);
 
-    expect(appended).toEqual([[latestFirstToolUpdate, secondToolUpdate], [toolEnd]]);
+    expect(appended).toEqual([[firstToolUpdate], [secondToolUpdate], [otherToolUpdate], [toolEnd]]);
   });
 });
