@@ -13,6 +13,8 @@ export interface ToolCallInfo {
 }
 
 export interface DisplayMessage {
+  id?: string;
+  sequence?: number;
   role: DisplayMessageRole;
   content: string;
   toolName?: string;
@@ -94,13 +96,22 @@ export function formatMessageForDisplay(message: Message): DisplayMessage {
   if (role === "assistant") {
     const toolCalls = extractToolCalls(content);
     return {
+      id: message.id,
+      sequence: message.sequence,
       role,
       content: extractTextContent(content),
+      streaming: message.status !== "complete",
       toolCalls: toolCalls.length ? toolCalls : undefined,
     };
   }
 
-  return { role, content: extractTextContent(content) };
+  return {
+    id: message.id,
+    sequence: message.sequence,
+    role,
+    content: extractTextContent(content),
+    streaming: message.status !== "complete",
+  };
 }
 
 export function formatMessagesFromEvents(events: SessionEvent[]): DisplayMessage[] {
@@ -139,10 +150,23 @@ export function attachToolResults(messages: DisplayMessage[]): DisplayMessage[] 
 
 export function applyAssistantPartialEvents(messages: DisplayMessage[], events: SessionEvent[]): DisplayMessage[] {
   let next = [...messages];
-  const ensureAssistant = (): number => {
+  const ensureAssistant = (message: Message): number => {
+    const byId = next.findIndex((candidate) => candidate.id === message.id);
+    if (byId !== -1) return byId;
+
     const last = next[next.length - 1];
-    if (last?.role === "assistant") return next.length - 1;
-    next = [...next, { role: "assistant", content: "", streaming: true }];
+    if (last?.role === "assistant" && !last.id) return next.length - 1;
+
+    next = [
+      ...next,
+      {
+        id: message.id,
+        sequence: message.sequence,
+        role: "assistant",
+        content: "",
+        streaming: true,
+      },
+    ];
     return next.length - 1;
   };
 
@@ -150,18 +174,20 @@ export function applyAssistantPartialEvents(messages: DisplayMessage[], events: 
     if (!("message" in event)) continue;
     if (eventMessageRole(event.message) !== "assistant") continue;
 
-    const index = ensureAssistant();
+    const index = ensureAssistant(event.message);
     const content = getMessageContent(event.message);
     const toolCalls = extractToolCalls(content);
     next[index] = {
       ...next[index]!,
+      id: event.message.id,
+      sequence: event.message.sequence,
       content: extractTextContent(content),
       streaming: event.message.status !== "complete",
       toolCalls: toolCalls.length ? toolCalls : next[index]!.toolCalls,
     };
   }
 
-  return updateToolCallStatusesFromEvents(next, events);
+  return updateToolCallStatusesFromEvents(sortDisplayMessages(next), events);
 }
 
 export function updateToolCallStatusesFromEvents(messages: DisplayMessage[], events: SessionEvent[]): DisplayMessage[] {
@@ -245,6 +271,13 @@ function toolCallStatus(value: unknown): ToolCallStatus {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sortDisplayMessages(messages: DisplayMessage[]): DisplayMessage[] {
+  return [...messages].sort((a, b) => {
+    if (typeof a.sequence === "number" && typeof b.sequence === "number") return a.sequence - b.sequence;
+    return 0;
+  });
 }
 
 function stringParam(value: Record<string, unknown>, key: string): string | undefined {

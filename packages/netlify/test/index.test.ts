@@ -26,7 +26,8 @@ describe("netlify egress handler", () => {
       const handler = registry.get("netlify");
       expect(handler).toBeDefined();
       expect(handler?.name).toBe("netlify");
-      expect(handler?.description?.startsWith("Netlify REST API access")).toBe(true);
+      expect(handler?.description).toContain("without an Authorization header");
+      expect(handler?.description).toContain("Clawflare automatically adds Authorization");
     });
 
     it("registers with the Netlify API domain", () => {

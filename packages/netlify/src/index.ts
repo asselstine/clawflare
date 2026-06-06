@@ -8,7 +8,8 @@ export const domains = ["api.netlify.com"];
 
 export const metadata = {
   name: "netlify",
-  description: "Netlify REST API access - automatically injects Authorization: Bearer token from NETLIFY_AUTH_TOKEN",
+  description:
+    "Netlify REST API access for api.netlify.com. Send the Netlify API request without an Authorization header; Clawflare automatically adds Authorization: Bearer <NETLIFY_AUTH_TOKEN> and the required User-Agent header.",
   domains,
 } as const;
 
