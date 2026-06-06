@@ -110,6 +110,8 @@ describe("egress handler routes", () => {
       .toContain("CLOUDFLARE_API_TOKEN");
     expect(data.egressHandlers.find((handler) => handler.egressHandlerId === "github")?.optionalSecrets)
       .toContain("GITHUB_TOKEN");
+    expect(data.egressHandlers.find((handler) => handler.egressHandlerId === "netlify")?.requiredSecrets)
+      .toContain("NETLIFY_AUTH_TOKEN");
   });
 
   it("omits unconfigured built-in egress handlers from enabled lists", async () => {
@@ -160,10 +162,17 @@ describe("egress handler routes", () => {
       const cloudflare = data.egressHandlers.find(
         (handler) => handler.egressHandlerId === "cloudflare"
       );
+      const netlify = data.egressHandlers.find(
+        (handler) => handler.egressHandlerId === "netlify"
+      );
       expect(cloudflare?.name).toBe("Cloudflare");
       expect(cloudflare?.domains).toEqual(["api.cloudflare.com"]);
       expect(cloudflare?.enabled).toBe(false);
       expect(cloudflare).not.toHaveProperty("config");
+      expect(netlify?.name).toBe("Netlify");
+      expect(netlify?.domains).toEqual(["api.netlify.com"]);
+      expect(netlify?.enabled).toBe(false);
+      expect(netlify).not.toHaveProperty("config");
     } finally {
       await dispose();
     }

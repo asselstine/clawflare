@@ -229,6 +229,106 @@ describe("handleAbortSession", () => {
     expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
   });
 
+  it("only writes stopped tool results for the current turn", async () => {
+    const now = Date.now();
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "processing",
+      nextEventCursor: "0",
+      updatedAt: now,
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue({
+      id: "run-1",
+      sessionId: "session-1",
+      workspaceId: "workspace-1",
+      status: "running",
+    });
+    mocks.getWorkflowSession.mockResolvedValue({
+      id: "session-1",
+      createdAt: now,
+      updatedAt: now,
+      systemPrompt: "",
+      model: {},
+      thinkingLevel: "none",
+      messages: [],
+      steeringQueue: [],
+      followUpQueue: [],
+      steeringMode: "all",
+      followUpMode: "all",
+      turns: [
+        {
+          id: "turn-1",
+          index: 0,
+          status: "awaiting_tools",
+          toolCallIds: ["tool-old"],
+          toolResultIds: [],
+        },
+        {
+          id: "turn-2",
+          index: 1,
+          status: "awaiting_tools",
+          toolCallIds: ["tool-current"],
+          toolResultIds: [],
+        },
+      ],
+      toolCalls: {
+        "tool-old": {
+          id: "tool-old",
+          name: "container_bash",
+          args: {},
+          turnId: "turn-1",
+          status: "running",
+          asyncState: {
+            kind: "container_bash",
+            containerId: "container-old",
+            commandId: "command-old",
+          },
+        },
+        "tool-current": {
+          id: "tool-current",
+          name: "container_bash",
+          args: {},
+          turnId: "turn-2",
+          status: "running",
+          asyncState: {
+            kind: "container_bash",
+            containerId: "container-current",
+            commandId: "command-current",
+          },
+        },
+      },
+      status: "running",
+    });
+    mocks.cancelRun.mockResolvedValue(undefined);
+    mocks.containerBashCancel.mockResolvedValue({ ok: true });
+    mocks.saveSession.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+
+    const response = await handleAbortSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as {
+      stoppedToolCallIds: string[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.stoppedToolCallIds).toEqual(["tool-current"]);
+    expect(mocks.containerBashCancel).toHaveBeenCalledTimes(1);
+    expect(mocks.containerBashCancel).toHaveBeenCalledWith({} as Env, "container-current", "command-current");
+    expect(mocks.saveWorkflowSession).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      messages: [expect.objectContaining({ toolCallId: "tool-current" })],
+      toolCalls: expect.objectContaining({
+        "tool-old": expect.objectContaining({ status: "running" }),
+        "tool-current": expect.objectContaining({ status: "error" }),
+      }),
+      turns: [
+        expect.objectContaining({ id: "turn-1", toolResultIds: [] }),
+        expect.objectContaining({ id: "turn-2", toolResultIds: ["tool-current"] }),
+      ],
+    }));
+  });
+
   it("returns ok when there is no active run to cancel", async () => {
     mocks.findByIdInWorkspace.mockResolvedValue({
       id: "session-1",

@@ -16,6 +16,73 @@ function createWorker() {
 }
 
 describe("dynamic worker execution", () => {
+  it("returns an error when execution exceeds the timeout", async () => {
+    const get = vi.fn(async () => ({
+      getEntrypoint: () => ({
+        fetch: vi.fn(() => new Promise<Response>(() => {})),
+      }),
+    }));
+    const env = {
+      LOADER: { get, load: vi.fn() },
+      HTTP_GATEWAY: {},
+    } as unknown as Env;
+
+    const result = await executeDynamicWorker(
+      env,
+      undefined,
+      "export default async function() { return 'ok'; }",
+      null,
+      { timeoutMs: 5 }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("Dynamic Worker execution timed out after 5ms.");
+  });
+
+  it("returns an error when execution is aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const get = vi.fn(async () => createWorker());
+    const env = {
+      LOADER: { get, load: vi.fn() },
+      HTTP_GATEWAY: {},
+    } as unknown as Env;
+
+    const result = await executeDynamicWorker(
+      env,
+      undefined,
+      "export default async function() { return 'ok'; }",
+      null,
+      { signal: controller.signal }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("Dynamic Worker execution aborted.");
+  });
+
+  it("returns raw response text when the Dynamic Worker response is not JSON", async () => {
+    const get = vi.fn(async () => ({
+      getEntrypoint: () => ({
+        fetch: vi.fn(async () => new Response("plain failure", { status: 500 })),
+      }),
+    }));
+    const env = {
+      LOADER: { get, load: vi.fn() },
+      HTTP_GATEWAY: {},
+    } as unknown as Env;
+
+    const result = await executeDynamicWorker(
+      env,
+      undefined,
+      "export default async function() { return 'ok'; }",
+      null
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe("plain failure");
+  });
+
   it("uses stable loader names for identical code and execution scope", async () => {
     const names: string[] = [];
     const get = vi.fn(async (
@@ -74,6 +141,40 @@ describe("dynamic worker execution", () => {
       requestId: "session:def",
       sessionId: "def",
       workspaceId: "workspace-1",
+    });
+
+    expect(names[0]).not.toBe(names[1]);
+  });
+
+  it("scopes loader names by execution id to avoid shared console capture", async () => {
+    const names: string[] = [];
+    const env = {
+      LOADER: {
+        get: vi.fn(async (
+          name: string | null,
+          getCode: () => WorkerLoaderWorkerCode | Promise<WorkerLoaderWorkerCode>
+        ) => {
+          names.push(name ?? "");
+          await getCode();
+          return createWorker();
+        }),
+        load: vi.fn(),
+      },
+      HTTP_GATEWAY: {},
+    } as unknown as Env;
+    const code = "export default async function() { console.log('ok'); return 'ok'; }";
+
+    await executeDynamicWorker(env, undefined, code, null, {
+      requestId: "session:abc",
+      sessionId: "abc",
+      workspaceId: "workspace-1",
+      executionId: "tool-1",
+    });
+    await executeDynamicWorker(env, undefined, code, null, {
+      requestId: "session:abc",
+      sessionId: "abc",
+      workspaceId: "workspace-1",
+      executionId: "tool-2",
     });
 
     expect(names[0]).not.toBe(names[1]);

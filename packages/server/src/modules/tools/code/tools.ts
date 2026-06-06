@@ -22,6 +22,7 @@ interface ExecuteStoredCodeParams {
   description?: string;
   input?: unknown;
   maxResponseLength?: number;
+  timeoutMs?: number;
 }
 
 interface ExecuteCodeParams {
@@ -29,6 +30,7 @@ interface ExecuteCodeParams {
   description?: string;
   input?: unknown;
   maxResponseLength?: number;
+  timeoutMs?: number;
 }
 
 const VALID_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -90,6 +92,11 @@ export const executeStoredCodeTool: RuntimeTool = {
     name: Type.String({ description: "Name of the stored code to execute" }),
     description: Type.Optional(Type.String({ description: "Brief description of this execution (80 chars max)" })),
     input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
+    timeoutMs: Type.Optional(Type.Number({
+      description: "Execution timeout in milliseconds (default: 60000, max: 300000). Use short values for API calls.",
+      minimum: 1000,
+      maximum: 300000,
+    })),
     maxResponseLength: Type.Optional(Type.Number({
       description: "Maximum response characters to return to the agent. Output is tailed when truncated. Hard cap: 1,000,000.",
       minimum: 1,
@@ -98,9 +105,9 @@ export const executeStoredCodeTool: RuntimeTool = {
   }) as TSchema,
   execute: async (
     context: ToolRuntimeContext,
-    _toolCallId: string,
+    toolCallId: string,
     params: Static<TSchema>,
-    _signal?: AbortSignal
+    signal?: AbortSignal
   ): Promise<AgentToolResult<unknown>> => {
     const runtime = requireBuiltinToolContext(context);
     const p = params as ExecuteStoredCodeParams;
@@ -118,6 +125,9 @@ export const executeStoredCodeTool: RuntimeTool = {
       requestId: `session:${runtime.sessionId}`,
       sessionId: runtime.sessionId,
       workspaceId: runtime.workspaceId,
+      executionId: toolCallId,
+      signal,
+      timeoutMs: p.timeoutMs,
     });
 
     return formatExecutionResult(result, {
@@ -138,6 +148,11 @@ export const executeCodeTool: RuntimeTool = {
     code: Type.String({ description: `JavaScript ES module to execute. ${USER_FUNCTION_CONTRACT}` }),
     description: Type.Optional(Type.String({ description: "Brief description of what the code does (80 chars max)" })),
     input: Type.Optional(Type.Unknown({ description: "Input data to pass to the code" })),
+    timeoutMs: Type.Optional(Type.Number({
+      description: "Execution timeout in milliseconds (default: 60000, max: 300000). Use short values for API calls.",
+      minimum: 1000,
+      maximum: 300000,
+    })),
     maxResponseLength: Type.Optional(Type.Number({
       description: "Maximum response characters to return to the agent. Output is tailed when truncated. Hard cap: 1,000,000.",
       minimum: 1,
@@ -146,9 +161,9 @@ export const executeCodeTool: RuntimeTool = {
   }) as TSchema,
   execute: async (
     context: ToolRuntimeContext,
-    _toolCallId: string,
+    toolCallId: string,
     params: Static<TSchema>,
-    _signal?: AbortSignal
+    signal?: AbortSignal
   ): Promise<AgentToolResult<unknown>> => {
     const runtime = requireBuiltinToolContext(context);
     const p = params as ExecuteCodeParams;
@@ -157,6 +172,9 @@ export const executeCodeTool: RuntimeTool = {
       requestId: `session:${runtime.sessionId}`,
       sessionId: runtime.sessionId,
       workspaceId: runtime.workspaceId,
+      executionId: toolCallId,
+      signal,
+      timeoutMs: p.timeoutMs,
     });
 
     return formatExecutionResult(result, { maxResponseLength: p.maxResponseLength });

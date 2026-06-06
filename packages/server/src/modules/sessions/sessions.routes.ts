@@ -311,8 +311,11 @@ async function stopRunningWorkflowTools(
   const stored = await runtime.getWorkflowSession(sessionId);
   if (!isAgentSessionState(stored)) return { stoppedToolCallIds: [], errors: [] };
 
+  const currentTurn = latestTurn(stored);
+  const currentTurnToolCallIds = new Set(currentTurn?.toolCallIds ?? []);
   const stoppable = Object.values(stored.toolCalls)
     .filter((toolCall): toolCall is AgentToolCallState => Boolean(toolCall))
+    .filter((toolCall) => currentTurnToolCallIds.has(toolCall.id))
     .filter((toolCall) => toolCall.status === "pending" || toolCall.status === "running");
   if (stoppable.length === 0) return { stoppedToolCallIds: [], errors: [] };
 
@@ -337,7 +340,6 @@ async function stopRunningWorkflowTools(
 
   const stoppedIds = new Set(stoppable.map((toolCall) => toolCall.id));
   const stoppedResults = new Map(stoppable.map((toolCall) => [toolCall.id, stoppedToolResult(toolCall)]));
-  const currentTurn = latestTurn(stored);
   const stoppedMessages = stoppable
     .filter((toolCall) => !stored.messages.some((message) =>
       isRecord(message) && message.role === "toolResult" && message.toolCallId === toolCall.id

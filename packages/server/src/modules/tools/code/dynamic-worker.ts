@@ -6,7 +6,10 @@ interface DynamicExecutionOptions {
   requestId?: string;
   sessionId?: string;
   workspaceId?: string;
+  executionId?: string;
   allowOutbound?: boolean;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export const USER_FUNCTION_TYPES = `type Params = unknown;
@@ -22,6 +25,8 @@ export const USER_FUNCTION_CONTRACT = `Provide JavaScript as an ES module with a
 }`;
 
 const WORKER_CACHE_PREFIX = "clawflare-execute-code";
+const DEFAULT_DYNAMIC_WORKER_TIMEOUT_MS = 60_000;
+const MAX_DYNAMIC_WORKER_TIMEOUT_MS = 5 * 60_000;
 
 export async function executeDynamicWorker(
   env: Env,
@@ -107,12 +112,16 @@ export default {
     const workerName = await getWorkerCacheName(workerCode, options);
     const worker = await env.LOADER.get(workerName, () => workerCode);
     const entrypoint = worker.getEntrypoint();
-    const response = await entrypoint.fetch(
-      new Request("https://clawflare.local/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(input ?? null),
-      })
+    const response = await withTimeout(
+      entrypoint.fetch(
+        new Request("https://clawflare.local/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input ?? null),
+        })
+      ),
+      options.timeoutMs,
+      options.signal,
     );
 
     const payload = await readJson(response);
@@ -129,6 +138,60 @@ export default {
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function effectiveTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_DYNAMIC_WORKER_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs)) return DEFAULT_DYNAMIC_WORKER_TIMEOUT_MS;
+  return Math.min(Math.max(Math.floor(timeoutMs), 1), MAX_DYNAMIC_WORKER_TIMEOUT_MS);
+}
+
+function abortError(): Error {
+  const error = new Error("Dynamic Worker execution aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number | undefined,
+  signal?: AbortSignal,
+): Promise<T> {
+  const timeout = effectiveTimeoutMs(timeoutMs);
+
+  if (signal?.aborted) {
+    throw abortError();
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Dynamic Worker execution timed out after ${timeout}ms.`));
+    }, timeout);
+
+    const onAbort = () => {
+      cleanup();
+      reject(abortError());
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function createGatewayOutbound(
@@ -171,6 +234,7 @@ async function getWorkerCacheName(
 ): Promise<string> {
   const cacheScope = {
     allowOutbound: options.allowOutbound !== false,
+    executionId: options.executionId ?? null,
     requestId: options.requestId ?? null,
     sessionId: options.sessionId ?? null,
     workspaceId: options.workspaceId ?? null,
@@ -197,9 +261,14 @@ function hasDefaultExport(code: string): boolean {
 }
 
 async function readJson(response: Response): Promise<{ ok?: boolean; result?: unknown; error?: unknown; stdout?: string; stderr?: string }> {
+  const text = await response.text();
+  if (!text) {
+    return { ok: false, error: "Dynamic Worker returned an empty response." };
+  }
+
   try {
-    return (await response.json()) as { ok?: boolean; result?: unknown; error?: unknown; stdout?: string; stderr?: string };
+    return JSON.parse(text) as { ok?: boolean; result?: unknown; error?: unknown; stdout?: string; stderr?: string };
   } catch {
-    return { ok: false, error: await response.text() };
+    return { ok: false, error: text };
   }
 }

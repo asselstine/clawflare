@@ -106,11 +106,45 @@ export interface RunStepResult extends AgentStepResult {
   shouldStop: boolean;
 }
 
-function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-  return messages.filter(
+export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
+  return sanitizeToolResultHistory(messages.filter(
     (message): message is Message =>
       message.role === "user" || message.role === "assistant" || message.role === "toolResult",
-  );
+  ));
+}
+
+function assistantToolCallIds(message: AssistantMessage): Set<string> {
+  return new Set(extractToolCalls(message).map((toolCall) => toolCall.id));
+}
+
+function sanitizeToolResultHistory(messages: Message[]): Message[] {
+  const sanitized: Message[] = [];
+  let openToolCallIds = new Set<string>();
+  let seenToolResultIds = new Set<string>();
+
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      sanitized.push(message);
+      openToolCallIds = assistantToolCallIds(message);
+      seenToolResultIds = new Set();
+      continue;
+    }
+
+    if (message.role === "toolResult") {
+      if (!openToolCallIds.has(message.toolCallId) || seenToolResultIds.has(message.toolCallId)) {
+        continue;
+      }
+      sanitized.push(message);
+      seenToolResultIds.add(message.toolCallId);
+      continue;
+    }
+
+    sanitized.push(message);
+    openToolCallIds = new Set();
+    seenToolResultIds = new Set();
+  }
+
+  return sanitized;
 }
 
 function now(): number {

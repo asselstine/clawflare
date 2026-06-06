@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import { Agent, createEmptyAgentSession } from "../src/runtime/agent.js";
+import { Agent, createEmptyAgentSession, defaultConvertToLlm } from "../src/runtime/agent.js";
 import type { RuntimeTool, ToolRuntimeContext } from "../src/modules/tools/types.js";
 
 describe("Agent", () => {
@@ -18,6 +18,56 @@ describe("Agent", () => {
     sessionId: "session-test",
     workspaceId: "workspace-test",
   } as ToolRuntimeContext;
+
+  it("drops orphaned tool results before sending history to the model", () => {
+    const converted = defaultConvertToLlm([
+      {
+        role: "user",
+        content: [{ type: "text", text: "start" }],
+        timestamp: 1,
+      },
+      {
+        role: "assistant",
+        content: [{
+          type: "toolCall",
+          id: "tool-current",
+          name: "container_bash",
+          arguments: {},
+        }],
+        api: "bedrock-converse-stream",
+        provider: "amazon-bedrock",
+        model: "test-model",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse",
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "tool-current",
+        toolName: "container_bash",
+        content: [{ type: "text", text: "stopped" }],
+        isError: true,
+        timestamp: 3,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "tool-old",
+        toolName: "container_bash",
+        content: [{ type: "text", text: "orphaned" }],
+        isError: true,
+        timestamp: 4,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "hello" }],
+        timestamp: 5,
+      },
+    ]);
+
+    expect(converted.map((message) => message.role)).toEqual(["user", "assistant", "toolResult", "user"]);
+    expect(converted.filter((message) => message.role === "toolResult").map((message) => message.toolCallId))
+      .toEqual(["tool-current"]);
+  });
 
   it("emits tool start through onEvent before the tool finishes", async () => {
     let finishTool!: () => void;

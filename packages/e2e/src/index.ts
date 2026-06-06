@@ -693,11 +693,11 @@ async function runTests(url: string): Promise<void> {
     });
     const data = await response.json() as { egressHandlers?: Array<{ egressHandlerId: string }> };
     const names = data.egressHandlers?.map((h) => h.egressHandlerId).sort();
-    if (!names || names.length < 2) {
-      throw new Error(`Expected at least 2 handlers, got: ${JSON.stringify(names)}`);
+    if (!names || names.length < 3) {
+      throw new Error(`Expected at least 3 handlers, got: ${JSON.stringify(names)}`);
     }
-    if (!names.includes("github") || !names.includes("cloudflare")) {
-      throw new Error(`Expected github and cloudflare handlers, got: ${JSON.stringify(names)}`);
+    if (!names.includes("github") || !names.includes("cloudflare") || !names.includes("netlify")) {
+      throw new Error(`Expected github, cloudflare, and netlify handlers, got: ${JSON.stringify(names)}`);
     }
   });
 

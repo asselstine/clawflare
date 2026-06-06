@@ -1,5 +1,6 @@
 import { metadata as cloudflareMetadata } from "@clawflare/cloudflare";
 import { metadata as githubMetadata } from "@clawflare/github";
+import { metadata as netlifyMetadata } from "@clawflare/netlify";
 
 export interface EgressHandlerDefinition {
   egressHandlerId: string;
@@ -40,6 +41,14 @@ const EGRESS_HANDLER_DEFINITIONS: EgressHandlerDefinition[] = [
     description: cloudflareMetadata.description,
     domains: [...cloudflareMetadata.domains],
     requiredSecrets: ["CLOUDFLARE_API_TOKEN"],
+    optionalSecrets: [],
+  },
+  {
+    egressHandlerId: netlifyMetadata.name,
+    name: "Netlify",
+    description: netlifyMetadata.description,
+    domains: [...netlifyMetadata.domains],
+    requiredSecrets: ["NETLIFY_AUTH_TOKEN"],
     optionalSecrets: [],
   },
 ];

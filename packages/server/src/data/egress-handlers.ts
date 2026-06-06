@@ -35,6 +35,7 @@ import { createDb, type Db } from "./db.js";
 import { egressHandlers } from "./schema.js";
 import { metadata as githubMetadata } from "@clawflare/github";
 import { metadata as cloudflareMetadata } from "@clawflare/cloudflare";
+import { metadata as netlifyMetadata } from "@clawflare/netlify";
 import { and, asc, eq, like, or } from "drizzle-orm";
 
 const BUILT_IN_EGRESS_HANDLERS: Omit<EgressHandlerMetadata, "workspaceId">[] = [
@@ -53,6 +54,16 @@ const BUILT_IN_EGRESS_HANDLERS: Omit<EgressHandlerMetadata, "workspaceId">[] = [
     name: "Cloudflare",
     description: cloudflareMetadata.description,
     domains: cloudflareMetadata.domains,
+    enabled: false,
+    secretRefs: {},
+    config: {},
+    updatedAt: 0,
+  },
+  {
+    egressHandlerId: netlifyMetadata.name,
+    name: "Netlify",
+    description: netlifyMetadata.description,
+    domains: netlifyMetadata.domains,
     enabled: false,
     secretRefs: {},
     config: {},

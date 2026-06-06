@@ -441,7 +441,7 @@ export function createContainerBashTool(
         description: "Working directory relative to /workspace (default: .)",
       })),
       timeoutMs: Type.Optional(Type.Number({
-        description: "Timeout in milliseconds (default: 1800000, max: 3600000)",
+        description: "Timeout in milliseconds. Use 30000-120000 for quick API calls/probes; omit for long installs, builds, tests, or deploys (default: 1800000, max: 3600000).",
         minimum: 1000,
         maximum: 3600000,  // 60 minutes
       })),

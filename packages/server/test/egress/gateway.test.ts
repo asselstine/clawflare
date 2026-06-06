@@ -75,6 +75,34 @@ describe("routeOutboundRequest", () => {
     }
   });
 
+  it("routes Netlify API requests through the Netlify egress handler", async () => {
+    const { routeOutboundRequest } = await import("../../src/egress/gateway.js");
+    const { db, dispose } = await createDb();
+    try {
+      const response = await routeOutboundRequest(
+        {
+          DB: db,
+          MOCK_EGRESS: "true",
+          NETLIFY_AUTH_TOKEN: "test-token",
+        } as unknown as Env,
+        new Request("https://api.netlify.com/api/v1/sites"),
+        "test-request"
+      );
+      const data = (await response.json()) as {
+        ok: boolean;
+        handler?: string;
+        url?: string;
+      };
+
+      expect(response.status).toBe(200);
+      expect(data.ok).toBe(true);
+      expect(data.handler).toBe("netlify");
+      expect(data.url).toBe("https://api.netlify.com/api/v1/sites");
+    } finally {
+      await dispose();
+    }
+  });
+
   it("resolves configured egress secrets with workspace-scoped authorization", async () => {
     const { routeOutboundRequest } = await import("../../src/egress/gateway.js");
     const { db, dispose } = await createDb();

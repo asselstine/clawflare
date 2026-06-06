@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "references": [{ "path": "../egress-core" }],
+  "include": ["src/**/*"],
+  "exclude": ["**/*.test.ts", "test/**/*"]
+}
