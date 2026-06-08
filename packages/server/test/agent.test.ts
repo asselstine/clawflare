@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAssistantMessageEventStream, type AssistantMessage, type Context, type Model } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
@@ -131,6 +131,132 @@ describe("Agent", () => {
     await running;
 
     expect(emitted).toContain("tool_execution_end");
+  });
+
+  it("emits an errored tool end when execution exceeds the harness timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let receivedSignal: AbortSignal | undefined;
+      const emitted: string[] = [];
+      const tool = {
+        ref: "code.execute_code",
+        groupId: "code",
+        name: "execute_code",
+        label: "Execute Code",
+        description: "Execute code",
+        parameters: Type.Object({}),
+        execute: async (_context: ToolRuntimeContext, _toolCallId: string, _params: unknown, signal?: AbortSignal) => {
+          receivedSignal = signal;
+          await new Promise(() => {});
+          return {
+            content: [{ type: "text", text: "unreachable" }],
+            details: { ok: true },
+          };
+        },
+      } satisfies RuntimeTool;
+
+      const agent = new Agent({
+        model,
+        systemPrompt: "",
+        tools: [tool],
+        toolRuntimeContext,
+        toolExecutionTimeoutMs: 5,
+        onEvent: (event) => {
+          emitted.push(event.type);
+        },
+      });
+      const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+      const session = {
+        ...empty,
+        turns: [{
+          id: "turn-1",
+          index: 0,
+          status: "awaiting_tools" as const,
+          toolCallIds: ["tool-1"],
+          toolResultIds: [],
+        }],
+        toolCalls: {
+          "tool-1": {
+            id: "tool-1",
+            name: "execute_code",
+            args: {},
+            turnId: "turn-1",
+            status: "pending" as const,
+          },
+        },
+      };
+
+      const running = agent.runToolStep(session, "tool-1");
+      await vi.advanceTimersByTimeAsync(5);
+      const result = await running;
+
+      expect(receivedSignal?.aborted).toBe(true);
+      expect(result.toolResultMessage?.isError).toBe(true);
+      expect(result.toolResultMessage?.content).toEqual([
+        { type: "text", text: "Tool execution timed out after 5ms." },
+      ]);
+      expect(result.session.toolCalls["tool-1"]?.status).toBe("error");
+      expect(emitted).toEqual(["tool_execution_start", "tool_execution_end", "message_start", "message_end"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks tool calls aborted when execution receives an abort signal", async () => {
+    const controller = new AbortController();
+    const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async (_context: ToolRuntimeContext, _toolCallId: string, _params: unknown, signal?: AbortSignal) => {
+        await new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+        });
+        return {
+          content: [{ type: "text", text: "unreachable" }],
+          details: { ok: true },
+        };
+      },
+    } satisfies RuntimeTool;
+
+    const agent = new Agent({
+      model,
+      systemPrompt: "",
+      tools: [tool],
+      toolRuntimeContext,
+    });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const running = agent.runToolStep(session, "tool-1", controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    const result = await running;
+
+    expect(result.toolResultMessage?.isError).toBe(true);
+    expect(result.session.toolCalls["tool-1"]?.status).toBe("aborted");
+    expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
   });
 
   it("persists tool results with details.ok false as errors", async () => {

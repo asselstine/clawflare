@@ -19,7 +19,7 @@ import { resolveModelForNewSession } from "../models/models.service.js";
 import { handleListSessionContainers } from "../containers/containers.routes.js";
 import { logger } from "../../lib/logger.js";
 import { isTimingEnabled, logTiming, timingStart } from "../../lib/timing.js";
-import type { AgentMessage, DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, SessionResponse, SessionListResponse, SessionSummary, SessionStatus } from "../../types.js";
+import type { AgentMessage, DeleteSessionResponse, DeleteSessionsResponse, KillSessionResponse, Message, MessageContentBlock, SessionResponse, SessionListResponse, SessionSummary, SessionStatus, ToolCallContentBlock } from "../../types.js";
 import { listToolGroups, loadSessionTools, seedDefaultSessionTools } from "../tools/tools.service.js";
 import { projectAndAppendAgentEvents } from "../../runtime/message-projection.js";
 import type { AgentEvent, AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -205,6 +205,8 @@ export async function handleListSessionTools(
 // Handles session polling, closing, and listing
 
 const PROCESSING_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const STALE_CODE_TOOL_DEFAULT_TIMEOUT_MS = 60_000;
+const STALE_CODE_TOOL_GRACE_MS = 10_000;
 const SESSION_EVENT_PAGE_SIZE = 100;
 const SESSION_EVENT_TAIL_PAGE_SIZE = 80;
 const SESSION_EVENT_STREAM_POLL_MS = 100;
@@ -253,6 +255,62 @@ function promptHistoryFromRuntimeSession(value: unknown): SessionResponse["promp
   };
 }
 
+function isCodeToolCall(block: MessageContentBlock): block is ToolCallContentBlock {
+  return block.type === "tool_call" &&
+    (block.name === "execute_code" || block.name === "execute_stored_code");
+}
+
+function staleCodeToolTimeoutMs(block: ToolCallContentBlock): number {
+  const input = isRecord(block.input) ? block.input : {};
+  const timeoutMs = typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)
+    ? input.timeoutMs
+    : STALE_CODE_TOOL_DEFAULT_TIMEOUT_MS;
+  return Math.max(1, Math.floor(timeoutMs)) + STALE_CODE_TOOL_GRACE_MS;
+}
+
+function staleCodeToolResult(block: ToolCallContentBlock): AgentToolResult<unknown> {
+  return {
+    content: [{
+      type: "text",
+      text: `Tool ${block.name} timed out without reporting a result.`,
+    }],
+    details: {
+      ok: false,
+      stale: true,
+      reason: "tool_timeout_recovery",
+      toolCallId: block.id,
+      toolName: block.name,
+    },
+  };
+}
+
+async function recoverStaleCodeToolCalls(
+  events: SessionEventRepository,
+  messages: SessionMessageRepository,
+  sessionId: string,
+  workspaceId: string,
+): Promise<void> {
+  const recent = await messages.listRecent(sessionId, 20);
+  const now = Date.now();
+  const staleToolCalls = recent.flatMap((message: Message) =>
+    message.content
+      .filter(isCodeToolCall)
+      .filter((block) => block.status === "queued" || block.status === "running")
+      .filter((block) => now - message.updatedAt >= staleCodeToolTimeoutMs(block))
+      .map((block) => ({ block }))
+  );
+
+  if (staleToolCalls.length === 0) return;
+
+  await projectAndAppendAgentEvents(events, messages, sessionId, staleToolCalls.map(({ block }): AgentEvent => ({
+    type: "tool_execution_end",
+    toolCallId: block.id,
+    toolName: block.name,
+    result: staleCodeToolResult(block),
+    isError: true,
+  } as AgentEvent)), { workspaceId });
+}
+
 function isAgentSessionState(value: unknown): value is AgentSessionState {
   return isRecord(value) &&
     typeof value.id === "string" &&
@@ -277,9 +335,10 @@ function containerBashAsyncState(value: unknown): {
 
 function stoppedToolResult(toolCall: AgentToolCallState): AgentToolResult<unknown> {
   return {
-    content: [{ type: "text", text: "Tool stopped by user." }],
+    content: [{ type: "text", text: "Tool aborted by user." }],
     details: {
       ok: false,
+      aborted: true,
       stopped: true,
       reason: "user_stop",
       toolCallId: toolCall.id,
@@ -355,7 +414,7 @@ async function stopRunningWorkflowTools(
       if (!stoppedIds.has(id)) return [id, toolCall];
       return [id, {
         ...toolCall,
-        status: "error",
+        status: "aborted",
         isError: true,
         result: stoppedResults.get(id),
         asyncState: undefined,
@@ -425,6 +484,8 @@ async function buildSessionResponse(
     });
     sessionState = updatedSession;
   }
+
+  await recoverStaleCodeToolCalls(eventsRepo, messagesRepo, sessionId, effectiveWorkspaceId);
 
   const sinceCursor = url.searchParams.get("since");
   const eventWindow = url.searchParams.get("eventWindow");
@@ -948,12 +1009,6 @@ export async function handleAbortSession(
       return badRequest("Session already closed");
     }
 
-    const activeRun = await runs.findActiveForSession(sessionId);
-    if (!activeRun) {
-      return json({ ok: true, sessionId, status: session.status, aborted: false, workspaceId: effectiveWorkspaceId });
-    }
-
-    await runs.cancel(activeRun.id);
     const stoppedTools = await stopRunningWorkflowTools(
       env,
       runtime,
@@ -962,6 +1017,30 @@ export async function handleAbortSession(
       sessionId,
       effectiveWorkspaceId,
     );
+    const activeRun = await runs.findActiveForSession(sessionId);
+    if (!activeRun) {
+      if (stoppedTools.stoppedToolCallIds.length > 0) {
+        await sessions.save({
+          ...session,
+          status: "idle",
+          updatedAt: Date.now(),
+          errorMessage: undefined,
+        });
+        await runtime.setActive(sessionId, false);
+      }
+      return json({
+        ok: stoppedTools.errors.length === 0,
+        sessionId,
+        status: stoppedTools.stoppedToolCallIds.length > 0 ? "idle" : session.status,
+        aborted: stoppedTools.stoppedToolCallIds.length > 0,
+        stopped: stoppedTools.stoppedToolCallIds.length > 0,
+        stoppedToolCallIds: stoppedTools.stoppedToolCallIds,
+        toolStopErrors: stoppedTools.errors,
+        workspaceId: effectiveWorkspaceId,
+      });
+    }
+
+    await runs.cancel(activeRun.id);
     await sessions.save({
       ...session,
       status: "idle",

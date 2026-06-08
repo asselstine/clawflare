@@ -217,4 +217,57 @@ describe("D1 Session Message Projection", () => {
       await dispose();
     }
   });
+
+  it("projects aborted tool output onto the tool call", async () => {
+    const { db, dispose } = await createDb();
+    try {
+      await createSession(db);
+      const events = new SessionEventRepository(db);
+      const messages = new SessionMessageRepository(db);
+
+      const assistantMessage = {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "call-1", name: "execute_code", arguments: { description: "Long request" } },
+        ],
+        timestamp: 1,
+      };
+
+      await projectAndAppendAgentEvents(events, messages, "session-1", [
+        { type: "message_start", message: assistantMessage },
+        { type: "message_end", message: assistantMessage },
+        { type: "tool_execution_start", toolCallId: "call-1", toolName: "execute_code", args: { description: "Long request" } },
+        {
+          type: "tool_execution_end",
+          toolCallId: "call-1",
+          toolName: "execute_code",
+          result: {
+            content: [{ type: "text", text: "Tool aborted by user." }],
+            details: { ok: false, aborted: true, reason: "user_stop" },
+          },
+          isError: true,
+        },
+      ] as AgentEvent[], { workspaceId: DEFAULT_WORKSPACE_ID });
+
+      const storedMessages = await messages.list("session-1", { limit: 100 });
+      const assistant = storedMessages.messages.find((message) => message.role === "assistant");
+      expect(assistant?.content).toEqual([
+        {
+          type: "tool_call",
+          id: "call-1",
+          name: "execute_code",
+          input: { description: "Long request" },
+          status: "aborted",
+          result: expect.objectContaining({
+            text: "Tool aborted by user.",
+            isError: true,
+            isAborted: true,
+          }),
+        },
+      ]);
+    } finally {
+      await dispose();
+    }
+  });
 });

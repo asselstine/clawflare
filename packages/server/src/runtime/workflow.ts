@@ -363,6 +363,7 @@ async function createWorkflowAgent(
   agentContext?: WorkflowAgentContext,
   timing?: WorkflowTimingLog,
   extraTimingDetails?: () => Record<string, unknown>,
+  options: { toolExecutionTimeoutMs?: number } = {},
 ): Promise<Agent> {
   const componentsStart = timingStart();
   const preparedContext = agentContext ?? await createWorkflowAgentContext(env, sessionId, timing);
@@ -420,6 +421,7 @@ async function createWorkflowAgent(
       ctx,
       toolCtx: { sessionId, workspaceId },
     }),
+    toolExecutionTimeoutMs: options.toolExecutionTimeoutMs,
     streamFn,
     getApiKey: () => components.getApiKey(),
     debugTiming: (phase, startedAt, details) => (timing ?? ((timingPhase, timingStartedAt, timingDetails) =>
@@ -565,6 +567,7 @@ export interface RunSessionRunOptions {
 const DEFAULT_RUN_BUDGET_MS = 20_000;
 const DEFAULT_RUN_LEASE_MS = 65 * 60_000;
 const RUN_BUDGET_BUFFER_MS = 1_500;
+const TOOL_RESULT_PERSISTENCE_BUFFER_MS = 4_000;
 const PENDING_TOOL_FAST_POLL_WINDOW_MS = 5_000;
 const PENDING_TOOL_INLINE_CONTINUATION_MAX_DELAY_MS = 25_000;
 
@@ -617,6 +620,10 @@ function runningAsyncToolPollDelay(session: AgentSessionState, toolCallIds?: str
   return delays.length > 0 ? Math.min(...delays) : undefined;
 }
 
+export function toolExecutionTimeoutForDeadline(deadline: number, now = Date.now()): number {
+  return Math.max(1, deadline - now - TOOL_RESULT_PERSISTENCE_BUFFER_MS);
+}
+
 function cachedStepHasRunningAsyncTool(value: unknown): boolean {
   if (!isRecord(value)) return false;
   const session = value.session;
@@ -635,6 +642,10 @@ class SessionRunCheckpointContext {
     if (Date.now() + RUN_BUDGET_BUFFER_MS >= this.deadline) {
       throw new TimeBudgetExceeded();
     }
+  }
+
+  toolExecutionTimeoutMs(now = Date.now()): number {
+    return toolExecutionTimeoutForDeadline(this.deadline, now);
   }
 
   async assertCanContinue(): Promise<void> {
@@ -968,6 +979,11 @@ async function processPrompt(
                   agentContext,
                   stepTiming,
                   () => promptApiTimingDetails(input),
+                  {
+                    toolExecutionTimeoutMs: currentStep.type === "tool"
+                      ? checkpoints.toolExecutionTimeoutMs()
+                      : undefined,
+                  },
                 );
                 return agent.runSingleStep(agentSession, currentStep);
               })();

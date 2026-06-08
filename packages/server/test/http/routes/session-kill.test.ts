@@ -208,7 +208,7 @@ describe("handleAbortSession", () => {
       status: "idle",
       toolCalls: expect.objectContaining({
         "tool-1": expect.objectContaining({
-          status: "error",
+          status: "aborted",
           isError: true,
           asyncState: undefined,
         }),
@@ -320,7 +320,7 @@ describe("handleAbortSession", () => {
       messages: [expect.objectContaining({ toolCallId: "tool-current" })],
       toolCalls: expect.objectContaining({
         "tool-old": expect.objectContaining({ status: "running" }),
-        "tool-current": expect.objectContaining({ status: "error" }),
+        "tool-current": expect.objectContaining({ status: "aborted" }),
       }),
       turns: [
         expect.objectContaining({ id: "turn-1", toolResultIds: [] }),
@@ -354,6 +354,86 @@ describe("handleAbortSession", () => {
     expect(data.aborted).toBe(false);
     expect(mocks.requestCancelRun).not.toHaveBeenCalled();
     expect(mocks.markClosed).not.toHaveBeenCalled();
+  });
+
+  it("marks pending tools aborted even when there is no active run", async () => {
+    const now = Date.now();
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "run-1",
+      status: "processing",
+      nextEventCursor: "0",
+      updatedAt: now,
+      maxQueueSize: 100,
+    });
+    mocks.findActiveForSession.mockResolvedValue(null);
+    mocks.getWorkflowSession.mockResolvedValue({
+      id: "session-1",
+      createdAt: now,
+      updatedAt: now,
+      systemPrompt: "",
+      model: {},
+      thinkingLevel: "none",
+      messages: [],
+      steeringQueue: [],
+      followUpQueue: [],
+      steeringMode: "all",
+      followUpMode: "all",
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools",
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_stored_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending",
+        },
+      },
+      status: "running",
+    });
+    mocks.saveSession.mockResolvedValue(undefined);
+    mocks.setActive.mockResolvedValue(undefined);
+
+    const response = await handleAbortSession("session-1", {} as Env, createRequestContext());
+    const data = (await response.json()) as {
+      ok: boolean;
+      status: string;
+      aborted: boolean;
+      stoppedToolCallIds: string[];
+    };
+
+    expect(response.status).toBe(200);
+    expect(data.ok).toBe(true);
+    expect(data.status).toBe("idle");
+    expect(data.aborted).toBe(true);
+    expect(data.stoppedToolCallIds).toEqual(["tool-1"]);
+    expect(mocks.saveWorkflowSession).toHaveBeenCalledWith("session-1", expect.objectContaining({
+      status: "idle",
+      toolCalls: expect.objectContaining({
+        "tool-1": expect.objectContaining({ status: "aborted" }),
+      }),
+    }));
+    expect(mocks.projectAndAppendAgentEvents).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      "session-1",
+      [expect.objectContaining({
+        type: "tool_execution_end",
+        toolCallId: "tool-1",
+        toolName: "execute_stored_code",
+        isError: true,
+      })],
+      { workspaceId: "workspace-1" },
+    );
+    expect(mocks.saveSession).toHaveBeenCalledWith(expect.objectContaining({ status: "idle" }));
+    expect(mocks.setActive).toHaveBeenCalledWith("session-1", false);
   });
 
   it("cancels a runnable run immediately and marks the session idle", async () => {

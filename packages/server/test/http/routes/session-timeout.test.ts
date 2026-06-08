@@ -9,7 +9,11 @@ const mocks = vi.hoisted(() => ({
   listSince: vi.fn(),
   listRecent: vi.fn(),
   listBefore: vi.fn(),
+  appendEvents: vi.fn(),
   listMessages: vi.fn(),
+  listRecentMessages: vi.fn(),
+  findLatestAssistantWithToolCall: vi.fn(),
+  updateMessage: vi.fn(),
   getWorkflowSession: vi.fn(),
 }));
 
@@ -22,12 +26,16 @@ vi.mock("../../../src/data/index.js", () => ({
     listSince: mocks.listSince,
     listRecent: mocks.listRecent,
     listBefore: mocks.listBefore,
+    append: mocks.appendEvents,
   })),
   SessionRuntimeRepository: vi.fn().mockImplementation(() => ({
     getWorkflowSession: mocks.getWorkflowSession,
   })),
   SessionMessageRepository: vi.fn().mockImplementation(() => ({
     list: mocks.listMessages,
+    listRecent: mocks.listRecentMessages,
+    findLatestAssistantWithToolCall: mocks.findLatestAssistantWithToolCall,
+    update: mocks.updateMessage,
   })),
   ContainerRepository: vi.fn(),
   InputQueueRepository: vi.fn(),
@@ -62,6 +70,10 @@ describe("handleGetSession timeout recovery", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listMessages.mockResolvedValue({ messages: [], nextCursor: "0" });
+    mocks.listRecentMessages.mockResolvedValue([]);
+    mocks.findLatestAssistantWithToolCall.mockResolvedValue(null);
+    mocks.updateMessage.mockImplementation(async (message) => message);
+    mocks.appendEvents.mockResolvedValue(undefined);
   });
 
   it("returns the recovered error status in the same poll response", async () => {
@@ -120,6 +132,59 @@ describe("handleGetSession timeout recovery", () => {
     expect(data.messages).toEqual([]);
     expect(data.events).toHaveLength(1);
     expect(mocks.listMessages).toHaveBeenCalled();
+  });
+
+  it("recovers stale code tool calls during polling", async () => {
+    const now = Date.now();
+    mocks.findByIdInWorkspace.mockResolvedValue({
+      id: "session-1",
+      workspaceId: "workspace-1",
+      workflowId: "workflow-1",
+      status: "processing",
+      nextEventCursor: "1",
+      updatedAt: now,
+      maxQueueSize: 100,
+    });
+    const staleMessage = {
+      id: "assistant-1",
+      sessionId: "session-1",
+      sequence: 2,
+      role: "assistant",
+      status: "complete",
+      content: [{
+        type: "tool_call",
+        id: "tool-1",
+        name: "execute_stored_code",
+        input: { name: "netlify-create-site", timeoutMs: 60_000 },
+        status: "running",
+      }],
+      createdAt: now - 80_000,
+      updatedAt: now - 80_000,
+    };
+    mocks.listRecentMessages.mockResolvedValue([staleMessage]);
+    mocks.findLatestAssistantWithToolCall.mockResolvedValue(staleMessage);
+    mocks.listSince.mockResolvedValue({ events: [], nextCursor: "1" });
+
+    const response = await handleGetSession(
+      "session-1",
+      new URL("https://example.com/v1/session/session-1?since=1&includeMessages=auto"),
+      {} as Env,
+      createRequestContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.updateMessage).toHaveBeenCalledWith(expect.objectContaining({
+      content: [expect.objectContaining({
+        type: "tool_call",
+        id: "tool-1",
+        status: "error",
+        result: expect.objectContaining({
+          isError: true,
+          text: "Tool execute_stored_code timed out without reporting a result.",
+        }),
+      })],
+    }));
+    expect(mocks.appendEvents).toHaveBeenCalled();
   });
 
   it("loads canonical event deltas and durable messages together", async () => {

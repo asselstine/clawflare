@@ -21,7 +21,7 @@ export interface AgentToolCallState {
   name: string;
   args: unknown;
   turnId: string;
-  status: "pending" | "running" | "complete" | "error";
+  status: "pending" | "running" | "complete" | "error" | "aborted";
   result?: AgentToolResult<unknown>;
   isError?: boolean;
 }

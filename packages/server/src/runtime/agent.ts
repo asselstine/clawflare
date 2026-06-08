@@ -17,7 +17,7 @@ export interface AgentToolCallState {
   name: string;
   args: unknown;
   turnId: string;
-  status: "pending" | "running" | "complete" | "error";
+  status: "pending" | "running" | "complete" | "error" | "aborted";
   result?: AgentToolResult<unknown>;
   isError?: boolean;
   asyncState?: unknown;
@@ -55,6 +55,7 @@ export interface AgentConfig {
   systemPrompt: string;
   tools: RuntimeTool[];
   toolRuntimeContext: ToolRuntimeContext;
+  toolExecutionTimeoutMs?: number;
   streamFn?: StreamFn;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -106,11 +107,78 @@ export interface RunStepResult extends AgentStepResult {
   shouldStop: boolean;
 }
 
+const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 65_000;
+const TOOL_EXECUTION_TIMEOUT_BUFFER_MS = 5_000;
+
 export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
   return sanitizeToolResultHistory(messages.filter(
     (message): message is Message =>
       message.role === "user" || message.role === "assistant" || message.role === "toolResult",
   ));
+}
+
+function effectiveToolExecutionTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs)) return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
+  return Math.max(1, Math.floor(timeoutMs));
+}
+
+function requestedToolExecutionTimeoutMs(params: unknown): number | undefined {
+  if (typeof params !== "object" || params === null || Array.isArray(params)) return undefined;
+  const timeoutMs = (params as Record<string, unknown>).timeoutMs;
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs)) return undefined;
+  return Math.max(1, Math.floor(timeoutMs) + TOOL_EXECUTION_TIMEOUT_BUFFER_MS);
+}
+
+function toolAbortError(): Error {
+  const error = new Error("Tool execution aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+async function runWithToolTimeout<T>(
+  timeoutMs: number | undefined,
+  signal: AbortSignal | undefined,
+  callback: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const timeout = effectiveToolExecutionTimeoutMs(timeoutMs);
+  if (signal?.aborted) throw toolAbortError();
+
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let finished = false;
+
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", onAbort);
+  };
+
+  const toolPromise = Promise.resolve().then(() => callback(controller.signal));
+  toolPromise.catch(() => undefined);
+
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Tool execution timed out after ${timeout}ms.`));
+    }, timeout);
+  });
+
+  const abortPromise = new Promise<never>((_resolve, reject) => {
+    controller.signal.addEventListener("abort", () => {
+      if (signal?.aborted) reject(toolAbortError());
+    }, { once: true });
+  });
+
+  try {
+    return await Promise.race([toolPromise, timeoutPromise, abortPromise]);
+  } finally {
+    cleanup();
+  }
 }
 
 function assistantToolCallIds(message: AssistantMessage): Set<string> {
@@ -168,16 +236,23 @@ function extractToolCalls(message: AssistantMessage): AgentToolCall[] {
   return message.content.filter((item): item is AgentToolCall => item.type === "toolCall");
 }
 
-function createErrorToolResult(message: string): AgentToolResult<unknown> {
+function createErrorToolResult(message: string, details: Record<string, unknown> = {}): AgentToolResult<unknown> {
   return {
     content: [{ type: "text", text: message }],
-    details: {},
+    details,
   };
 }
 
 function isErroredToolResult(result: AgentToolResult<unknown>): boolean {
   const details = result.details;
   return typeof details === "object" && details !== null && "ok" in details && details.ok === false;
+}
+
+function isAbortedToolResult(result: AgentToolResult<unknown>): boolean {
+  const details = result.details;
+  if (typeof details !== "object" || details === null) return false;
+  return (details as Record<string, unknown>).aborted === true ||
+    (details as Record<string, unknown>).stopped === true;
 }
 
 function isPendingToolResult(result: AgentToolResult<unknown>): boolean {
@@ -629,7 +704,7 @@ export class Agent {
   ): Promise<ToolStepResult> {
     const toolCall = session.toolCalls[toolCallId];
     if (!toolCall) throw new Error(`Unknown tool call: ${toolCallId}`);
-    if (toolCall.status === "complete" || toolCall.status === "error") {
+    if (toolCall.status === "complete" || toolCall.status === "error" || toolCall.status === "aborted") {
       const existing = session.messages.find(
         (message): message is ToolResultMessage =>
           message.role === "toolResult" && message.toolCallId === toolCallId,
@@ -683,26 +758,34 @@ export class Agent {
         });
 
         const executeStart = now();
-        result = await tool.execute(this.config.toolRuntimeContext, toolCall.id, executableArgs as never, signal, (partialResult) => {
-          const event: AgentEvent = {
-            type: "tool_execution_update",
-            toolCallId: toolCall.id,
-            toolName: toolCall.name,
-            args: toolCall.args,
-            partialResult,
-          };
-          events.push(event);
-          const append = this.config.onEvent?.(event);
-          if (append) pendingEventAppends.push(Promise.resolve(append));
-        });
-        isError = isErroredToolResult(result);
+        result = await runWithToolTimeout(
+          this.config.toolExecutionTimeoutMs ?? requestedToolExecutionTimeoutMs(executableArgs),
+          signal,
+          (toolSignal) => tool.execute(this.config.toolRuntimeContext, toolCall.id, executableArgs as never, toolSignal, (partialResult) => {
+            const event: AgentEvent = {
+              type: "tool_execution_update",
+              toolCallId: toolCall.id,
+              toolName: toolCall.name,
+              args: toolCall.args,
+              partialResult,
+            };
+            events.push(event);
+            const append = this.config.onEvent?.(event);
+            if (append) pendingEventAppends.push(Promise.resolve(append));
+          }),
+        );
+        isError = isErroredToolResult(result) || isAbortedToolResult(result);
         this.config.debugTiming?.("tool.execute.done", executeStart, {
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           contentLength: JSON.stringify(result.content).length,
         });
       } catch (error) {
-        result = createErrorToolResult(error instanceof Error ? error.message : String(error));
+        const aborted = error instanceof Error && error.name === "AbortError";
+        result = createErrorToolResult(error instanceof Error ? error.message : String(error), {
+          ok: false,
+          ...(aborted ? { aborted: true, reason: "abort_signal" } : {}),
+        });
         isError = true;
         this.config.debugTiming?.("tool.execute.error", toolStepStart, {
           toolCallId: toolCall.id,
@@ -783,7 +866,7 @@ export class Agent {
         ...session.toolCalls,
         [toolCall.id]: {
           ...toolCall,
-          status: isError ? "error" : "complete",
+          status: isAbortedToolResult(result) ? "aborted" : isError ? "error" : "complete",
           isError,
         },
       },

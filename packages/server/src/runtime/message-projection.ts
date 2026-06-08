@@ -74,11 +74,12 @@ async function projectAgentEvent(
   }
 
   if (event.type === "tool_execution_end") {
+    const isAborted = isAbortedAgentResult(event.result);
     return updateToolCall(messagesRepo, sessionId, event.toolCallId, timestamp, (block) => ({
       ...block,
-      status: event.isError ? "error" : "complete",
+      status: isAborted ? "aborted" : event.isError ? "error" : "complete",
       partialResult: undefined,
-      result: toolResultFromAgentResult(event.result, Boolean(event.isError), timestamp),
+      result: toolResultFromAgentResult(event.result, Boolean(event.isError), timestamp, isAborted),
     }));
   }
 
@@ -275,11 +276,18 @@ function formatStreamDeltas(details: Record<string, unknown> | undefined): strin
   return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
-function toolResultFromAgentResult(result: unknown, isError: boolean, timestamp: number): ToolResult {
+function isAbortedAgentResult(result: unknown): boolean {
+  if (!isRecord(result)) return false;
+  const details = isRecord(result.details) ? result.details : undefined;
+  return details?.aborted === true || details?.stopped === true;
+}
+
+function toolResultFromAgentResult(result: unknown, isError: boolean, timestamp: number, isAborted = false): ToolResult {
   return {
     output: result,
     text: extractResultText(result),
     isError,
+    isAborted,
     completedAt: timestamp,
   };
 }

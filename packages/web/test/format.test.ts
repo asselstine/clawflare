@@ -1,7 +1,7 @@
 import type { Message, MessageContentBlock, MessageRole, MessageStatus, SessionEvent, ToolResult } from "@clawflare/types";
 import { describe, expect, it } from "vitest";
 
-import { applyAssistantPartialEvents, formatMessageForDisplay, type DisplayMessage } from "../src/lib/format";
+import { applyAssistantPartialEvents, formatMessageForDisplay, getEventDisplayMessage, type DisplayMessage } from "../src/lib/format";
 
 describe("message formatting", () => {
   it("preserves message identity for rendered messages", () => {
@@ -108,6 +108,40 @@ describe("message formatting", () => {
     expect(next.map((item) => item.role)).toEqual(["user", "assistant"]);
     expect(next[1]).toMatchObject({ id: "assistant-1", content: "hi" });
   });
+
+  it("formats aborted tool calls distinctly from errors", () => {
+    const abortedMessage = message({
+      id: "assistant-1",
+      sequence: 2,
+      role: "assistant",
+      status: "complete",
+      content: [
+        toolCallBlock({
+          id: "tool-1",
+          status: "aborted",
+          result: {
+            output: { details: { ok: false, aborted: true } },
+            text: "Tool aborted by user.",
+            isError: true,
+            isAborted: true,
+            completedAt: 10,
+          },
+        }),
+      ],
+    });
+
+    const formatted = formatMessageForDisplay(abortedMessage);
+
+    expect(formatted.toolCalls?.[0]).toMatchObject({
+      id: "tool-1",
+      status: "aborted",
+      result: {
+        isError: true,
+        content: "Tool aborted by user.",
+      },
+    });
+    expect(getEventDisplayMessage(event("message.updated", abortedMessage))).toBe("Aborted search");
+  });
 });
 
 function event(type: "message.created" | "message.updated" | "message.completed", eventMessage: Message): SessionEvent {
@@ -140,7 +174,7 @@ function message(options: {
 
 function toolCallBlock(options: {
   id: string;
-  status: "queued" | "running" | "complete" | "error";
+  status: "queued" | "running" | "complete" | "error" | "aborted";
   result?: ToolResult;
 }): MessageContentBlock {
   return {

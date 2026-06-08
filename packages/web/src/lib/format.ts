@@ -1,7 +1,7 @@
 import type { Message, SessionEvent, SessionSummary } from "@clawflare/types";
 
 export type DisplayMessageRole = "user" | "assistant" | "system" | "toolResult" | "error";
-export type ToolCallStatus = "pending" | "running" | "complete" | "error";
+export type ToolCallStatus = "pending" | "running" | "complete" | "error" | "aborted";
 
 export interface ToolCallInfo {
   id: string;
@@ -41,8 +41,12 @@ export function getEventDisplayMessage(event: SessionEvent): string | null {
   switch (event.type) {
     case "message.created":
     case "message.updated": {
-      const runningTool = event.message.content.find((block) => block.type === "tool_call" && block.status === "running");
+      const runningTool = event.message.content.find((block) => block.type === "tool_call" && blockStatus(block) === "running");
       if (runningTool?.type === "tool_call") return `Running ${runningTool.name}`;
+      const abortedTool = event.message.content.find((block) => block.type === "tool_call" && blockStatus(block) === "aborted");
+      if (abortedTool?.type === "tool_call") return `Aborted ${abortedTool.name}`;
+      const erroredTool = event.message.content.find((block) => block.type === "tool_call" && blockStatus(block) === "error");
+      if (erroredTool?.type === "tool_call") return `Errored ${erroredTool.name}`;
       return getEventMessageRole(event) === "assistant" ? "Generating response" : null;
     }
     case "message.completed":
@@ -266,7 +270,11 @@ function toolCallFromBlock(part: Record<string, unknown>): ToolCallInfo {
 }
 
 function toolCallStatus(value: unknown): ToolCallStatus {
-  return value === "running" || value === "complete" || value === "error" ? value : "pending";
+  return value === "running" || value === "complete" || value === "error" || value === "aborted" ? value : "pending";
+}
+
+function blockStatus(block: unknown): unknown {
+  return isRecord(block) ? block.status : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

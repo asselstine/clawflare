@@ -103,11 +103,37 @@ describe("container egress setup", () => {
     await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-abc");
 
     expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledWith(expect.objectContaining({
-      cancellationOptions: expect.objectContaining({ portReadyTimeoutMS: 30_000 }),
+      cancellationOptions: { portReadyTimeoutMS: 30_000 },
+    }));
+    expect(containerMocks.startAndWaitForPorts).not.toHaveBeenCalledWith(expect.objectContaining({
+      cancellationOptions: expect.objectContaining({ abort: expect.anything() }),
     }));
     expect(containerMocks.setOutboundHandler).toHaveBeenCalledWith(
       "clawflare",
       { containerId: "session-abc" }
+    );
+  });
+
+  it("does not pass AbortSignal objects through container RPC calls", async () => {
+    const controller = new AbortController();
+    containerMocks.startAndWaitForPorts.mockResolvedValue(undefined);
+    containerMocks.setOutboundHandler.mockResolvedValue(undefined);
+    containerMocks.containerFetch.mockImplementation(() => Promise.resolve(
+      new Response(JSON.stringify({
+        ok: true,
+        status: "healthy",
+        workspace: "/workspace",
+      }))
+    ));
+
+    await getContainerHealth({ CODING_CONTAINER: {} } as Env, "session-signal", controller.signal);
+
+    expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledWith(expect.objectContaining({
+      cancellationOptions: { portReadyTimeoutMS: 30_000 },
+    }));
+    expect(containerMocks.containerFetch).toHaveBeenCalledWith(
+      "http://localhost/health",
+      { method: "GET" }
     );
   });
 
@@ -146,7 +172,7 @@ describe("container egress setup", () => {
     await containerBashStart({ CODING_CONTAINER: {} } as Env, "session-bash", "git clone https://example.com/repo.git");
 
     expect(containerMocks.startAndWaitForPorts).toHaveBeenCalledWith(expect.objectContaining({
-      cancellationOptions: expect.objectContaining({ portReadyTimeoutMS: 30_000 }),
+      cancellationOptions: { portReadyTimeoutMS: 30_000 },
     }));
     expect(containerMocks.containerFetch).toHaveBeenCalledWith(
       "http://localhost/bash/start",

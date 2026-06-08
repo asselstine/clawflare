@@ -282,7 +282,7 @@ async function startContainerAndConfigureOutbound(
       await container.startAndWaitForPorts({
         ports: [8080],
         startOptions: { enableInternet: false },
-        cancellationOptions: { portReadyTimeoutMS: CONTAINER_START_TIMEOUT, abort: signal },
+        cancellationOptions: { portReadyTimeoutMS: CONTAINER_START_TIMEOUT },
       });
       await container.setOutboundHandler("clawflare", { containerId });
       return container;
@@ -324,7 +324,6 @@ export async function callContainerRuntime(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal,
     });
   } catch {
     forgetContainerReadiness(containerId);
@@ -333,7 +332,6 @@ export async function callContainerRuntime(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal,
     });
   }
 
@@ -371,7 +369,6 @@ export async function getContainerHealth(
 
   const response = await container.containerFetch("http://localhost/health", {
     method: "GET",
-    signal,
   });
 
   const { payload, rawBody } = await readContainerRuntimeResponse(response);

@@ -69,10 +69,12 @@ export function formatExecutionResult(
   if (result.stderr) parts.push(`Stderr:\n${result.stderr}`);
 
   const output = tailToolOutput(parts.join("\n\n"), limit);
+  const aborted = typeof result.error === "string" && /aborted/i.test(result.error);
   return {
     content: [{ type: "text", text: output.text }],
     details: {
       ok: false,
+      ...(aborted ? { aborted: true, reason: "abort_signal" } : {}),
       truncated: output.truncated,
       originalLength: output.originalLength,
       limit: output.limit,

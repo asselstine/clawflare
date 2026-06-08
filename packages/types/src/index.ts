@@ -6,7 +6,7 @@ export type MessageRole = "user" | "assistant" | "system";
 
 export type MessageStatus = "queued" | "streaming" | "complete" | "error";
 
-export type ToolCallStatus = "queued" | "running" | "complete" | "error";
+export type ToolCallStatus = "queued" | "running" | "complete" | "error" | "aborted";
 
 export interface TextContentBlock {
   type: "text";
@@ -17,6 +17,7 @@ export interface ToolResult {
   output: unknown;
   text?: string;
   isError: boolean;
+  isAborted?: boolean;
   startedAt?: number;
   completedAt: number;
 }

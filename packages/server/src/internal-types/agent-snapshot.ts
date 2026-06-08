@@ -15,7 +15,7 @@ export const CURRENT_SNAPSHOT_VERSION = 1;
 export interface PersistedToolCall {
   id: string;
   name: string;
-  status: "pending" | "running" | "complete" | "error";
+  status: "pending" | "running" | "complete" | "error" | "aborted";
   resultPreview?: string;
   resultSize?: number;
   errorMessage?: string;

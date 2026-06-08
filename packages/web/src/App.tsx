@@ -1870,8 +1870,27 @@ function App(): JSX.Element {
       setStoppingSessionId(targetSessionId);
       setServerProcessingSessionId(targetSessionId);
       setStatusText("Stopping agent");
+      setMessages((current) => markVisibleToolCallsAborted(current));
       void client.abortSession(targetSessionId)
-        .then(() => queryClient.invalidateQueries({ queryKey: ["sessions"] }))
+        .then(async () => {
+          const finalSession = await client.getSession(targetSessionId, undefined, true, {
+            eventWindow: "tail",
+            eventLimit: 100,
+            includePromptHistory: true,
+          });
+          latestEventCursorRef.current = finalSession.nextEventCursor;
+          const nextMessages = attachToolResults((finalSession.messages ?? []).map(formatMessageForDisplay));
+          setMessages(nextMessages);
+          rememberSessionContainers(targetSessionId, nextMessages);
+          setPromptHistory(finalSession.promptHistory ?? null);
+          setStoppingSessionId(null);
+          if (abortingSessionIdRef.current === targetSessionId) abortingSessionIdRef.current = null;
+          setServerProcessingSessionId(null);
+          setStatusText(finalSession.status === "error" ? "Error" : "Aborted");
+          setError(finalSession.status === "error" ? finalSession.errorMessage ?? "Session failed" : null);
+          await queryClient.invalidateQueries({ queryKey: ["container-find-paths"] });
+          await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+        })
         .catch(showError);
     }
     abortController.current?.abort();
@@ -3463,12 +3482,14 @@ function ChatMessage({
 }
 
 function ToolCall({ toolCall }: { toolCall: ToolCallInfo }): JSX.Element {
-  const hasError = toolCall.status === "error" || toolCall.result?.isError;
-  const complete = toolCall.status === "complete" || Boolean(toolCall.result && !hasError);
+  const aborted = toolCall.status === "aborted";
+  const hasError = !aborted && (toolCall.status === "error" || toolCall.result?.isError);
+  const complete = !aborted && (toolCall.status === "complete" || Boolean(toolCall.result && !hasError));
+  const toneClass = aborted ? "border-amberSoft-500" : hasError ? "border-red-600" : complete ? "border-mint-600" : "border-accent-600";
   return (
-    <details className={`border-l-2 py-1 pl-3 ${hasError ? "border-red-600" : complete ? "border-mint-600" : "border-accent-600"}`}>
+    <details className={`border-l-2 py-1 pl-3 ${toneClass}`}>
       <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-slate-300">
-        {hasError ? <X className="h-4 w-4 text-red-300" /> : complete ? <Check className="h-4 w-4 text-mint-500" /> : <Circle className="h-3 w-3 fill-accent-500 text-accent-500" />}
+        {aborted ? <Square className="h-3.5 w-3.5 fill-amberSoft-500 text-amberSoft-500" /> : hasError ? <X className="h-4 w-4 text-red-300" /> : complete ? <Check className="h-4 w-4 text-mint-500" /> : <Circle className="h-3 w-3 fill-accent-500 text-accent-500" />}
         <span className="truncate font-medium">{formatToolCallHeader(toolCall.name, toolCall.params)}</span>
         <ChevronDown className="ml-auto h-4 w-4 text-slate-500" />
       </summary>
@@ -3477,6 +3498,29 @@ function ToolCall({ toolCall }: { toolCall: ToolCallInfo }): JSX.Element {
       </pre>
     </details>
   );
+}
+
+function markVisibleToolCallsAborted(messages: DisplayMessage[]): DisplayMessage[] {
+  return messages.map((message) => {
+    if (!message.toolCalls?.length) return message;
+    let changed = false;
+    const toolCalls = message.toolCalls.map((toolCall) => {
+      if (toolCall.status !== "pending" && toolCall.status !== "running") return toolCall;
+      changed = true;
+      return {
+        ...toolCall,
+        status: "aborted" as const,
+        result: toolCall.result ?? {
+          role: "toolResult" as const,
+          toolName: toolCall.name,
+          isError: true,
+          details: { ok: false, aborted: true, reason: "user_stop" },
+          content: "Tool aborted by user.",
+        },
+      };
+    });
+    return changed ? { ...message, toolCalls } : message;
+  });
 }
 
 function Avatar({ role }: { role: DisplayMessage["role"] }): JSX.Element {
