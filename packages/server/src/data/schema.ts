@@ -308,6 +308,30 @@ export const sessionRunSteps = sqliteTable(
   })
 );
 
+export const toolRuns = sqliteTable("tool_runs", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => sessions.id, { onDelete: "cascade" }),
+  workspaceId: text("workspace_id"),
+  toolCallId: text("tool_call_id").notNull(),
+  toolName: text("tool_name").notNull(),
+  status: text("status", {
+    enum: ["running", "complete", "error", "aborted"],
+  }).notNull(),
+  inputJson: text("input_json").notNull(),
+  internalStateJson: text("internal_state_json"),
+  partialResultJson: text("partial_result_json"),
+  resultJson: text("result_json"),
+  errorMessage: text("error_message"),
+  startedAt: integer("started_at").notNull(),
+  updatedAt: integer("updated_at").notNull(),
+  completedAt: integer("completed_at"),
+}, (table) => ({
+  sessionToolCall: uniqueIndex("idx_tool_runs_session_tool_call").on(table.sessionId, table.toolCallId),
+  sessionStatus: index("idx_tool_runs_session_status").on(table.sessionId, table.status),
+  statusUpdated: index("idx_tool_runs_status_updated").on(table.status, table.updatedAt),
+  workspace: index("idx_tool_runs_workspace").on(table.workspaceId),
+}));
+
 export const sessionTools = sqliteTable(
   "session_tools",
   {

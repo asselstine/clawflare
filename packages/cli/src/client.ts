@@ -161,6 +161,13 @@ type SessionWebSocketMessage =
   | { type: "heartbeat" }
   | { type: "error"; error?: string; message?: string };
 
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost");
+}
+
 export class AgentClient {
   private url: string;
   private token: string;
@@ -169,9 +176,9 @@ export class AgentClient {
   private currentSessionId: string | null = null;
 
   constructor(url: string, token: string, workspace?: string) {
-    // Require HTTPS for security - reject plain HTTP
+    // Require HTTPS for security, while allowing local Wrangler development.
     const urlObj = new URL(url);
-    if (urlObj.protocol !== "https:") {
+    if (urlObj.protocol !== "https:" && !(urlObj.protocol === "http:" && isLoopbackHost(urlObj.hostname))) {
       throw new Error(
         `Insecure server URL: ${url}. HTTPS is required. Clawflare CLI does not support HTTP servers.`
       );
@@ -223,7 +230,7 @@ export class AgentClient {
   }
 
   private buildWebSocketUrl(path: string): string {
-    return `${this.url.replace(/^https:/, "wss:")}${path}`;
+    return `${this.url.replace(/^https:/, "wss:").replace(/^http:/, "ws:")}${path}`;
   }
 
   /**
@@ -677,10 +684,11 @@ export class AgentClient {
 
   // WebSocket for streaming responses
   async connectWebSocket(): Promise<WebSocket> {
-    const wsUrl = `${this.url.replace(/^https/, "wss")}/ws`;
+    const wsUrl = this.buildWebSocketUrl("/ws");
     
-    // Ensure we're using secure WebSocket (WSS)
-    if (!wsUrl.startsWith("wss://")) {
+    // Ensure we're using secure WebSocket, while allowing local Wrangler development.
+    const parsed = new URL(wsUrl);
+    if (parsed.protocol !== "wss:" && !(parsed.protocol === "ws:" && isLoopbackHost(parsed.hostname))) {
       throw new Error(
         `Insecure WebSocket URL: ${wsUrl}. WSS (secure WebSocket) is required.`
       );

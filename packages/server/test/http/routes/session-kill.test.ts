@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   destroyContainer: vi.fn(),
   containerBashCancel: vi.fn(),
   projectAndAppendAgentEvents: vi.fn(),
+  findToolRunByToolCall: vi.fn(),
 }));
 
 vi.mock("../../../src/data/index.js", () => ({
@@ -52,6 +53,9 @@ vi.mock("../../../src/data/index.js", () => ({
     unlinkSession: mocks.unlinkSession,
     listLinksForContainer: mocks.listLinksForContainer,
     markDestroyed: mocks.markDestroyed,
+  })),
+  ToolRunRepository: vi.fn().mockImplementation(() => ({
+    findByToolCall: mocks.findToolRunByToolCall,
   })),
   InputQueueRepository: vi.fn(),
 }));
@@ -88,6 +92,7 @@ describe("handleAbortSession", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getWorkflowSession.mockResolvedValue(null);
+    mocks.findToolRunByToolCall.mockResolvedValue(null);
     mocks.saveWorkflowSession.mockResolvedValue({ written: false, skippedUnchanged: true, serializedJson: "{}", serializedBytes: 2 });
     mocks.projectAndAppendAgentEvents.mockResolvedValue(undefined);
   });
@@ -178,14 +183,17 @@ describe("handleAbortSession", () => {
           args: {},
           turnId: "turn-1",
           status: "running",
-          asyncState: {
-            kind: "container_bash",
-            containerId: "container-1",
-            commandId: "command-1",
-          },
         },
       },
       status: "running",
+    });
+    mocks.findToolRunByToolCall.mockResolvedValue({
+      status: "running",
+      internalState: {
+        kind: "container_bash",
+        containerId: "container-1",
+        commandId: "command-1",
+      },
     });
     mocks.cancelRun.mockResolvedValue(undefined);
     mocks.containerBashCancel.mockResolvedValue({ ok: true });
@@ -210,7 +218,6 @@ describe("handleAbortSession", () => {
         "tool-1": expect.objectContaining({
           status: "aborted",
           isError: true,
-          asyncState: undefined,
         }),
       }),
     }));
@@ -281,11 +288,6 @@ describe("handleAbortSession", () => {
           args: {},
           turnId: "turn-1",
           status: "running",
-          asyncState: {
-            kind: "container_bash",
-            containerId: "container-old",
-            commandId: "command-old",
-          },
         },
         "tool-current": {
           id: "tool-current",
@@ -293,15 +295,29 @@ describe("handleAbortSession", () => {
           args: {},
           turnId: "turn-2",
           status: "running",
-          asyncState: {
-            kind: "container_bash",
-            containerId: "container-current",
-            commandId: "command-current",
-          },
         },
       },
       status: "running",
     });
+    mocks.findToolRunByToolCall.mockImplementation(async (_sessionId: string, toolCallId: string) =>
+      toolCallId === "tool-current"
+        ? {
+            status: "running",
+            internalState: {
+              kind: "container_bash",
+              containerId: "container-current",
+              commandId: "command-current",
+            },
+          }
+        : {
+            status: "running",
+            internalState: {
+              kind: "container_bash",
+              containerId: "container-old",
+              commandId: "command-old",
+            },
+          }
+    );
     mocks.cancelRun.mockResolvedValue(undefined);
     mocks.containerBashCancel.mockResolvedValue({ ok: true });
     mocks.saveSession.mockResolvedValue(undefined);

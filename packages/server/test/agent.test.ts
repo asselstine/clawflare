@@ -4,6 +4,8 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { Agent, createEmptyAgentSession, defaultConvertToLlm } from "../src/runtime/agent.js";
 import type { RuntimeTool, ToolRuntimeContext } from "../src/modules/tools/types.js";
+import type { DurableToolRunStore } from "../src/runtime/tool-execution.js";
+import type { MarkToolRunRunningParams, MarkToolRunTerminalParams, ToolRun } from "../src/data/index.js";
 
 describe("Agent", () => {
   const model = {
@@ -18,6 +20,59 @@ describe("Agent", () => {
     sessionId: "session-test",
     workspaceId: "workspace-test",
   } as ToolRuntimeContext;
+
+  class MemoryToolRunStore implements DurableToolRunStore {
+    private readonly runs = new Map<string, ToolRun>();
+
+    async findByToolCall(sessionId: string, toolCallId: string): Promise<ToolRun | null> {
+      return this.runs.get(`${sessionId}:${toolCallId}`) ?? null;
+    }
+
+    async markRunning(params: MarkToolRunRunningParams): Promise<ToolRun> {
+      const key = `${params.sessionId}:${params.toolCallId}`;
+      const existing = this.runs.get(key);
+      const now = Date.now();
+      const run: ToolRun = {
+        id: existing?.id ?? `toolrun_${params.sessionId}_${params.toolCallId}`,
+        sessionId: params.sessionId,
+        workspaceId: params.workspaceId,
+        toolCallId: params.toolCallId,
+        toolName: params.toolName,
+        status: "running",
+        input: params.input,
+        internalState: params.internalState,
+        partialResult: params.partialResult,
+        startedAt: existing?.startedAt ?? now,
+        updatedAt: now,
+      };
+      this.runs.set(key, run);
+      return run;
+    }
+
+    async markTerminal(params: MarkToolRunTerminalParams): Promise<ToolRun> {
+      const key = `${params.sessionId}:${params.toolCallId}`;
+      const existing = this.runs.get(key);
+      const now = Date.now();
+      const run: ToolRun = {
+        id: existing?.id ?? `toolrun_${params.sessionId}_${params.toolCallId}`,
+        sessionId: params.sessionId,
+        workspaceId: params.workspaceId,
+        toolCallId: params.toolCallId,
+        toolName: params.toolName,
+        status: params.status,
+        input: params.input,
+        internalState: params.internalState,
+        partialResult: params.partialResult,
+        result: params.result,
+        errorMessage: params.errorMessage,
+        startedAt: existing?.startedAt ?? now,
+        updatedAt: now,
+        completedAt: now,
+      };
+      this.runs.set(key, run);
+      return run;
+    }
+  }
 
   it("drops orphaned tool results before sending history to the model", () => {
     const converted = defaultConvertToLlm([
@@ -273,7 +328,8 @@ describe("Agent", () => {
       }),
     } satisfies RuntimeTool;
 
-    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
+    const toolRuns = new MemoryToolRunStore();
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext, toolRuns });
     const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
     const session = {
       ...empty,
@@ -302,6 +358,88 @@ describe("Agent", () => {
     expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
   });
 
+  it("marks unknown tools as errors", async () => {
+    const agent = new Agent({ model, systemPrompt: "", tools: [], toolRuntimeContext });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "missing_tool",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    const result = await agent.runToolStep(session, "tool-1");
+
+    expect(result.toolResultMessage?.isError).toBe(true);
+    expect(result.session.toolCalls["tool-1"]?.status).toBe("error");
+    expect(result.events.find((event) => event.type === "tool_execution_end")).toMatchObject({ isError: true });
+  });
+
+  it("notifies the runtime when a durable tool run becomes terminal", async () => {
+    const wakes: Array<{ sessionId: string; toolCallId: string }> = [];
+    const tool = {
+      ref: "code.execute_code",
+      groupId: "code",
+      name: "execute_code",
+      label: "Execute Code",
+      description: "Execute code",
+      parameters: Type.Object({}),
+      execute: async () => ({
+        content: [{ type: "text", text: "done" }],
+        details: { ok: true },
+      }),
+    } satisfies RuntimeTool;
+
+    const toolRuns = new MemoryToolRunStore();
+    const agent = new Agent({
+      model,
+      systemPrompt: "",
+      tools: [tool],
+      toolRuntimeContext,
+      toolRuns,
+      onTerminalToolRun: (sessionId, toolCallId) => {
+        wakes.push({ sessionId, toolCallId });
+      },
+    });
+    const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
+    const session = {
+      ...empty,
+      turns: [{
+        id: "turn-1",
+        index: 0,
+        status: "awaiting_tools" as const,
+        toolCallIds: ["tool-1"],
+        toolResultIds: [],
+      }],
+      toolCalls: {
+        "tool-1": {
+          id: "tool-1",
+          name: "execute_code",
+          args: {},
+          turnId: "turn-1",
+          status: "pending" as const,
+        },
+      },
+    };
+
+    await agent.runToolStep(session, "tool-1");
+
+    expect(wakes).toEqual([{ sessionId: "session-test", toolCallId: "tool-1" }]);
+  });
+
   it("runs multiple pending tool calls from the same turn in one parallel step", async () => {
     let active = 0;
     let maxActive = 0;
@@ -324,7 +462,8 @@ describe("Agent", () => {
       },
     } satisfies RuntimeTool;
 
-    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
+    const toolRuns = new MemoryToolRunStore();
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext, toolRuns });
     const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
     const session = {
       ...empty,
@@ -373,8 +512,9 @@ describe("Agent", () => {
     expect(result.nextStep?.type).toBe("complete");
   });
 
-  it("keeps pending async tool calls open and resumes them with stored async state", async () => {
+  it("keeps running tool calls open and resumes them with stored tool-run state", async () => {
     const calls: unknown[] = [];
+    const states: unknown[] = [];
     const tool = {
       ref: "code.execute_code",
       groupId: "code",
@@ -382,15 +522,23 @@ describe("Agent", () => {
       label: "Execute Code",
       description: "Execute code",
       parameters: Type.Object({}),
-      execute: async (_context: ToolRuntimeContext, _toolCallId: string, params: unknown) => {
+      execute: async (
+        _context: ToolRuntimeContext,
+        _toolCallId: string,
+        params: unknown,
+        _signal?: AbortSignal,
+        _onUpdate?: unknown,
+        toolRunState?: unknown,
+      ) => {
         calls.push(params);
+        states.push(toolRunState);
         if (calls.length === 1) {
           return {
             content: [{ type: "text", text: "still running" }],
             details: {
               ok: true,
               pending: true,
-              asyncState: { kind: "test", commandId: "cmd-1" },
+              toolRunState: { kind: "test", commandId: "cmd-1" },
             },
           };
         }
@@ -401,7 +549,8 @@ describe("Agent", () => {
       },
     } satisfies RuntimeTool;
 
-    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext });
+    const toolRuns = new MemoryToolRunStore();
+    const agent = new Agent({ model, systemPrompt: "", tools: [tool], toolRuntimeContext, toolRuns });
     const empty = createEmptyAgentSession({ sessionId: "session-test", systemPrompt: "", model });
     const session = {
       ...empty,
@@ -428,12 +577,14 @@ describe("Agent", () => {
 
     expect(first.session.messages.filter((message) => message.role === "toolResult")).toEqual([]);
     expect(first.session.toolCalls["tool-1"]?.status).toBe("running");
-    expect(first.session.toolCalls["tool-1"]?.asyncState).toEqual({ kind: "test", commandId: "cmd-1" });
+    await expect(toolRuns.findByToolCall("session-test", "tool-1"))
+      .resolves.toMatchObject({ internalState: { kind: "test", commandId: "cmd-1" } });
     expect(first.nextStep?.type).toBe("tool");
 
     const second = await agent.runSingleStep(first.session, first.nextStep!);
 
-    expect(calls[1]).toEqual({ _asyncState: { kind: "test", commandId: "cmd-1" } });
+    expect(calls[1]).toEqual({});
+    expect(states[1]).toEqual({ kind: "test", commandId: "cmd-1" });
     expect(second.session.messages.filter((message) => message.role === "toolResult")).toHaveLength(1);
     expect(second.session.toolCalls["tool-1"]?.status).toBe("complete");
     expect(second.nextStep?.type).toBe("complete");

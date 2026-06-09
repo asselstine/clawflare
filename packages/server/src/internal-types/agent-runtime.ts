@@ -111,7 +111,7 @@ export interface CompleteTurnResult extends AgentStepResult {
 }
 
 // Workflow step types for decoupled execution
-export type StepType = "assistant" | "tool" | "complete" | "finalize";
+export type StepType = "assistant" | "tool" | "complete";
 
 /**
  * Information about the next step to execute

@@ -52,10 +52,9 @@ interface ContainerBashParams {
   cwd?: string;
   timeoutMs?: number;
   maxOutputChars?: number;
-  _asyncState?: ContainerBashAsyncState;
 }
 
-interface ContainerBashAsyncState {
+interface ContainerBashToolRunState {
   kind: "container_bash";
   containerId: string;
   commandId: string;
@@ -455,7 +454,9 @@ export function createContainerBashTool(
       context: ToolRuntimeContext,
       _toolCallId: string,
       params: Static<TSchema>,
-      signal?: AbortSignal
+      signal?: AbortSignal,
+      _onUpdate?: unknown,
+      toolRunState?: unknown,
     ): Promise<AgentToolResult<unknown>> => {
       const runtime = requireContainerRuntime(context);
       const p = params as ContainerBashParams;
@@ -463,8 +464,9 @@ export function createContainerBashTool(
       const containerId = requireContainerId(p.containerId);
       await requireActiveSessionContainer(runtime.env, ctx, containerId);
 
-      const asyncState = p._asyncState?.kind === "container_bash" ? p._asyncState : undefined;
-      const commandId = asyncState?.commandId;
+      const storedState = toolRunState as Partial<ContainerBashToolRunState> | undefined;
+      const runState = storedState?.kind === "container_bash" ? storedState as ContainerBashToolRunState : undefined;
+      const commandId = runState?.commandId;
       let result;
       try {
         result = commandId
@@ -472,9 +474,9 @@ export function createContainerBashTool(
               runtime.env,
               containerId,
               commandId,
-              p.maxOutputChars ?? asyncState.maxOutputChars,
-              asyncState.stdoutCursor,
-              asyncState.stderrCursor,
+              p.maxOutputChars ?? runState.maxOutputChars,
+              runState.stdoutCursor,
+              runState.stderrCursor,
               signal
             )
           : await (async () => {
@@ -511,8 +513,8 @@ export function createContainerBashTool(
       }
 
       if (result.state === "running" && result.commandId) {
-        const nextAsyncState: ContainerBashAsyncState = {
-          ...(asyncState ?? {
+        const nextToolRunState: ContainerBashToolRunState = {
+          ...(runState ?? {
             kind: "container_bash",
             containerId,
             commandId: result.commandId,
@@ -522,8 +524,8 @@ export function createContainerBashTool(
             maxOutputChars: p.maxOutputChars,
             startedAt: Date.now() - result.durationMs,
           }),
-          stdoutCursor: typeof result.stdoutCursor === "number" ? result.stdoutCursor : asyncState?.stdoutCursor,
-          stderrCursor: typeof result.stderrCursor === "number" ? result.stderrCursor : asyncState?.stderrCursor,
+          stdoutCursor: typeof result.stdoutCursor === "number" ? result.stdoutCursor : runState?.stdoutCursor,
+          stderrCursor: typeof result.stderrCursor === "number" ? result.stderrCursor : runState?.stderrCursor,
         };
         const outputDelta = formatBashDelta(result);
 
@@ -538,7 +540,7 @@ export function createContainerBashTool(
             ok: true,
             pending: true,
             kind: "container_bash",
-            asyncState: nextAsyncState,
+            toolRunState: nextToolRunState,
             commandId: result.commandId,
             durationMs: result.durationMs,
             truncated: result.truncated,

@@ -355,6 +355,33 @@ CREATE TABLE session_run_steps (
   FOREIGN KEY (run_id) REFERENCES session_runs(id) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE tool_runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  workspace_id TEXT,
+  tool_call_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'complete', 'error', 'aborted')),
+  input_json TEXT NOT NULL,
+  internal_state_json TEXT,
+  partial_result_json TEXT,
+  result_json TEXT,
+  error_message TEXT,
+  started_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT;
+
+CREATE UNIQUE INDEX idx_tool_runs_session_tool_call
+  ON tool_runs(session_id, tool_call_id);
+CREATE INDEX idx_tool_runs_session_status
+  ON tool_runs(session_id, status);
+CREATE INDEX idx_tool_runs_status_updated
+  ON tool_runs(status, updated_at);
+CREATE INDEX idx_tool_runs_workspace
+  ON tool_runs(workspace_id);
+
 -- =============================================================================
 -- Containers
 -- =============================================================================

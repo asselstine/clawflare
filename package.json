@@ -17,7 +17,8 @@
     "test:unit": "pnpm -r --filter=!@clawflare/e2e test",
     "test:e2e": "cd packages/e2e && node --import=tsx src/index.ts",
     "test:e2e:ui": "cd packages/e2e && node --import=tsx src/index.ts --ui",
-    "test:cloudflare": "cd packages/e2e && node --import=tsx src/cloudflare-egress.test.ts",
+    "test:e2e:remote": "cd packages/e2e && node --import=tsx src/index.ts --remote",
+    "test:cloudflare": "pnpm --filter @clawflare/e2e test:cloudflare",
     "lint": "pnpm -r lint",
     "cli": "cd packages/cli && node --import=tsx src/index.ts",
     "typecheck": "pnpm -r typecheck"

@@ -198,7 +198,6 @@ export default {
   async scheduled(_controller: ScheduledController, env: unknown, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(recoverSessionRuns(env as import("./internal-types/index.js").Env, {
       limit: 5,
-      budgetMs: 20_000,
       ctx,
     }));
   },

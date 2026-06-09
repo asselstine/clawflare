@@ -166,6 +166,23 @@ export class SessionRunRepository {
       .where(and(eq(sessionRuns.id, runId), eq(sessionRuns.leaseOwner, workerId)));
   }
 
+  async wakeRunnableForSession(sessionId: string): Promise<number> {
+    const now = Date.now();
+    const result = await this.d1
+      .prepare(
+        `
+        UPDATE session_runs
+        SET lease_expires_at = NULL,
+            updated_at = ?
+        WHERE session_id = ?
+          AND status = 'runnable'
+      `
+      )
+      .bind(now, sessionId)
+      .run();
+    return (result.meta as { changes?: number } | undefined)?.changes ?? 0;
+  }
+
   async complete(runId: string, workerId: string): Promise<void> {
     const now = Date.now();
     await this.db
@@ -219,12 +236,6 @@ export class SessionRunRepository {
       where: and(eq(sessionRunSteps.runId, runId), eq(sessionRunSteps.stepName, stepName)),
     });
     return row ? JSON.parse(row.resultJson) : undefined;
-  }
-
-  async deleteCompletedStep(runId: string, stepName: string): Promise<void> {
-    await this.db
-      .delete(sessionRunSteps)
-      .where(and(eq(sessionRunSteps.runId, runId), eq(sessionRunSteps.stepName, stepName)));
   }
 
   async completeStep(runId: string, stepName: string, attempt: number, result: unknown): Promise<void> {

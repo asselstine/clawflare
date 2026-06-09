@@ -46,6 +46,7 @@ export async function handleInvokeTool(
     const body = (await request.json().catch(() => ({}))) as {
       input?: unknown;
       sessionId?: string;
+      toolRunState?: unknown;
     };
     if (!body.sessionId) {
       return badRequest("Tool execution requires a session");
@@ -61,6 +62,7 @@ export async function handleInvokeTool(
       ctx,
       name,
       input: body.input ?? {},
+      toolRunState: body.toolRunState,
       toolCtx: {
         workspaceId: requestContext.workspace.id,
         sessionId: body.sessionId,

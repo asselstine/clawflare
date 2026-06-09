@@ -1,4 +1,3 @@
-import * as z from "zod";
 import type { Model, Provider } from "../../data/index.js";
 import {
   getProviderDefinition,
@@ -48,17 +47,34 @@ export interface PublicProvider {
 }
 
 export function validateModelInput(input: unknown): { ok: true; result: ParsedModel } | { ok: false; error: string } {
-  const schema = z.object({
-    provider: z.string().min(1),
-    modelName: z.string().min(1),
-    secrets: z.record(z.string(), z.string()).default({}),
-    config: z.record(z.string(), z.unknown()).optional(),
-  });
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return { ok: false, error: "Invalid input: expected object" };
+  }
 
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) return { ok: false, error: `Invalid input: ${parsed.error.message}` };
+  const raw = input as Record<string, unknown>;
+  if (typeof raw.provider !== "string" || raw.provider.length === 0) {
+    return { ok: false, error: "Invalid input: provider is required" };
+  }
+  if (typeof raw.modelName !== "string" || raw.modelName.length === 0) {
+    return { ok: false, error: "Invalid input: modelName is required" };
+  }
+  if (raw.secrets !== undefined && (typeof raw.secrets !== "object" || raw.secrets === null || Array.isArray(raw.secrets))) {
+    return { ok: false, error: "Invalid input: secrets must be an object" };
+  }
+  if (raw.config !== undefined && (typeof raw.config !== "object" || raw.config === null || Array.isArray(raw.config))) {
+    return { ok: false, error: "Invalid input: config must be an object" };
+  }
 
-  const data = parsed.data;
+  const secrets = Object.fromEntries(Object.entries(raw.secrets ?? {}).filter((entry): entry is [string, string] => (
+    typeof entry[1] === "string"
+  )));
+  const config = raw.config === undefined ? {} : raw.config as Record<string, unknown>;
+  const data = {
+    provider: raw.provider,
+    modelName: raw.modelName,
+    secrets,
+    config,
+  };
   const providerDef = getProviderDefinition(data.provider);
   if (!providerDef) {
     const supported = getSupportedProviders().join(", ");

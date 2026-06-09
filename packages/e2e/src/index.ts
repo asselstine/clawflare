@@ -1,28 +1,33 @@
 /**
- * Remote E2E Tests for Clawflare.
+ * Local E2E Tests for Clawflare.
  *
- * The suite deploys a brand-new Cloudflare Worker test instance, runs API tests
- * against the workers.dev URL, then deletes the Worker.
+ * The suite starts a local Wrangler Worker test instance, runs API tests
+ * against localhost, then stops Wrangler.
  * 
  * Note: Some tests (container workspace) require Docker to be installed and
- * running, as Cloudflare Containers need to build the container image.
+ * running, as Cloudflare Containers need to build/start the container image.
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { resolve as pathResolve } from "node:path";
-import { AgentClient } from "@clawflare/cli/client";
+import { AgentClient } from "../../cli/src/client.js";
+import { runE2ETests } from "../test/index.js";
+import { readJsonResponse, type E2ETestContext, type ToolInvokeResponse } from "../test/support.js";
 import { E2E_SERVER_NAMES as runtimeNames } from "./server-names.js";
 
 const HARNESS_DIR = pathResolve(process.cwd(), "..", "server");
 const CF_API_TOKEN = process.env.CF_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN || "";
+const DEFAULT_LOCAL_PORT = 8788;
 
-interface RemoteDeployment {
+interface TestDeployment {
+  mode: "local" | "remote";
   workerName: string;
-  url?: string;
+  url: string;
   configPath?: string;
   d1Name: string;
+  devProcess?: ChildProcess;
 }
 
 interface TestResult {
@@ -34,7 +39,7 @@ interface TestResult {
 
 // Track reserved container IDs for cleanup, including containers mid-create.
 const createdContainers: Array<{ containerId: string; sessionId: string }> = [];
-let activeDeployment: RemoteDeployment | null = null;
+let activeDeployment: TestDeployment | null = null;
 let activeKeepAlive = false;
 let activeAuthToken: string | null = null;
 let cleanupStarted = false;
@@ -84,30 +89,13 @@ class TestRunner {
   }
 }
 
-async function readJsonResponse<T>(response: Response): Promise<T> {
-  const text = await response.text();
-  try {
-    return JSON.parse(text) as T;
-  } catch (error) {
-    const preview = text.length > 1000 ? `${text.slice(0, 1000)}...` : text;
-    throw new Error(`Expected JSON response, got HTTP ${response.status} ${response.statusText}: ${preview}`);
-  }
-}
-
-interface ToolInvokeResponse<TDetails = unknown> {
-  tool: string;
-  result: {
-    content: Array<{ type: string; text?: string }>;
-    details: TDetails;
-  };
-}
-
 async function invokeTool<TDetails = unknown>(
   url: string,
   token: string,
   name: string,
   input: unknown,
-  sessionId?: string
+  sessionId?: string,
+  toolRunState?: unknown
 ): Promise<ToolInvokeResponse<TDetails>> {
   const response = await fetch(`${url}/v1/tools/${name}`, {
     method: "POST",
@@ -115,7 +103,7 @@ async function invokeTool<TDetails = unknown>(
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ input, sessionId }),
+    body: JSON.stringify({ input, sessionId, toolRunState }),
   });
   if (!response.ok) {
     const text = await response.text();
@@ -189,15 +177,22 @@ async function cleanupAllContainers(url: string, token: string): Promise<void> {
   await Promise.all(cleanupPromises);
 }
 
+function e2eEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    CI: process.env.CI ?? "1",
+    NO_UPDATE_NOTIFIER: "1",
+    WRANGLER_SEND_METRICS: "false",
+    ...(CF_API_TOKEN ? { CLOUDFLARE_API_TOKEN: CF_API_TOKEN } : {}),
+  };
+}
+
 function runWrangler(args: string[], options: { capture?: boolean } = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const proc = spawn("pnpm", ["exec", "wrangler", ...args], {
       cwd: HARNESS_DIR,
       stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
-      env: {
-        ...process.env,
-        ...(CF_API_TOKEN ? { CLOUDFLARE_API_TOKEN: CF_API_TOKEN } : {}),
-      },
+      env: e2eEnv(),
     });
 
     let stdout = "";
@@ -258,7 +253,11 @@ async function writeTestConfig(workerName: string, d1Name: string, d1DatabaseId:
       "process.env.NODE_ENV": "\"test\"",
       __DEV__: "true",
     },
-    services: [{ binding: "HTTP_GATEWAY", service: workerName, entrypoint: "HttpGateway" }],
+    services: [
+      { binding: "HTTP_GATEWAY", service: workerName, entrypoint: "HttpGateway" },
+      { binding: "SECRET_BROKER", service: workerName, entrypoint: "SecretBroker" },
+      { binding: "TIMING_LOGGER", service: workerName, entrypoint: "TimingLogger" },
+    ],
     worker_loaders: [{ binding: "LOADER" }],
     containers: [
       {
@@ -301,6 +300,7 @@ async function writeTestConfig(workerName: string, d1Name: string, d1DatabaseId:
       // CLAWFLARE_API_TOKEN removed - tests now use login-based auth
       CLOUDFLARE_API_TOKEN: "e2e-mock-token",
       CLAWFLARE_TEST_RUN: "true",
+      CLAWFLARE_KEK: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
     },
   };
 
@@ -308,7 +308,7 @@ async function writeTestConfig(workerName: string, d1Name: string, d1DatabaseId:
   return configPath;
 }
 
-async function deployRemote(): Promise<RemoteDeployment> {
+async function deployRemote(): Promise<TestDeployment> {
   // Use unique worker names to avoid container application conflicts.
   // Container applications persist after Worker deletion and can't be deleted,
   // so reusing the same Worker name causes deployment failures.
@@ -316,7 +316,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
   const workerName = `${runtimeNames.e2eWorkerPrefix}-${runId}`;
   const d1Name = `${runtimeNames.e2eDatabasePrefix}-${runId}`;
   let configPath = "";
-  activeDeployment = { workerName, d1Name };
+  activeDeployment = { mode: "remote", workerName, d1Name, url: "" };
 
   console.log("🚀 Creating remote E2E deployment...");
   console.log(`   Worker: ${workerName}`);
@@ -347,7 +347,7 @@ async function deployRemote(): Promise<RemoteDeployment> {
     activeDeployment.url = url;
 
     console.log(`\n✅ Remote test Worker deployed: ${url}\n`);
-    return { workerName, url, configPath, d1Name };
+    return { mode: "remote", workerName, url, configPath, d1Name };
   } catch (error) {
     await runWrangler(["delete", workerName, "--force"]).catch(() => undefined);
     await runWrangler(["d1", "delete", d1Name, "--skip-confirmation"]).catch(() => undefined);
@@ -364,25 +364,97 @@ async function deployRemote(): Promise<RemoteDeployment> {
   }
 }
 
-async function waitForServer(url: string, maxAttempts = 60): Promise<boolean> {
+function startWranglerDev(configPath: string, port: number): ChildProcess {
+  console.log("🚀 Starting local E2E Worker...");
+  console.log(`   URL: http://127.0.0.1:${port}`);
+  console.log(`   Config: ${configPath}`);
+
+  const proc = spawn(
+    "pnpm",
+    ["exec", "wrangler", "dev", "--config", configPath, "--port", String(port), "--ip", "127.0.0.1"],
+    {
+      cwd: HARNESS_DIR,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...e2eEnv(),
+        NODE_ENV: "test",
+      },
+    }
+  );
+
+  proc.stdout?.on("data", (data) => {
+    process.stdout.write(data.toString());
+  });
+  proc.stderr?.on("data", (data) => {
+    process.stderr.write(data.toString());
+  });
+  proc.on("exit", (code, signal) => {
+    if (!cleanupStarted && code !== null) {
+      console.error(`\nLocal Wrangler exited unexpectedly with code ${code}`);
+    } else if (!cleanupStarted && signal) {
+      console.error(`\nLocal Wrangler exited unexpectedly from ${signal}`);
+    }
+  });
+
+  return proc;
+}
+
+async function deployLocal(): Promise<TestDeployment> {
+  const runId = randomUUID().slice(0, 8);
+  const workerName = `${runtimeNames.e2eWorkerPrefix}-local-${runId}`;
+  const d1Name = `${runtimeNames.e2eDatabasePrefix}-local-${runId}`;
+  const d1DatabaseId = randomUUID();
+  const port = Number(process.env.CLAWFLARE_E2E_PORT || DEFAULT_LOCAL_PORT);
+  const url = `http://127.0.0.1:${port}`;
+  const configPath = await writeTestConfig(workerName, d1Name, d1DatabaseId);
+  pendingConfigPath = configPath;
+
+  console.log("🎯 Creating local E2E deployment...");
+  console.log(`   Worker: ${workerName}`);
+  console.log(`   D1: ${d1Name}`);
+
+  await runWrangler(["d1", "migrations", "apply", d1Name, "--local", "--config", configPath]);
+  const devProcess = startWranglerDev(configPath, port);
+  const deployment: TestDeployment = { mode: "local", workerName, url, configPath, d1Name, devProcess };
+  activeDeployment = deployment;
+  pendingConfigPath = null;
+  return deployment;
+}
+
+function localDevExitMessage(proc: ChildProcess): string | null {
+  if (proc.exitCode !== null) {
+    return `Local Wrangler exited before the Worker became responsive (code ${proc.exitCode}). Check the Wrangler output above. Local container E2E requires Docker or a Docker-compatible runtime.`;
+  }
+  if (proc.signalCode !== null) {
+    return `Local Wrangler exited before the Worker became responsive (${proc.signalCode}). Check the Wrangler output above.`;
+  }
+  return null;
+}
+
+async function waitForServer(url: string, maxAttempts = 60, devProcess?: ChildProcess): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
+    if (devProcess) {
+      const message = localDevExitMessage(devProcess);
+      if (message) throw new Error(message);
+    }
+
     try {
       const response = await fetch(`${url}/health`, { method: "GET" });
       if (response.ok) return true;
     } catch {
-      // Remote route may not be propagated yet.
+      // The local Worker may still be starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   return false;
 }
 
-async function runTests(url: string): Promise<void> {
+async function runTests(url: string, devProcess?: ChildProcess): Promise<void> {
   const runner = new TestRunner();
 
-  const ready = await waitForServer(url);
-  if (!ready) throw new Error("Remote Worker failed to become responsive");
-  console.log("✅ Remote Worker is responsive, authenticating via mock OAuth...\n");
+  const ready = await waitForServer(url, 60, devProcess);
+  if (!ready) throw new Error("Worker failed to become responsive");
+  console.log("✅ Worker is responsive, authenticating via mock OAuth...\n");
 
   // Start mock OAuth device flow
   console.log("🔑 Starting mock OAuth device flow...");
@@ -469,405 +541,45 @@ async function runTests(url: string): Promise<void> {
   // Now create the client with the token
   const client = new AgentClient(url, token);
 
-  console.log("🧪 Starting remote E2E Tests");
+  console.log("🧪 Starting E2E Tests");
   console.log(`   Target: ${url}`);
   console.log(`   User: ${userId}`);
   console.log(`   Token: ${token.substring(0, 10)}...\n`);
 
-  await runner.runTest("Unauthorized - missing auth header", async () => {
-    const response = await fetch(`${url}/v1/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({  content: "hello" }),
-    });
-    if (response.status !== 401) throw new Error(`Expected 401, got ${response.status}`);
-  });
-
-  await runner.runTest("Unauthorized - wrong token", async () => {
-    const response = await fetch(`${url}/v1/chat`, {
-      method: "POST",
-      headers: { Authorization: "Bearer wrong-token", "Content-Type": "application/json" },
-      body: JSON.stringify({  content: "hello" }),
-    });
-    if (response.status !== 401) throw new Error(`Expected 401, got ${response.status}`);
-  });
-
-  await runner.runTest("Authorized - valid token", async () => {
-    const response = await fetch(`${url}/v1/chat`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({  content: "hello" }),
-    });
-    if (response.status === 401) throw new Error("Valid token was rejected");
-  });
-
-  await runner.runTest("Create new session", async () => {
-    const oldSessionId = client.getCurrentSessionId();
-    const session = await client.createSession();
-    if (!session.id) throw new Error("New session missing ID");
-    if (session.id === oldSessionId) throw new Error("New session has same ID as old session");
-  });
-
-  await runner.runTest("Create session with parent", async () => {
-    const parentSession = await client.createSession();
-    const forkSession = await client.forkSession({
-      parentSessionId: parentSession.id,
-      parentMessageId: "", // Fork from latest
-    });
-    if (forkSession.id === parentSession.id) {
-      throw new Error(`Expected fork to create new session`);
-    }
-  });
-
-  await runner.runTest("Simple prompt", async () => {
-    const submitted = await client.submitChat({  content: "Say 'hello'" });
-    // Poll until complete
-    for await (const update of client.streamSession(submitted.sessionId)) {
-      if (update.complete) {
-        if (update.session.status === "error") {
-          throw new Error(`Session failed: ${update.session.errorMessage}`);
-        }
-        // Wait a bit for messages to sync
-        await new Promise(r => setTimeout(r, 500));
-        // Re-fetch session to get latest messages
-        const refreshed = await client.getSession(submitted.sessionId);
-        const lastMsg = refreshed.messages.at(-1);
-        if (!lastMsg || lastMsg.role !== "assistant") {
-          throw new Error("Expected assistant response");
-        }
-        return;
-      }
-    }
-    throw new Error("Session did not complete");
-  });
-
-  await runner.runTest("Session history preserved", async () => {
-    // Create a new context to ensure we don't reuse the Simple prompt session
-    await client.createSession();
-    
-    // First message
-    const submitted1 = await client.submitChat({  content: `First message: test-${Date.now()}` });
-    let firstResponse = "";
-    for await (const update of client.streamSession(submitted1.sessionId)) {
-      if (update.complete) {
-        const session = update.session.messages ? update.session : await client.getSession(submitted1.sessionId);
-        const lastMsg = session.messages.at(-1);
-        if (lastMsg?.role === "assistant") {
-          const content = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
-          firstResponse = content;
-        }
-        break;
-      }
-    }
-    
-    if (!firstResponse) {
-      throw new Error(`First message failed - no response`);
-    }
-    console.error(`First response: ${firstResponse.substring(0, 60)}...`);
-    
-    // Wait extra time for workflow to fully complete and sync
-    await new Promise(r => setTimeout(r, 1000));
-    
-    // Second message using same session
-    const submitted2 = await client.submitChat({  content: "HISTORY_TEST: What messages have I sent?", sessionId: submitted1.sessionId });
-    console.error(`Second submit returned sessionId: ${submitted2.sessionId}`);
-    
-    let secondResponse = "";
-    for await (const update of client.streamSession(submitted2.sessionId)) {
-      console.error(`Polling second: status=${update.session.status}, messages=${update.session.messages?.length ?? 0}`);
-      if (update.complete) {
-        // Extra wait for sync
-        await new Promise(r => setTimeout(r, 500));
-        const refreshed = await client.getSession(submitted2.sessionId);
-        console.error(`Second complete: refreshed messages=${refreshed.messages.length}`);
-        const lastMsg = refreshed.messages.at(-1);
-        if (lastMsg?.role === "assistant") {
-          const content = typeof lastMsg.content === "string" ? lastMsg.content : lastMsg.content.filter(c => c.type === "text").map(c => c.text).join("");
-          secondResponse = content;
-        }
-        break;
-      }
-    }
-    
-    if (!secondResponse) {
-      throw new Error(`Second message failed - no response`);
-    }
-    console.error(`Second response: ${secondResponse.substring(0, 100)}...`);
-    
-    if (!secondResponse.includes("HISTORY_TEST_MODE")) {
-      throw new Error(`Expected HISTORY_TEST_MODE in response, got: ${secondResponse}`);
-    }
-  });
-
-  await runner.runTest("Fork session", async () => {
-    const session = await client.createSession();
-    const originalId = session.id;
-    const forkSession = await client.forkSession({
-      parentSessionId: originalId,
-      parentMessageId: "",
-    });
-    if (!forkSession.id) throw new Error("Fork failed - no session ID returned");
-    if (forkSession.id === originalId) throw new Error("Fork returned same session ID");
-  });
-
-  await runner.runTest("Chat accepts steer-style content", async () => {
-    const response = await fetch(`${url}/v1/chat`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ content: "Be more helpful" }),
-    });
-    if (response.status !== 200) throw new Error(`Expected 200, got ${response.status}`);
-  });
-
-  await runner.runTest("List tools", async () => {
-    const tools = await client.listTools();
-    const toolNames = tools.map((tool) => tool.name).sort();
-    const expectedTools = [
-      "container_bash",
-      "container_create",
-      "container_destroy",
-      "container_edit",
-      "container_find",
-      "container_grep",
-      "container_ls",
-      "container_read",
-      "container_write",
-      "execute_code",
-      "execute_stored_code",
-      "search",
-      "store_code",
-    ].sort();
-    if (JSON.stringify(toolNames) !== JSON.stringify(expectedTools)) {
-      throw new Error(`Expected tools ${JSON.stringify(expectedTools)}, got ${JSON.stringify(toolNames)}`);
-    }
-  });
-
-  await runner.runTest("Skills endpoint removed", async () => {
-    const response = await fetch(`${url}/v1/skills`, { headers: { Authorization: `Bearer ${token}` } });
-    if (response.status !== 404) throw new Error(`Expected 404, got ${response.status}`);
-  });
-
-  await runner.runTest("execute_code runs inline Dynamic Worker code", async () => {
-    const sessionId = await createToolSession(client);
-    const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
-      code: "export default async function(input, env) { return { message: 'ok', input }; }",
-      input: { value: 42 },
-    }, sessionId);
-    const text = data.result.content[0]?.text ?? "";
-    if (!data.result.details.ok || !text.includes('"message": "ok"') || !text.includes('"value": 42')) {
-      throw new Error(`Unexpected execute_code result: ${JSON.stringify(data)}`);
-    }
-  });
-
-  await runner.runTest("store/search/execute stored code", async () => {
-    const sessionId = await createToolSession(client);
-    await invokeTool(url, token, "store_code", {
-      name: "double_number",
-      description: "Doubles a numeric input",
-      code: "export default async function(input, env) { return input.value * 2; }",
-    }, sessionId);
-
-    const search = await invokeTool<{
-      storedCode: Array<{ name: string; code?: string }>;
-    }>(url, token, "search", {
-      collection: "stored_code",
-      query: "double",
-    }, sessionId);
-    const found = search.result.details.storedCode.find((item) => item.name === "double_number");
-    if (!found) throw new Error(`Stored code not found: ${JSON.stringify(search)}`);
-    if (found.code) throw new Error("Search should not return stored code body");
-
-    const executed = await invokeTool<{ ok?: boolean }>(url, token, "execute_stored_code", {
-      name: "double_number",
-      input: { value: 21 },
-    }, sessionId);
-    const executedText = executed.result.content[0]?.text ?? "";
-    if (!executed.result.details.ok || !executedText.includes("Result: 42")) {
-      throw new Error(`Unexpected execute_stored_code result: ${JSON.stringify(executed)}`);
-    }
-  });
-
-  await runner.runTest("List egress handlers", async () => {
-    const response = await fetch(`${url}/v1/egress-handlers?enabledOnly=false`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await response.json() as { egressHandlers?: Array<{ egressHandlerId: string }> };
-    const names = data.egressHandlers?.map((h) => h.egressHandlerId).sort();
-    if (!names || names.length < 3) {
-      throw new Error(`Expected at least 3 handlers, got: ${JSON.stringify(names)}`);
-    }
-    if (!names.includes("github") || !names.includes("cloudflare") || !names.includes("netlify")) {
-      throw new Error(`Expected github, cloudflare, and netlify handlers, got: ${JSON.stringify(names)}`);
-    }
-  });
-
-  await runner.runTest("Get Cloudflare egress handler", async () => {
-    const response = await fetch(`${url}/v1/egress-handlers/cloudflare`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await response.json() as { egressHandler?: { egressHandlerId: string; domains?: string[]; config?: unknown } };
-    if (data.egressHandler?.egressHandlerId !== "cloudflare") {
-      throw new Error(`Expected cloudflare handler, got: ${JSON.stringify(data)}`);
-    }
-    if (!data.egressHandler.domains?.includes("api.cloudflare.com")) {
-      throw new Error(`Expected api.cloudflare.com domain, got: ${JSON.stringify(data)}`);
-    }
-    if ("config" in data.egressHandler) {
-      throw new Error(`Egress handler response should not expose config: ${JSON.stringify(data)}`);
-    }
-  });
-
-  await runner.runTest("generic egress is allowed", async () => {
-    const sessionId = await createToolSession(client);
-    const data = await invokeTool<{ ok?: boolean }>(url, token, "execute_code", {
-      code: "export default async function(input, env) { const response = await fetch('https://example.com'); return { status: response.status, body: await response.text() }; }",
-    }, sessionId);
-    const text = data.result.content[0]?.text ?? "";
-    if (!data.result.details.ok || !text.includes('"status": 200') || !text.includes("Example Domain")) {
-      throw new Error(`Expected generic egress to be allowed, got: ${JSON.stringify(data)}`);
-    }
-  });
-
-  await runner.runTest("Session API: submit and poll for completion", async () => {
-    const startResponse = await fetch(`${url}/v1/chat`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({  content: "session smoke test" }),
-    });
-    const submitted = await startResponse.json() as { sessionId?: string; eventCursor?: string };
-    if (!submitted.sessionId || !submitted.eventCursor) throw new Error(`Session did not start: ${JSON.stringify(submitted)}`);
-
-    let lastStatus = "";
-    for (let i = 0; i < 30; i++) {
-      const sessionResponse = await fetch(`${url}/v1/session/${submitted.sessionId}`, {
-        headers: { Authorization: `Bearer ${token}` },
+  const context: E2ETestContext = {
+    url,
+    token,
+    client,
+    authedFetch: (path, init = {}) => fetch(`${url}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        ...(init.headers || {}),
+      },
+    }),
+    authedJson: async (path, init = {}) => {
+      const response = await fetch(`${url}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          ...(init.headers || {}),
+        },
       });
-      const session = await sessionResponse.json() as { status?: string; errorMessage?: string };
-      lastStatus = JSON.stringify(session);
-      if (session.status === "idle") return;
-      if (session.status === "error") throw new Error(`Session errored: ${lastStatus}`);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    throw new Error(`Session did not complete: ${lastStatus}`);
-  });
-
-  await runner.runTest("WebSocket starts workflow and streams final response", async () => {
-    const ws = await client.connectWebSocket();
-    try {
-      const result = await new Promise<{ type?: string; content?: string }>((resolve, reject) => {
-        const timeout = setTimeout(() => reject(new Error("Timed out waiting for WebSocket workflow response")), 120000);
-
-        ws.on("message", (data) => {
-          const message = JSON.parse(data.toString()) as { type?: string; content?: string; status?: string };
-          if (message.type === "error") {
-            clearTimeout(timeout);
-            reject(new Error(message.content || "WebSocket returned error"));
-            return;
-          }
-          if (message.type === "message") {
-            clearTimeout(timeout);
-            resolve(message);
-          }
-        });
-        ws.on("error", (error) => {
-          clearTimeout(timeout);
-          reject(error);
-        });
-
-        ws.send(JSON.stringify({  content: "websocket workflow smoke test" }));
-      });
-
-      if (result.type !== "message" || !result.content) {
-        throw new Error(`Unexpected WebSocket result: ${JSON.stringify(result)}`);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`${path} failed with ${response.status}: ${text}`);
       }
-    } finally {
-      ws.close();
-    }
-  });
+      return readJsonResponse(response);
+    },
+    createToolSession: () => createToolSession(client),
+    invokeTool: (name, input, sessionId, toolRunState) => invokeTool(url, token, name, input, sessionId, toolRunState),
+    trackTestContainer,
+    destroyTestContainer: (containerId, sessionId) => destroyTestContainer(url, token, containerId, sessionId),
+  };
 
-  await runner.runTest("Container: create and run ls command", async () => {
-    const sessionId = await createToolSession(client);
-    let containerId: string | undefined;
-
-    try {
-      const createData = await invokeTool<{ containerId?: string; status?: string }>(
-        url,
-        token,
-        "container_create",
-        {},
-        sessionId
-      );
-      containerId = createData.result.details.containerId;
-      if (!containerId) throw new Error(`Container create did not return containerId: ${JSON.stringify(createData)}`);
-      trackTestContainer(containerId, sessionId);
-      if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
-      
-      const bashData = await invokeTool<{ ok?: boolean; exitCode: number | null }>(
-        url,
-        token,
-        "container_bash",
-        { containerId, command: "ls -la", cwd: "/workspace" },
-        sessionId
-      );
-      const bashText = bashData.result.content[0]?.text ?? "";
-      if (!bashData.result.details.ok) throw new Error(`Bash command failed: ${JSON.stringify(bashData)}`);
-      if (bashData.result.details.exitCode !== 0) throw new Error(`Bash command exited with code ${bashData.result.details.exitCode}`);
-      if (!bashText.includes("total") || !bashText.includes("workspace")) {
-        if (bashText.trim().length === 0) {
-          throw new Error(`No output from ls command`);
-        }
-      }
-      
-      // Verify container respects the deployed compatibility by checking it works at all
-      // (this is the actual test for ctx.exports fix - if it fails to create, we'd have errored above)
-    } finally {
-      if (containerId) await destroyTestContainer(url, token, containerId, sessionId);
-    }
-  });
-
-  await runner.runTest("Container: git clone works through GitHub egress", async () => {
-    const sessionId = await createToolSession(client);
-    let containerId: string | undefined;
-
-    try {
-      const createData = await invokeTool<{ containerId?: string; status?: string }>(
-        url,
-        token,
-        "container_create",
-        {},
-        sessionId
-      );
-      containerId = createData.result.details.containerId;
-      if (!containerId) throw new Error(`Container create did not return containerId: ${JSON.stringify(createData)}`);
-      trackTestContainer(containerId, sessionId);
-      if (createData.result.details.status !== "healthy") throw new Error(`Container not healthy: ${JSON.stringify(createData)}`);
-
-      const cloneCommand = [
-        "rm -rf /workspace/test-clone",
-        "git clone --depth 1 https://github.com/asselstine/clawflare.git /workspace/test-clone",
-        "ls -la /workspace/test-clone/",
-      ].join(" && ");
-
-      const bashData = await invokeTool<{ ok?: boolean; exitCode: number | null }>(
-        url,
-        token,
-        "container_bash",
-        { containerId, command: cloneCommand, cwd: "/workspace" },
-        sessionId
-      );
-      if (!bashData.result.details.ok || bashData.result.details.exitCode !== 0) {
-        throw new Error(`Git clone failed: ${JSON.stringify(bashData)}`);
-      }
-    } finally {
-      if (containerId) await destroyTestContainer(url, token, containerId, sessionId);
-    }
-  });
-
-  await runner.runTest("404 on unknown endpoint", async () => {
-    const response = await fetch(`${url}/unknown-endpoint`, { headers: { Authorization: `Bearer ${token}` } });
-    if (response.status !== 404) throw new Error(`Expected 404, got ${response.status}`);
-  });
-
+  await runE2ETests(runner, context);
   runner.printSummary();
 }
 
@@ -875,7 +587,7 @@ async function runManualTesting(url: string, token: string): Promise<void> {
   console.log("\n🎨 Launching TUI for manual testing...");
   console.log(`   URL: ${url}`);
   console.log(`   Token: ${token}`);
-  console.log("\n   Press Ctrl+C to exit. The remote Worker is deleted when this process exits.\n");
+  console.log("\n   Press Ctrl+C to exit. The local Worker is stopped when this process exits.\n");
 
   const cliPath = pathResolve(process.cwd(), "..", "cli", "dist", "index.js");
   const child = spawn("node", [cliPath, "--host", url, "--token", token], {
@@ -891,33 +603,37 @@ async function runManualTesting(url: string, token: string): Promise<void> {
   });
 }
 
-function parseArgs(): { help: boolean; ui: boolean; keepAlive: boolean } {
+function parseArgs(): { help: boolean; ui: boolean; keepAlive: boolean; remote: boolean } {
   const args = process.argv.slice(2);
   return {
     help: args.includes("--help") || args.includes("-h"),
     ui: args.includes("--ui") || args.includes("-u"),
     keepAlive: args.includes("--keep-alive") || args.includes("-k"),
+    remote: args.includes("--remote"),
   };
 }
 
 function printHelp(): void {
   console.log(`
-Clawflare Remote E2E Tests
+Clawflare E2E Tests
 
 Usage:
-  pnpm test                    Deploy remote test Worker, run tests, tear down
-  pnpm test --ui               Deploy remote test Worker and launch TUI
-  pnpm test --keep-alive       Keep remote test Worker after tests
+  pnpm test                    Start local Wrangler Worker, run tests, tear down
+  pnpm test --ui               Start local Worker and launch TUI
+  pnpm test --keep-alive       Keep local Worker running after tests
+  pnpm test --remote           Deploy remote test Worker, run tests, tear down
   pnpm test --help             Show help
 
 Environment variables:
-  CLOUDFLARE_API_TOKEN or CF_API_TOKEN  Wrangler authentication token
+  CLAWFLARE_E2E_PORT                    Local test port (default ${DEFAULT_LOCAL_PORT})
+  CLOUDFLARE_API_TOKEN or CF_API_TOKEN  Wrangler authentication token (remote mode)
 
 The test suite will:
-  1. Deploy a unique remote Worker named ${runtimeNames.e2eWorkerPrefix}-<id>
-  2. Tag the Worker version as e2e
-  3. Run API tests against the workers.dev URL
-  4. Delete the Worker and temp config unless --keep-alive is used
+  1. Generate a temporary Wrangler test config
+  2. Apply D1 migrations to a local D1 database
+  3. Start the Worker with wrangler dev on localhost
+  4. Run API tests against the local URL
+  5. Stop Wrangler and remove the temp config unless --keep-alive is used
 `);
 }
 
@@ -1027,7 +743,27 @@ async function cleanupOldContainerImages(currentWorkerName?: string): Promise<vo
 
 let pendingConfigPath: string | null = null;
 
-async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keepAlive: boolean, configPathOverride?: string | null): Promise<void> {
+function stopLocalWrangler(proc: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      resolve();
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      proc.kill("SIGKILL");
+      resolve();
+    }, 5000);
+
+    proc.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+    proc.kill("SIGTERM");
+  });
+}
+
+async function cleanupDeployment(deployment: TestDeployment | null, keepAlive: boolean, configPathOverride?: string | null): Promise<void> {
   if (cleanupStarted) return;
   cleanupStarted = true;
   const configPathToDelete = configPathOverride ?? deployment?.configPath;
@@ -1041,10 +777,33 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
   }
 
   if (keepAlive) {
-    console.log("\n⏳ Keep-alive mode - remote test resources were not deleted");
+    console.log("\n⏳ Keep-alive mode - test resources were not deleted");
     console.log(`   Worker: ${deployment.workerName}`);
     if (deployment.url) console.log(`   URL: ${deployment.url}`);
     if (deployment.configPath) console.log(`   Config: ${deployment.configPath}`);
+    return;
+  }
+
+  if (deployment.mode === "local") {
+    console.log("\n🧹 Tearing down local E2E resources...");
+
+    if (deployment.url && activeAuthToken) {
+      await cleanupAllContainers(deployment.url, activeAuthToken);
+    }
+
+    if (deployment.devProcess) {
+      await stopLocalWrangler(deployment.devProcess);
+      console.log("   ✓ Local Wrangler stopped");
+    }
+
+    try {
+      if (configPathToDelete) await rm(configPathToDelete, { force: true });
+      console.log("   ✓ Temp config removed");
+    } catch (error) {
+      console.error(`   ✗ Failed to remove temp config ${configPathToDelete ? pathResolve(HARNESS_DIR, configPathToDelete) : "(none)"}:`, error instanceof Error ? error.message : String(error));
+    }
+
+    await cleanupOldE2EConfigs();
     return;
   }
 
@@ -1094,8 +853,8 @@ async function cleanupRemoteDeployment(deployment: RemoteDeployment | null, keep
 
 function installShutdownHandlers(): void {
   const teardownAndExit = (signal: NodeJS.Signals) => {
-    console.log(`\n\n${signal} received. Cleaning up remote E2E resources...`);
-    void cleanupRemoteDeployment(activeDeployment, activeKeepAlive, pendingConfigPath)
+    console.log(`\n\n${signal} received. Cleaning up E2E resources...`);
+    void cleanupDeployment(activeDeployment, activeKeepAlive, pendingConfigPath)
       .catch((error) => {
         console.error("Cleanup failed:", error instanceof Error ? error.message : String(error));
         process.exitCode = 1;
@@ -1131,7 +890,7 @@ async function cleanupOldE2EConfigs(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const { help, ui, keepAlive } = parseArgs();
+  const { help, ui, keepAlive, remote } = parseArgs();
   activeKeepAlive = keepAlive;
   installShutdownHandlers();
 
@@ -1140,13 +899,13 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  console.log("🎯 Clawflare Remote E2E Test Suite");
+  console.log(remote ? "🎯 Clawflare Remote E2E Test Suite" : "🎯 Clawflare Local E2E Test Suite");
   console.log("=".repeat(60));
 
-  let deployment: RemoteDeployment | null = null;
+  let deployment: TestDeployment | null = null;
 
   try {
-    deployment = await deployRemote();
+    deployment = remote ? await deployRemote() : await deployLocal();
     activeDeployment = deployment;
 
     if (ui) {
@@ -1155,13 +914,13 @@ async function main(): Promise<void> {
       activeAuthToken = token;
       await runManualTesting(deployment.url, token);
     } else {
-      await runTests(deployment.url);
+      await runTests(deployment.url, deployment.devProcess);
     }
   } catch (error) {
     console.error("\n❌ Fatal error:", error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   } finally {
-    await cleanupRemoteDeployment(deployment, keepAlive, pendingConfigPath);
+    await cleanupDeployment(deployment, keepAlive, pendingConfigPath);
     if (!keepAlive) process.exit(process.exitCode || 0);
   }
 }

@@ -9,6 +9,7 @@ import {
   SessionRepository,
   SessionRuntimeRepository,
   SessionRunRepository,
+  ToolRunRepository,
   type SessionListFilter,
   type SessionMetadataState,
 } from "../../data/index.js";
@@ -324,7 +325,7 @@ function latestTurn(session: AgentSessionState): AgentTurnState | undefined {
   return session.turns.at(-1);
 }
 
-function containerBashAsyncState(value: unknown): {
+function containerBashToolRunState(value: unknown): {
   containerId: string;
   commandId: string;
 } | undefined {
@@ -379,19 +380,21 @@ async function stopRunningWorkflowTools(
   if (stoppable.length === 0) return { stoppedToolCallIds: [], errors: [] };
 
   const errors: string[] = [];
+  const toolRuns = new ToolRunRepository(env.DB);
   for (const toolCall of stoppable) {
-    const asyncState = containerBashAsyncState(toolCall.asyncState);
-    if (!asyncState || toolCall.status !== "running") continue;
+    const toolRun = await toolRuns.findByToolCall(sessionId, toolCall.id);
+    const toolRunState = containerBashToolRunState(toolRun?.internalState);
+    if (!toolRunState || toolCall.status !== "running") continue;
     try {
-      await containerBashCancel(env, asyncState.containerId, asyncState.commandId);
+      await containerBashCancel(env, toolRunState.containerId, toolRunState.commandId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       errors.push(`${toolCall.id}: ${message}`);
       logger.warn("Failed to cancel running container bash command during session stop", {
         sessionId,
         toolCallId: toolCall.id,
-        containerId: asyncState.containerId,
-        commandId: asyncState.commandId,
+        containerId: toolRunState.containerId,
+        commandId: toolRunState.commandId,
         error: message,
       });
     }
@@ -417,7 +420,6 @@ async function stopRunningWorkflowTools(
         status: "aborted",
         isError: true,
         result: stoppedResults.get(id),
-        asyncState: undefined,
       }];
     })),
     turns: currentTurn

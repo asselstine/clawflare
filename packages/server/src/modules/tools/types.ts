@@ -38,6 +38,7 @@ export interface RuntimeTool<TParameters extends TSchema = TSchema> extends Omit
     params: Static<TParameters>,
     signal?: AbortSignal,
     onUpdate?: AgentToolUpdateCallback,
+    toolRunState?: unknown,
   ) => Promise<AgentToolResult<unknown>>;
 }
 

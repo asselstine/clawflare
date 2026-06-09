@@ -90,6 +90,7 @@ export async function invokeTool(args: {
   name: string;
   input?: unknown;
   signal?: AbortSignal;
+  toolRunState?: unknown;
 }): Promise<AgentToolResult<unknown>> {
   const tools = await loadSessionTools(args.env, args.toolCtx?.sessionId);
   const tool = tools.find((candidate) => candidate.name === args.name);
@@ -101,6 +102,8 @@ export async function invokeTool(args: {
     createBuiltinToolRuntimeContext({ env: args.env, ctx: args.ctx, toolCtx: args.toolCtx }),
     crypto.randomUUID(),
     args.input as never,
-    args.signal
+    args.signal,
+    undefined,
+    args.toolRunState
   );
 }

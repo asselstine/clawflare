@@ -6,6 +6,7 @@ import {
   SessionRepository,
   SessionRunRepository,
   SessionRuntimeRepository,
+  ToolRunRepository,
   type SessionRun,
   type SessionInputEvent,
 } from "../data/index.js";
@@ -177,7 +178,7 @@ function requireAgentSessionState(value: unknown): AgentSessionState {
 function isNextStepInfo(value: unknown): value is NextStepInfo {
   return (
     isRecord(value) &&
-    (value.type === "assistant" || value.type === "tool" || value.type === "complete" || value.type === "finalize") &&
+    (value.type === "assistant" || value.type === "tool" || value.type === "complete") &&
     typeof value.stepId === "string" &&
     typeof value.displayName === "string" &&
     (value.toolCallId === undefined || typeof value.toolCallId === "string") &&
@@ -416,6 +417,10 @@ async function createWorkflowAgent(
     model: components.model,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     tools,
+    toolRuns: new ToolRunRepository(env.DB),
+    onTerminalToolRun: () => {
+      ctx?.waitUntil(recoverSessionRuns(env, { limit: 1, ctx }));
+    },
     toolRuntimeContext: createBuiltinToolRuntimeContext({
       env,
       ctx,
@@ -558,24 +563,13 @@ async function markPromptCancelled(
 }
 
 export interface RunSessionRunOptions {
-  budgetMs?: number;
   leaseMs?: number;
   workerId?: string;
   ctx?: ExecutionContext;
 }
 
-const DEFAULT_RUN_BUDGET_MS = 20_000;
-const DEFAULT_RUN_LEASE_MS = 65 * 60_000;
-const RUN_BUDGET_BUFFER_MS = 1_500;
-const TOOL_RESULT_PERSISTENCE_BUFFER_MS = 4_000;
-const PENDING_TOOL_FAST_POLL_WINDOW_MS = 5_000;
-const PENDING_TOOL_INLINE_CONTINUATION_MAX_DELAY_MS = 25_000;
-
-class TimeBudgetExceeded extends Error {
-  constructor() {
-    super("Session run yielded before the Worker time budget expired");
-  }
-}
+const DEFAULT_RUN_LEASE_MS = 120_000;
+const PENDING_TOOL_FAST_FALLBACK_WINDOW_MS = 5_000;
 
 class PendingToolYield extends Error {
   constructor(readonly delayMs: number) {
@@ -589,19 +583,21 @@ class SessionRunCancelled extends Error {
   }
 }
 
-function isAsyncStateRecord(value: unknown): value is Record<string, unknown> {
+function isToolRunStateRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function asyncStateStartedAt(asyncState: unknown): number | undefined {
-  return isAsyncStateRecord(asyncState) && typeof asyncState.startedAt === "number" ? asyncState.startedAt : undefined;
+function toolRunStateStartedAt(toolRunState: unknown): number | undefined {
+  return isToolRunStateRecord(toolRunState) && typeof toolRunState.startedAt === "number"
+    ? toolRunState.startedAt
+    : undefined;
 }
 
-export function pendingToolPollDelayMs(startedAt: number | undefined, now = Date.now()): number {
+export function pendingToolFallbackDelayMs(startedAt: number | undefined, now = Date.now()): number {
   if (startedAt === undefined) return 250;
   const elapsedMs = Math.max(0, now - startedAt);
 
-  if (elapsedMs < PENDING_TOOL_FAST_POLL_WINDOW_MS) return 250;
+  if (elapsedMs < PENDING_TOOL_FAST_FALLBACK_WINDOW_MS) return 250;
   if (elapsedMs < 15_000) return 500;
   if (elapsedMs < 30_000) return 1_000;
   if (elapsedMs < 60_000) return 2_000;
@@ -610,46 +606,32 @@ export function pendingToolPollDelayMs(startedAt: number | undefined, now = Date
   return 25_000;
 }
 
-function runningAsyncToolPollDelay(session: AgentSessionState, toolCallIds?: string[]): number | undefined {
+async function pendingToolFallbackDelay(
+  env: Env,
+  session: AgentSessionState,
+  toolCallIds?: string[],
+): Promise<number | undefined> {
   const ids = toolCallIds ?? Object.keys(session.toolCalls);
-  const delays = ids.flatMap((toolCallId) => {
+  const toolRuns = new ToolRunRepository(env.DB);
+  const delays = (await Promise.all(ids.map(async (toolCallId) => {
     const toolCall = session.toolCalls[toolCallId];
-    if (toolCall?.status !== "running" || toolCall.asyncState === undefined) return [];
-    return [pendingToolPollDelayMs(asyncStateStartedAt(toolCall.asyncState))];
-  });
+    if (toolCall?.status !== "running") return undefined;
+    const toolRun = await toolRuns.findByToolCall(session.id, toolCallId);
+    if (toolRun?.status !== "running") return undefined;
+    return pendingToolFallbackDelayMs(toolRunStateStartedAt(toolRun.internalState));
+  }))).filter((delay): delay is number => delay !== undefined);
+
   return delays.length > 0 ? Math.min(...delays) : undefined;
-}
-
-export function toolExecutionTimeoutForDeadline(deadline: number, now = Date.now()): number {
-  return Math.max(1, deadline - now - TOOL_RESULT_PERSISTENCE_BUFFER_MS);
-}
-
-function cachedStepHasRunningAsyncTool(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  const session = value.session;
-  return isAgentSessionState(session) && runningAsyncToolPollDelay(session) !== undefined;
 }
 
 class SessionRunCheckpointContext {
   constructor(
     private readonly repo: SessionRunRepository,
     private readonly run: SessionRun,
-    private readonly deadline: number,
     private readonly timing: WorkflowTimingLog,
   ) {}
 
-  assertBudget(): void {
-    if (Date.now() + RUN_BUDGET_BUFFER_MS >= this.deadline) {
-      throw new TimeBudgetExceeded();
-    }
-  }
-
-  toolExecutionTimeoutMs(now = Date.now()): number {
-    return toolExecutionTimeoutForDeadline(this.deadline, now);
-  }
-
   async assertCanContinue(): Promise<void> {
-    this.assertBudget();
     const latest = await this.repo.find(this.run.id);
     if (latest?.status === "cancel_requested" || latest?.status === "cancelled") {
       throw new SessionRunCancelled();
@@ -660,13 +642,8 @@ class SessionRunCheckpointContext {
     await this.assertCanContinue();
     const cached = await this.repo.getCompletedStep(this.run.id, name);
     if (cached !== undefined) {
-      if (cachedStepHasRunningAsyncTool(cached)) {
-        await this.repo.deleteCompletedStep(this.run.id, name);
-        this.timing("workflow.step.pending_cache_discarded", undefined, { stepName: name });
-      } else {
-        this.timing("workflow.step.replayed", undefined, { stepName: name });
-        return cached as T;
-      }
+      this.timing("workflow.step.replayed", undefined, { stepName: name });
+      return cached as T;
     }
 
     const stepStart = timingStart();
@@ -686,8 +663,6 @@ export async function runSessionRun(
   const repo = new SessionRunRepository(env.DB);
   const workerId = options.workerId ?? crypto.randomUUID();
   const leaseMs = options.leaseMs ?? DEFAULT_RUN_LEASE_MS;
-  const budgetMs = options.budgetMs ?? DEFAULT_RUN_BUDGET_MS;
-  const deadline = Date.now() + budgetMs;
   const claimStart = timingStart();
   const claimed = await repo.claim({ runId, workerId, leaseMs });
   if (!claimed) return;
@@ -700,14 +675,14 @@ export async function runSessionRun(
     workerId,
     attempt: claimed.attempt,
     leaseMs,
-    budgetMs,
   });
 
-  const checkpoints = new SessionRunCheckpointContext(repo, claimed, deadline, timing);
+  const checkpoints = new SessionRunCheckpointContext(repo, claimed, timing);
 
   try {
     const runtime = new SessionRuntimeRepository(env.DB);
     await runtime.setActive(sessionId, true);
+    await runtime.clearWorkflowWaiting(sessionId);
 
     if (claimed.input.type !== "prompt") {
       await repo.cancel(runId);
@@ -736,42 +711,15 @@ export async function runSessionRun(
       return;
     }
 
-    if (error instanceof TimeBudgetExceeded) {
-      await repo.releaseRunnable(runId, workerId);
-      const continuationScheduled = Boolean(options.ctx);
-      timing("workflow.run.yielded", undefined, {
-        runId,
-        reason: "time_budget",
-        continuationScheduled,
-      });
-      options.ctx?.waitUntil(runSessionRun(env, runId, {
-        budgetMs,
-        leaseMs,
-        ctx: options.ctx,
-      }));
-      return;
-    }
-
     if (error instanceof PendingToolYield) {
+      const runtime = new SessionRuntimeRepository(env.DB);
+      await runtime.markWorkflowWaiting(sessionId);
       await repo.releaseRunnable(runId, workerId, error.delayMs);
-      const continuationScheduled = Boolean(options.ctx) &&
-        error.delayMs <= PENDING_TOOL_INLINE_CONTINUATION_MAX_DELAY_MS;
       timing("workflow.run.yielded", undefined, {
         runId,
         reason: "pending_tool",
-        pollDelayMs: error.delayMs,
-        continuationScheduled,
+        fallbackDelayMs: error.delayMs,
       });
-      if (continuationScheduled) {
-        options.ctx?.waitUntil((async () => {
-          await new Promise((resolve) => setTimeout(resolve, error.delayMs));
-          await runSessionRun(env, runId, {
-            budgetMs,
-            leaseMs,
-            ctx: options.ctx,
-          });
-        })());
-      }
       return;
     }
 
@@ -793,12 +741,11 @@ export async function runSessionRun(
 
 export async function recoverSessionRuns(
   env: Env,
-  options: { limit?: number; budgetMs?: number; ctx?: ExecutionContext } = {},
+  options: { limit?: number; ctx?: ExecutionContext } = {},
 ): Promise<void> {
   const repo = new SessionRunRepository(env.DB);
   const due = await repo.listDue(options.limit ?? 5);
   await Promise.all(due.map((run) => runSessionRun(env, run.id, {
-    budgetMs: options.budgetMs,
     ctx: options.ctx,
   })));
 }
@@ -925,7 +872,7 @@ async function processPrompt(
     nextStep = optionalNextStepInfo(enqueued.nextStep);
 
     const replayedRuntime = await new SessionRuntimeRepository(env.DB).getWorkflowSession(sessionId);
-    if (isAgentSessionState(replayedRuntime) && runningAsyncToolPollDelay(replayedRuntime) !== undefined) {
+    if (isAgentSessionState(replayedRuntime) && await pendingToolFallbackDelay(env, replayedRuntime) !== undefined) {
       agentSession = replayedRuntime;
       nextStep = Agent.determineNextStep(agentSession);
       timing("workflow.session.replayed_runtime_pending_tool", undefined, {
@@ -979,11 +926,6 @@ async function processPrompt(
                   agentContext,
                   stepTiming,
                   () => promptApiTimingDetails(input),
-                  {
-                    toolExecutionTimeoutMs: currentStep.type === "tool"
-                      ? checkpoints.toolExecutionTimeoutMs()
-                      : undefined,
-                  },
                 );
                 return agent.runSingleStep(agentSession, currentStep);
               })();
@@ -1018,7 +960,7 @@ async function processPrompt(
           });
 
           if (currentStep.type === "tool") {
-            const delayMs = runningAsyncToolPollDelay(result.session, currentStep.toolCallIds);
+            const delayMs = await pendingToolFallbackDelay(env, result.session, currentStep.toolCallIds);
             if (delayMs !== undefined) throw new PendingToolYield(delayMs);
           }
 
@@ -1092,7 +1034,7 @@ async function processPrompt(
       });
     });
   } catch (error) {
-    if (error instanceof TimeBudgetExceeded || error instanceof PendingToolYield) {
+    if (error instanceof PendingToolYield) {
       throw error;
     }
 

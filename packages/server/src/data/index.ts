@@ -118,6 +118,18 @@ export type {
 export { SessionRunRepository } from "./session-runs.js";
 
 // =============================================================================
+// Tool Runs
+// =============================================================================
+
+export type {
+  ToolRun,
+  ToolRunStatus,
+  MarkToolRunRunningParams,
+  MarkToolRunTerminalParams,
+} from "./tool-runs.js";
+export { ToolRunRepository } from "./tool-runs.js";
+
+// =============================================================================
 // Session Tools
 // =============================================================================
 

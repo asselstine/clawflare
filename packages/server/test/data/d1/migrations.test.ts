@@ -53,7 +53,7 @@ function parseTables(sql: string): string[] {
  */
 function parseIndexes(sql: string): string[] {
   const indexes: string[] = [];
-  const regex = /CREATE INDEX\s+(?:IF NOT EXISTS\s+)?(\w+)\s+ON/gi;
+  const regex = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF NOT EXISTS\s+)?(\w+)\s+ON/gi;
   let match;
   while ((match = regex.exec(sql)) !== null) {
     indexes.push(match[1]!);
@@ -93,6 +93,7 @@ describe("migrations", () => {
         "session_events",
         "session_input_queue",
         "session_runtime",
+        "tool_runs",
         "stored_code",
         "egress_handlers",
       ]) {
@@ -141,6 +142,7 @@ describe("migrations", () => {
       "session_counters",
       "session_input_queue",
       "session_runtime",
+      "tool_runs",
       "stored_code",
       "egress_handlers",
     ];
@@ -163,6 +165,7 @@ describe("migrations", () => {
       "idx_session_events_timestamp",
       "idx_session_input_queue_session_sequence",
       "idx_session_runtime_active",
+      "idx_tool_runs_session_tool_call",
       "idx_stored_code_workspace_updated",
       "idx_stored_code_workspace_name",
       "idx_egress_handlers_enabled",

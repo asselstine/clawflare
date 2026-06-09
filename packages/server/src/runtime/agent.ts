@@ -7,8 +7,9 @@ import type {
   ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Context, Message, Model, ToolResultMessage } from "@earendil-works/pi-ai";
-import { streamSimple, validateToolArguments } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai";
 import type { RuntimeTool, ToolRuntimeContext } from "../modules/tools/types.js";
+import { ToolExecutionService, type DurableToolRunStore } from "./tool-execution.js";
 
 export type QueueMode = "all" | "one-at-a-time";
 
@@ -20,7 +21,6 @@ export interface AgentToolCallState {
   status: "pending" | "running" | "complete" | "error" | "aborted";
   result?: AgentToolResult<unknown>;
   isError?: boolean;
-  asyncState?: unknown;
 }
 
 export interface AgentTurnState {
@@ -56,6 +56,8 @@ export interface AgentConfig {
   tools: RuntimeTool[];
   toolRuntimeContext: ToolRuntimeContext;
   toolExecutionTimeoutMs?: number;
+  toolRuns?: DurableToolRunStore;
+  onTerminalToolRun?: (sessionId: string, toolCallId: string) => void | Promise<void>;
   streamFn?: StreamFn;
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
@@ -90,7 +92,7 @@ export interface CompleteTurnResult extends AgentStepResult {
 }
 
 // Workflow step types for decoupled execution
-export type StepType = "assistant" | "tool" | "complete" | "finalize";
+export type StepType = "assistant" | "tool" | "complete";
 
 export interface NextStepInfo {
   type: StepType;
@@ -107,78 +109,11 @@ export interface RunStepResult extends AgentStepResult {
   shouldStop: boolean;
 }
 
-const DEFAULT_TOOL_EXECUTION_TIMEOUT_MS = 65_000;
-const TOOL_EXECUTION_TIMEOUT_BUFFER_MS = 5_000;
-
 export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
   return sanitizeToolResultHistory(messages.filter(
     (message): message is Message =>
       message.role === "user" || message.role === "assistant" || message.role === "toolResult",
   ));
-}
-
-function effectiveToolExecutionTimeoutMs(timeoutMs: number | undefined): number {
-  if (timeoutMs === undefined) return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs)) return DEFAULT_TOOL_EXECUTION_TIMEOUT_MS;
-  return Math.max(1, Math.floor(timeoutMs));
-}
-
-function requestedToolExecutionTimeoutMs(params: unknown): number | undefined {
-  if (typeof params !== "object" || params === null || Array.isArray(params)) return undefined;
-  const timeoutMs = (params as Record<string, unknown>).timeoutMs;
-  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs)) return undefined;
-  return Math.max(1, Math.floor(timeoutMs) + TOOL_EXECUTION_TIMEOUT_BUFFER_MS);
-}
-
-function toolAbortError(): Error {
-  const error = new Error("Tool execution aborted.");
-  error.name = "AbortError";
-  return error;
-}
-
-async function runWithToolTimeout<T>(
-  timeoutMs: number | undefined,
-  signal: AbortSignal | undefined,
-  callback: (signal: AbortSignal) => Promise<T>,
-): Promise<T> {
-  const timeout = effectiveToolExecutionTimeoutMs(timeoutMs);
-  if (signal?.aborted) throw toolAbortError();
-
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  signal?.addEventListener("abort", onAbort, { once: true });
-
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  let finished = false;
-
-  const cleanup = () => {
-    if (finished) return;
-    finished = true;
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-    signal?.removeEventListener("abort", onAbort);
-  };
-
-  const toolPromise = Promise.resolve().then(() => callback(controller.signal));
-  toolPromise.catch(() => undefined);
-
-  const timeoutPromise = new Promise<never>((_resolve, reject) => {
-    timeoutId = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`Tool execution timed out after ${timeout}ms.`));
-    }, timeout);
-  });
-
-  const abortPromise = new Promise<never>((_resolve, reject) => {
-    controller.signal.addEventListener("abort", () => {
-      if (signal?.aborted) reject(toolAbortError());
-    }, { once: true });
-  });
-
-  try {
-    return await Promise.race([toolPromise, timeoutPromise, abortPromise]);
-  } finally {
-    cleanup();
-  }
 }
 
 function assistantToolCallIds(message: AssistantMessage): Set<string> {
@@ -236,40 +171,11 @@ function extractToolCalls(message: AssistantMessage): AgentToolCall[] {
   return message.content.filter((item): item is AgentToolCall => item.type === "toolCall");
 }
 
-function createErrorToolResult(message: string, details: Record<string, unknown> = {}): AgentToolResult<unknown> {
-  return {
-    content: [{ type: "text", text: message }],
-    details,
-  };
-}
-
-function isErroredToolResult(result: AgentToolResult<unknown>): boolean {
-  const details = result.details;
-  return typeof details === "object" && details !== null && "ok" in details && details.ok === false;
-}
-
-function isAbortedToolResult(result: AgentToolResult<unknown>): boolean {
-  const details = result.details;
-  if (typeof details !== "object" || details === null) return false;
-  return (details as Record<string, unknown>).aborted === true ||
-    (details as Record<string, unknown>).stopped === true;
-}
-
-function isPendingToolResult(result: AgentToolResult<unknown>): boolean {
-  const details = result.details;
-  return typeof details === "object" && details !== null && "pending" in details && details.pending === true;
-}
-
-function pendingToolAsyncState(result: AgentToolResult<unknown>): unknown {
-  const details = result.details;
-  if (typeof details !== "object" || details === null || !("asyncState" in details)) return undefined;
-  return (details as { asyncState?: unknown }).asyncState;
-}
-
 function createToolResultMessage(
-  toolCall: AgentToolCallState,
+  toolCall: Pick<AgentToolCallState, "id" | "name">,
   result: AgentToolResult<unknown>,
   isError: boolean,
+  timestamp = now(),
 ): ToolResultMessage {
   return {
     role: "toolResult",
@@ -278,7 +184,7 @@ function createToolResultMessage(
     content: result.content,
     details: result.details,
     isError,
-    timestamp: now(),
+    timestamp,
   };
 }
 
@@ -345,12 +251,19 @@ export function createEmptyAgentSession(args: {
 }
 
 export class Agent {
-  private readonly toolsByName: Map<string, RuntimeTool>;
+  private readonly toolExecution: ToolExecutionService;
   private readonly streamFn: StreamFn;
   private readonly convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 
   constructor(private readonly config: AgentConfig) {
-    this.toolsByName = new Map(config.tools.map((tool) => [tool.name, tool]));
+    this.toolExecution = new ToolExecutionService({
+      tools: config.tools,
+      toolRuntimeContext: config.toolRuntimeContext,
+      toolExecutionTimeoutMs: config.toolExecutionTimeoutMs,
+      toolRuns: config.toolRuns,
+      onTerminalToolRun: config.onTerminalToolRun,
+      debugTiming: config.debugTiming,
+    });
     this.streamFn = config.streamFn ?? streamSimple;
     this.convertToLlm = config.convertToLlm ?? defaultConvertToLlm;
   }
@@ -715,13 +628,6 @@ export class Agent {
 
     const events: AgentEvent[] = [];
     const pendingEventAppends: Promise<void>[] = [];
-    const tool = this.toolsByName.get(toolCall.name);
-    const toolStepStart = now();
-    this.config.debugTiming?.("tool.start", undefined, {
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      hasTool: Boolean(tool),
-    });
     events.push({
       type: "tool_execution_start",
       toolCallId: toolCall.id,
@@ -730,88 +636,30 @@ export class Agent {
     });
     await this.config.onEvent?.(events[events.length - 1]!);
 
-    let result: AgentToolResult<unknown>;
-    let isError = false;
-
-    if (!tool) {
-      result = createErrorToolResult(`Tool ${toolCall.name} not found`);
-      isError = true;
-    } else {
-      try {
-        const argsStart = now();
-        const preparedArgs = tool.prepareArguments ? tool.prepareArguments(toolCall.args) : toolCall.args;
-        const validatedArgs = validateToolArguments(tool, {
-          id: toolCall.id,
-          name: toolCall.name,
-          arguments: preparedArgs,
-          type: "toolCall",
-        } as AgentToolCall);
-        const executableArgs = toolCall.asyncState &&
-          typeof validatedArgs === "object" &&
-          validatedArgs !== null &&
-          !Array.isArray(validatedArgs)
-          ? { ...(validatedArgs as Record<string, unknown>), _asyncState: toolCall.asyncState }
-          : validatedArgs;
-        this.config.debugTiming?.("tool.args.validated", argsStart, {
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-        });
-
-        const executeStart = now();
-        result = await runWithToolTimeout(
-          this.config.toolExecutionTimeoutMs ?? requestedToolExecutionTimeoutMs(executableArgs),
-          signal,
-          (toolSignal) => tool.execute(this.config.toolRuntimeContext, toolCall.id, executableArgs as never, toolSignal, (partialResult) => {
-            const event: AgentEvent = {
-              type: "tool_execution_update",
-              toolCallId: toolCall.id,
-              toolName: toolCall.name,
-              args: toolCall.args,
-              partialResult,
-            };
-            events.push(event);
-            const append = this.config.onEvent?.(event);
-            if (append) pendingEventAppends.push(Promise.resolve(append));
-          }),
-        );
-        isError = isErroredToolResult(result) || isAbortedToolResult(result);
-        this.config.debugTiming?.("tool.execute.done", executeStart, {
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          contentLength: JSON.stringify(result.content).length,
-        });
-      } catch (error) {
-        const aborted = error instanceof Error && error.name === "AbortError";
-        result = createErrorToolResult(error instanceof Error ? error.message : String(error), {
-          ok: false,
-          ...(aborted ? { aborted: true, reason: "abort_signal" } : {}),
-        });
-        isError = true;
-        this.config.debugTiming?.("tool.execute.error", toolStepStart, {
-          toolCallId: toolCall.id,
-          toolName: toolCall.name,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    this.config.debugTiming?.("tool.done", toolStepStart, {
-      toolCallId: toolCall.id,
-      toolName: toolCall.name,
-      isError,
+    const toolRun = await this.toolExecution.runOrResume(toolCall, signal, (partialResult) => {
+      const event: AgentEvent = {
+        type: "tool_execution_update",
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        args: toolCall.args,
+        partialResult,
+      };
+      events.push(event);
+      const append = this.config.onEvent?.(event);
+      if (append) pendingEventAppends.push(Promise.resolve(append));
     });
+
     if (pendingEventAppends.length > 0) {
       await Promise.all(pendingEventAppends);
     }
 
-    if (isPendingToolResult(result)) {
-      const asyncState = pendingToolAsyncState(result);
+    if (toolRun.status === "running") {
       const pendingEvent: AgentEvent = {
         type: "tool_execution_update",
         toolCallId: toolCall.id,
         toolName: toolCall.name,
         args: toolCall.args,
-        partialResult: result,
+        partialResult: toolRun.result,
       };
       events.push(pendingEvent);
       await this.config.onEvent?.(pendingEvent);
@@ -824,8 +672,7 @@ export class Agent {
           [toolCall.id]: {
             ...toolCall,
             status: "running",
-            result,
-            asyncState,
+            result: toolRun.result,
           },
         },
       };
@@ -837,12 +684,12 @@ export class Agent {
       type: "tool_execution_end",
       toolCallId: toolCall.id,
       toolName: toolCall.name,
-      result,
-      isError,
+      result: toolRun.result,
+      isError: toolRun.isError,
     });
     await this.config.onEvent?.(events[events.length - 1]!);
 
-    const toolResultMessage = createToolResultMessage(toolCall, result, isError);
+    const toolResultMessage = createToolResultMessage(toolCall, toolRun.result, toolRun.isError, now());
     const messageStartEvent: AgentEvent = { type: "message_start", message: toolResultMessage };
     events.push(messageStartEvent);
     await this.config.onEvent?.(messageStartEvent);
@@ -866,8 +713,8 @@ export class Agent {
         ...session.toolCalls,
         [toolCall.id]: {
           ...toolCall,
-          status: isAbortedToolResult(result) ? "aborted" : isError ? "error" : "complete",
-          isError,
+          status: toolRun.status,
+          isError: toolRun.isError,
         },
       },
       turns: nextTurn
